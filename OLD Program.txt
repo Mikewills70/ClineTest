@@ -1,0 +1,1541 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+#include <esp_task_wdt.h>
+
+// ==========================================
+// CONFIGURABLE SETTINGS (Strictly IO Numbers)
+// ==========================================
+const char* apSSID = "ESP32-LightShow";     
+const char* apPassword = "12345678";     
+const int AUDIO_PIN = 2;                    // MAX9814 microphone connected to IO2 (ADC1)
+
+// Default VU Ballistics Fallbacks
+float VU_ATTACK_RATE = 0.15;  
+float VU_RELEASE_RATE = 0.01; 
+// ==========================================
+
+Preferences preferences;
+WebServer server(80);
+
+// 240V IO Channels (Original 10-channel list using IO numbers)
+const int channelPins[10] = {11, 12, 13, 14, 21, 38, 39, 40, 41, 42};
+
+// Global Runtime Parameters
+bool audioEnabled = true;
+float clockDelay = 1.0;             
+int antifreeze = 2;                 // Global Antifreeze Time Delay
+
+String activePattern = "moving_dot";
+
+// Per-Pattern Parameters (Stored individually in EEPROM)
+float mdSpeed = 0.1; int mdQty = 1; int mdSize = 1; String mdMusic = "BASS"; int mdFreq = 50; int mdMult = 2;
+float c1Speed = 0.1; int c1Qty = 1; int c1Size = 1; String c1Music = "BASS"; int c1Freq = 50; int c1Mult = 2;
+float c10Speed = 0.1; int c10Qty = 1; int c10Size = 1; String c10Music = "BASS"; int c10Freq = 50; int c10Mult = 2;
+float ccoSpeed = 0.1; int ccoQty = 1; int ccoSize = 1; String ccoMusic = "BASS"; int ccoFreq = 50; int ccoMult = 2;
+
+// VU Specific Parameters (Stored individually in EEPROM)
+float vuSpeed = 0.1; int vuSize = 1; float vuAttack = 0.15; float vuRelease = 0.01; String vuMusic = "BASS"; int vuFreq = 50;
+float vurSpeed = 0.1; int vurSize = 1; float vurAttack = 0.15; float vurRelease = 0.01; String vurMusic = "BASS"; int vurFreq = 50;
+float vudSpeed = 0.1; int vudSize = 1; float vudAttack = 0.15; float vudRelease = 0.01; String vudMusic = "BASS"; int vudFreq = 50;
+float vucoSpeed = 0.1; int vucoSize = 1; float vucoAttack = 0.15; float vucoRelease = 0.01; String vucoMusic = "BASS"; int vucoFreq = 50;
+
+// Playlist Data Structures & State
+struct PlaylistItem {
+  char name[32];
+  bool selected;
+  char pattern[24];
+  bool audioEnabled;
+  float clockDelay;
+  int antifreeze;
+  float speed;
+  int qty;
+  int size;
+  char music[12];
+  int freq;
+  int mult;
+  float attack;
+  float release;
+};
+
+#define MAX_PLAYLIST_ITEMS 20
+PlaylistItem playlist[MAX_PLAYLIST_ITEMS];
+int playlistCount = 0;
+
+bool playlistPlaying = false;
+bool playlistRandom = false;
+int playlistDuration = 10; // 10 to 60 seconds
+int currentPlaylistIndex = 0;
+unsigned long playlistTrackStartTime = 0;
+
+// Active running audio parameters for the current pattern
+int freqThreshold = 50;
+int multiplier = 2;
+String currentMusicMode = "BASS";
+
+// Animation & Audio State Variables
+unsigned long lastStepTime = 0;
+unsigned long lastBeatTime = 0;
+unsigned long lastAcceptedBeatTime = 0;
+int currentStep = 0;
+int dotDirection = 1;               // 1 for forward, -1 for backward
+
+// Filtered Audio & Rolling Average Predictor Variables
+unsigned long lastSampleTime = 0;
+unsigned long audioWindowStart = 0;
+float filteredSample = 2048.0;
+int rawSampleVal = 2048;
+int signalMax = 0;
+int signalMin = 4095;
+int currentPeakToPeak = 0;          // Live amplitude for VU Meter
+
+unsigned long lastRealBeatTime = 0;
+#define HISTORY_SIZE 8
+unsigned long beatIntervalHistory[HISTORY_SIZE];
+int historyIndex = 0;
+int historyCount = 0;
+
+int generatedSubBeatsCount = 0;
+unsigned long nextSubBeatTargetTime = 0;
+unsigned long establishedInterval = 0;
+
+// VU Meter Master Smoothing & Peak Indicator States
+float masterVuSmooth = 0;
+
+int vuPeakLevel = 0;
+unsigned long lastVuPeakFallTime = 0;
+
+int vurPeakLevel = 0;
+unsigned long lastVurPeakFallTime = 0;
+
+// Forward declarations
+void loadPlaylistTrack(int index);
+void savePlaylistToEEPROM();
+void loadPlaylistFromEEPROM();
+
+// The HTML/JS User Interface
+const char MAIN_PAGE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>240V Control</title>
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="240V Control">
+    
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 15px;
+            padding-top: env(safe-area-inset-top, 15px);
+        }
+        
+        #splash {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: #121212;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 999;
+            transition: opacity 0.5s ease;
+        }
+        .splash-badge {
+            padding: 15px 30px;
+            border-radius: 30px;
+            font-size: 18px;
+            font-weight: bold;
+            background: #2d2d2d;
+            border: 2px solid #444;
+            color: #cf6679;
+        }
+        .splash-connected { color: #03dac6 !important; border-color: #03dac6 !important; background: #002b26 !important; }
+
+        h1 { margin-bottom: 5px; font-size: 22px; }
+        
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #1e1e1e;
+            padding: 10px 15px;
+            border-radius: 12px;
+            margin-bottom: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        .connection-badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            background: #2d2d2d;
+            border: 1px solid #444;
+        }
+        .connected { color: #03dac6; border-color: #03dac6; }
+        .disconnected { color: #cf6679; border-color: #cf6679; }
+
+        .nav-btn {
+            background-color: #3700b3;
+            color: #fff;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            margin: 0;
+            width: auto;
+        }
+        .nav-btn:active { background-color: #bb86fc; color: #121212; }
+        
+        h2 { color: #bb86fc; border-bottom: 2px solid #333; padding-bottom: 5px; margin-top: 15px; font-size: 16px; }
+        .card {
+            background: #1e1e1e;
+            padding: 15px;
+            border-radius: 12px;
+            margin-bottom: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 14px; }
+        input[type="text"], input[type="number"], select {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 12px;
+            background: #2d2d2d;
+            border: 1px solid #444;
+            color: #fff;
+            border-radius: 8px;
+            box-sizing: border-box;
+            font-size: 16px;
+        }
+        .small-input {
+            width: 90px !important;
+            display: inline-block;
+        }
+        input[type="range"] {
+            width: 100%;
+            margin-bottom: 5px;
+            accent-color: #bb86fc;
+        }
+        input:disabled, select:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+        .toggle-container { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
+        button {
+            width: 100%;
+            background-color: #bb86fc;
+            color: #121212;
+            padding: 14px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        button:active { background-color: #3700b3; color: #fff; }
+        .save-btn {
+            background-color: #03dac6;
+            margin-bottom: 15px;
+        }
+        .add-playlist-btn {
+            background-color: #ffb74d;
+            color: #121212;
+            margin-bottom: 30px;
+        }
+        .play-btn {
+            background-color: #03dac6;
+        }
+        .radio-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .radio-label {
+            font-size: 16px;
+            color: #e0e0e0;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            cursor: pointer;
+            background: #252525;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+        .radio-label input[type="radio"] {
+            width: 20px;
+            height: 20px;
+            accent-color: #bb86fc;
+        }
+        .radio-label.disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+        /* Playlist Page Specific Styling */
+        .playlist-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #252525;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #333;
+        }
+        .playlist-item input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            accent-color: #03dac6;
+            flex-shrink: 0;
+        }
+        .playlist-item input[type="text"] {
+            margin-bottom: 0;
+            flex-grow: 1;
+            padding: 8px;
+            font-size: 14px;
+        }
+        .delete-btn {
+            background-color: #cf6679;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            width: 36px;
+            height: 36px;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-top: 0;
+            flex-shrink: 0;
+        }
+        .delete-btn:active { background-color: #b00020; }
+    </style>
+</head>
+<body>
+
+    <div id="splash">
+        <h2 style="color:#bb86fc; margin-bottom:20px;">240V Master Control</h2>
+        <div id="splashStatus" class="splash-badge">Verifying Connection...</div>
+    </div>
+
+    <!-- PAGE 1: MAIN DASHBOARD -->
+    <div id="pageMain" style="display: none;">
+        <div class="navbar">
+            <div id="connectionStatus" class="connection-badge disconnected">Connecting...</div>
+            <button class="nav-btn" onclick="switchPage('playlist')">Playlist &gt;&gt;</button>
+        </div>
+
+        <h1>240V Master Control</h1>
+
+        <div class="card">
+            <h2>Global Audio Master</h2>
+            <div class="toggle-container">
+                <label for="audioToggle">Audio Reaction Enabled</label>
+                <input type="checkbox" id="audioToggle" style="width: auto;" onchange="handleAudioToggle(); updateSettings();" checked>
+            </div>
+            
+            <label for="clockDelay">Speed (Clock Timing Delay when Audio OFF): <span id="speedSecVal">1.0</span>s</label>
+            <input type="range" id="clockDelay" min="0.1" max="1.0" step="0.1" value="1.0" 
+                   oninput="document.getElementById('speedSecVal').innerText = this.value;" 
+                   onchange="updateSettings()">
+
+            <label for="globalAntifreeze" style="margin-top: 12px;">Antifreeze Time Delay (s) (1 - 9)</label>
+            <input type="number" id="globalAntifreeze" class="small-input" min="1" max="9" value="2" 
+                   onchange="updateSettings();">
+        </div>
+
+        <div class="card">
+            <h2>Select Display Pattern</h2>
+            <div class="radio-group">
+                <label class="radio-label">
+                    <input type="radio" name="patternRadio" value="moving_dot" onchange="onPatternChange(); updateSettings();" checked> Moving Dot
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="patternRadio" value="chase_1_10" onchange="onPatternChange(); updateSettings();"> Chase 1 to 10 (Beat-Driven)
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="patternRadio" value="chase_10_1" onchange="onPatternChange(); updateSettings();"> Chase 10 to 1 (Beat-Driven)
+                </label>
+                <label class="radio-label" id="label_center_out_chase">
+                    <input type="radio" name="patternRadio" value="center_out_chase" onchange="onPatternChange(); updateSettings();"> Center-Out Chase (Beat-Driven)
+                </label>
+                <label class="radio-label" id="label_vu_meter">
+                    <input type="radio" name="patternRadio" value="vu_meter" onchange="onPatternChange(); updateSettings();"> VU Meter (Bass-Driven + Peak)
+                </label>
+                <label class="radio-label" id="label_vu_meter_rev">
+                    <input type="radio" name="patternRadio" value="vu_meter_rev" onchange="onPatternChange(); updateSettings();"> VU Meter Reversed (10 to 1)
+                </label>
+                <label class="radio-label" id="label_vu_dual">
+                    <input type="radio" name="patternRadio" value="vu_dual" onchange="onPatternChange(); updateSettings();"> Dual VU Meter (1&10 to Center)
+                </label>
+                <label class="radio-label" id="label_vu_center_out">
+                    <input type="radio" name="patternRadio" value="vu_center_out" onchange="onPatternChange(); updateSettings();"> Center-Out VU Meter (5&6 to 1&10)
+                </label>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Pattern & Audio Parameters</h2>
+            
+            <div id="speedContainer">
+                <label for="sharedSpeed">Pattern Speed (0 - 0.2s): <span id="speedVal">0.1</span>s</label>
+                <input type="range" id="sharedSpeed" min="0" max="0.2" step="0.01" value="0.1" 
+                       oninput="document.getElementById('speedVal').innerText = this.value;" 
+                       onchange="saveCurrentPatternParams(); updateSettings();">
+            </div>
+            
+            <div id="qtyContainer">
+                <label for="sharedQty">Qty of Dots (1 - 10): <span id="qtyVal">1</span></label>
+                <input type="range" id="sharedQty" min="1" max="10" step="1" value="1" 
+                       oninput="document.getElementById('qtyVal').innerText = this.value;" 
+                       onchange="saveCurrentPatternParams(); updateSettings();">
+            </div>
+
+            <div id="sizeContainer">
+                <label for="sharedSize">Dot Size / Width (1 - 5): <span id="sizeVal">1</span></label>
+                <input type="range" id="sharedSize" min="1" max="5" step="1" value="1" 
+                       oninput="document.getElementById('sizeVal').innerText = this.value;" 
+                       onchange="saveCurrentPatternParams(); updateSettings();">
+            </div>
+            
+            <div id="attackContainer">
+                <label for="sharedAttack">VU Attack Rate (0.01 - 0.5): <span id="attackVal">0.15</span></label>
+                <input type="range" id="sharedAttack" min="0.01" max="0.5" step="0.01" value="0.15" 
+                       oninput="document.getElementById('attackVal').innerText = this.value;" 
+                       onchange="saveCurrentPatternParams(); updateSettings();">
+            </div>
+
+            <div id="releaseContainer">
+                <label for="sharedRelease">VU Release Rate (0.001 - 0.1): <span id="releaseVal">0.01</span></label>
+                <input type="range" id="sharedRelease" min="0.001" max="0.1" step="0.001" value="0.01" 
+                       oninput="document.getElementById('releaseVal').innerText = this.value;" 
+                       onchange="saveCurrentPatternParams(); updateSettings();">
+            </div>
+
+            <div id="freqContainer">
+                <label for="sharedFreq">Frequency Band Cutoff (0 - 100Hz): <span id="freqVal">50</span> Hz</label>
+                <input type="range" id="sharedFreq" min="0" max="100" step="1" value="50" 
+                       oninput="document.getElementById('freqVal').innerText = this.value;" 
+                       onchange="saveCurrentPatternParams(); updateSettings();">
+            </div>
+            
+            <div id="multiplierContainer">
+                <label for="sharedMultiplier">Beat Multiplier (1 - 9)</label>
+                <input type="number" id="sharedMultiplier" class="small-input" min="1" max="9" value="2" 
+                       onchange="saveCurrentPatternParams(); updateSettings();">
+            </div>
+
+            <label for="sharedMusic">Music Response Type</label>
+            <select id="sharedMusic" onchange="saveCurrentPatternParams(); updateSettings();">
+                <option value="BASS">Bass Beat Filter</option>
+                <option value="FULL">Full Range</option>
+            </select>
+        </div>
+
+        <button class="save-btn" onclick="saveToEEPROM()">Save & Persist Preferences</button>
+        <button class="add-playlist-btn" onclick="addToPlaylist()">Add to Playlist</button>
+    </div>
+
+    <!-- PAGE 2: PLAYLIST DASHBOARD -->
+    <div id="pagePlaylist" style="display: none;">
+        <div class="navbar">
+            <button class="nav-btn" onclick="switchPage('main')">&lt;&lt; Back</button>
+            <div id="connectionStatusPlaylist" class="connection-badge disconnected">Connecting...</div>
+        </div>
+
+        <h1>Playlist Control</h1>
+
+        <div class="card">
+            <h2>Playback & Timing Controls</h2>
+            <button id="playBtn" class="play-btn" onclick="togglePlaylistPlay()">PLAY</button>
+            <div class="toggle-container" style="margin-top: 15px; margin-bottom: 5px;">
+                <label for="randomToggle">Randomise Selected Tracks</label>
+                <input type="checkbox" id="randomToggle" style="width: auto;" onchange="updatePlaylistSettings()">
+            </div>
+            <label for="playlistDuration" style="margin-top: 12px;">Track Display Duration: <span id="durationVal">10</span>s (10 - 60s)</label>
+            <input type="range" id="playlistDuration" min="10" max="60" step="1" value="10" 
+                   oninput="document.getElementById('durationVal').innerText = this.value;" 
+                   onchange="updatePlaylistSettings()">
+        </div>
+
+        <div class="card">
+            <h2>Playlist Queue (Max 20 Items)</h2>
+            <div id="playlistContainer">
+                <!-- Dynamically populated playlist items -->
+            </div>
+        </div>
+    </div>
+
+<script>
+let patternConfigs = {
+    moving_dot:        { speed: 0.1, qty: 1, size: 1, attack: 0.15, release: 0.01, music: "BASS", freq: 50, multiplier: 2 },
+    chase_1_10:        { speed: 0.1, qty: 1, size: 1, attack: 0.15, release: 0.01, music: "BASS", freq: 50, multiplier: 2 },
+    chase_10_1:        { speed: 0.1, qty: 1, size: 1, attack: 0.15, release: 0.01, music: "BASS", freq: 50, multiplier: 2 },
+    center_out_chase:  { speed: 0.1, qty: 1, size: 1, attack: 0.15, release: 0.01, music: "BASS", freq: 50, multiplier: 2 },
+    vu_meter:          { speed: 0.1, qty: 1, size: 1, attack: 0.15, release: 0.01, music: "BASS", freq: 50, multiplier: 1 },
+    vu_meter_rev:      { speed: 0.1, qty: 1, size: 1, attack: 0.15, release: 0.01, music: "BASS", freq: 50, multiplier: 1 },
+    vu_dual:           { speed: 0.1, qty: 1, size: 1, attack: 0.15, release: 0.01, music: "BASS", freq: 50, multiplier: 1 },
+    vu_center_out:     { speed: 0.1, qty: 1, size: 1, attack: 0.15, release: 0.01, music: "BASS", freq: 50, multiplier: 1 }
+};
+
+let currentActivePattern = "moving_dot";
+let playlistItems = [];
+let isPlaying = false;
+
+window.addEventListener('DOMContentLoaded', () => {
+    fetchSettingsAndPlaylist();
+});
+
+function fetchSettingsAndPlaylist() {
+    fetch('/settings', { cache: 'no-store' })
+    .then(response => response.json())
+    .then(data => {
+        document.getElementById('audioToggle').checked = data.audioEnabled;
+        document.getElementById('clockDelay').value = data.clockDelay;
+        document.getElementById('speedSecVal').innerText = data.clockDelay;
+        document.getElementById('globalAntifreeze').value = data.antifreeze !== undefined ? data.antifreeze : 2;
+
+        patternConfigs.moving_dot       = { speed: data.mdSpeed, qty: data.mdQty, size: data.mdSize, attack: 0.15, release: 0.01, music: data.mdMusic, freq: data.mdFreq, multiplier: data.mdMult };
+        patternConfigs.chase_1_10       = { speed: data.c1Speed, qty: data.c1Qty, size: data.c1Size, attack: 0.15, release: 0.01, music: data.c1Music, freq: data.c1Freq, multiplier: data.c1Mult };
+        patternConfigs.chase_10_1       = { speed: data.c10Speed, qty: data.c10Qty, size: data.c10Size, attack: 0.15, release: 0.01, music: data.c10Music, freq: data.c10Freq, multiplier: data.c10Mult };
+        patternConfigs.center_out_chase = { speed: data.ccoSpeed, qty: data.ccoQty, size: data.ccoSize, attack: 0.15, release: 0.01, music: data.ccoMusic, freq: data.ccoFreq, multiplier: data.ccoMult };
+        patternConfigs.vu_meter         = { speed: data.vuSpeed, qty: 1, size: 1, attack: data.vuAttack, release: data.vuRelease, music: data.vuMusic, freq: data.vuFreq, multiplier: 1 };
+        patternConfigs.vu_meter_rev     = { speed: data.vurSpeed, qty: 1, size: 1, attack: data.vurAttack, release: data.vurRelease, music: data.vurMusic, freq: data.vurFreq, multiplier: 1 };
+        patternConfigs.vu_dual          = { speed: data.vudSpeed, qty: 1, size: 1, attack: data.vudAttack, release: data.vudRelease, music: data.vudMusic, freq: data.vudFreq, multiplier: 1 };
+        patternConfigs.vu_center_out    = { speed: data.vucoSpeed, qty: 1, size: 1, attack: data.vucoAttack, release: data.vucoRelease, music: data.vucoMusic, freq: data.vucoFreq, multiplier: 1 };
+
+        currentActivePattern = data.pattern;
+        
+        const radios = document.getElementsByName('patternRadio');
+        for (const r of radios) {
+            if (r.value === currentActivePattern) r.checked = true;
+        }
+
+        loadPatternIntoUI(currentActivePattern);
+
+        if (data.playlist) {
+            playlistItems = data.playlist;
+        }
+        if (data.playlistPlaying !== undefined) {
+            isPlaying = data.playlistPlaying;
+            updatePlayButtonUI();
+        }
+        if (data.playlistRandom !== undefined) {
+            document.getElementById('randomToggle').checked = data.playlistRandom;
+        }
+        if (data.playlistDuration !== undefined) {
+            document.getElementById('playlistDuration').value = data.playlistDuration;
+            document.getElementById('durationVal').innerText = data.playlistDuration;
+        }
+        renderPlaylist();
+
+        let sb = document.getElementById('splashStatus');
+        sb.innerText = "Connected to ESP32";
+        sb.className = "splash-badge splash-connected";
+        
+        setTimeout(() => {
+            let splash = document.getElementById('splash');
+            splash.style.opacity = '0';
+            setTimeout(() => splash.style.display = 'none', 500);
+            document.getElementById('pageMain').style.display = 'block';
+            
+            handleAudioToggle();
+        }, 1000);
+    })
+    .catch(() => {
+        let sb = document.getElementById('splashStatus');
+        sb.innerText = "Connection Failed - Refresh Page";
+    });
+}
+
+function switchPage(page) {
+    if (page === 'playlist') {
+        document.getElementById('pageMain').style.display = 'none';
+        document.getElementById('pagePlaylist').style.display = 'block';
+    } else {
+        if (isPlaying) {
+            togglePlaylistPlay(); 
+        }
+        document.getElementById('pagePlaylist').style.display = 'none';
+        document.getElementById('pageMain').style.display = 'block';
+    }
+}
+
+function handleAudioToggle() {
+    const isAudioEnabled = document.getElementById('audioToggle').checked;
+    const speedSlider = document.getElementById('clockDelay');
+    speedSlider.disabled = isAudioEnabled;
+
+    const freqInput = document.getElementById('sharedFreq');
+    const freqContainer = document.getElementById('freqContainer');
+    freqInput.disabled = !isAudioEnabled;
+    freqContainer.style.opacity = isAudioEnabled ? '1.0' : '0.3';
+
+    const audioOnlyPatterns = ['center_out_chase', 'vu_meter', 'vu_meter_rev', 'vu_dual', 'vu_center_out'];
+    const radios = document.getElementsByName('patternRadio');
+    for (const r of radios) {
+        if (audioOnlyPatterns.includes(r.value)) {
+            r.disabled = !isAudioEnabled;
+            const parentLabel = r.closest('.radio-label');
+            if (parentLabel) {
+                if (!isAudioEnabled) {
+                    parentLabel.classList.add('disabled');
+                } else {
+                    parentLabel.classList.remove('disabled');
+                }
+            }
+        }
+    }
+
+    if (!isAudioEnabled && audioOnlyPatterns.includes(currentActivePattern)) {
+        document.querySelector('input[name="patternRadio"][value="moving_dot"]').checked = true;
+        onPatternChange();
+    }
+}
+
+function getSelectedPattern() {
+    const radios = document.getElementsByName('patternRadio');
+    for (const r of radios) {
+        if (r.checked) return r.value;
+    }
+    return 'moving_dot';
+}
+
+function saveCurrentPatternParams() {
+    let multVal = parseInt(document.getElementById('sharedMultiplier').value);
+    if (currentActivePattern.startsWith('vu_')) {
+        multVal = 1;
+    }
+    patternConfigs[currentActivePattern] = {
+        speed: parseFloat(document.getElementById('sharedSpeed').value),
+        qty: parseInt(document.getElementById('sharedQty').value),
+        size: parseInt(document.getElementById('sharedSize').value),
+        attack: parseFloat(document.getElementById('sharedAttack').value),
+        release: parseFloat(document.getElementById('sharedRelease').value),
+        music: document.getElementById('sharedMusic').value,
+        freq: parseInt(document.getElementById('sharedFreq').value),
+        multiplier: multVal
+    };
+}
+
+function loadPatternIntoUI(patternKey) {
+    const config = patternConfigs[patternKey];
+
+    const speedInput = document.getElementById('sharedSpeed');
+    const qtyInput = document.getElementById('sharedQty');
+    const sizeInput = document.getElementById('sharedSize');
+    const attackInput = document.getElementById('sharedAttack');
+    const releaseInput = document.getElementById('sharedRelease');
+    const musicSelect = document.getElementById('sharedMusic');
+    const freqInput = document.getElementById('sharedFreq');
+    const multInput = document.getElementById('sharedMultiplier');
+
+    speedInput.value = config.speed;
+    document.getElementById('speedVal').innerText = config.speed;
+
+    qtyInput.value = config.qty !== undefined ? config.qty : 1;
+    document.getElementById('qtyVal').innerText = qtyInput.value;
+
+    sizeInput.value = config.size !== undefined ? config.size : 1;
+    document.getElementById('sizeVal').innerText = sizeInput.value;
+
+    attackInput.value = config.attack !== undefined ? config.attack : 0.15;
+    document.getElementById('attackVal').innerText = attackInput.value;
+
+    releaseInput.value = config.release !== undefined ? config.release : 0.01;
+    document.getElementById('releaseVal').innerText = releaseInput.value;
+
+    musicSelect.value = config.music;
+
+    freqInput.value = config.freq;
+    document.getElementById('freqVal').innerText = config.freq;
+
+    multInput.value = patternKey.startsWith('vu_') ? 1 : config.multiplier;
+
+    speedInput.disabled = false;
+    qtyInput.disabled = false;
+    sizeInput.disabled = false;
+    multInput.disabled = false;
+    attackInput.disabled = true;
+    releaseInput.disabled = true;
+    
+    speedInput.parentElement.style.opacity = '1.0';
+    document.getElementById('qtyContainer').style.opacity = '1.0';
+    document.getElementById('sizeContainer').style.opacity = '1.0';
+    document.getElementById('multiplierContainer').style.opacity = '1.0';
+    document.getElementById('attackContainer').style.opacity = '0.3';
+    document.getElementById('releaseContainer').style.opacity = '0.3';
+
+    if (patternKey.startsWith('vu_')) {
+        speedInput.disabled = true;
+        qtyInput.disabled = true;
+        sizeInput.disabled = true;
+        multInput.disabled = true;
+        attackInput.disabled = false;
+        releaseInput.disabled = false;
+        
+        speedInput.parentElement.style.opacity = '0.3';
+        document.getElementById('qtyContainer').style.opacity = '0.3';
+        document.getElementById('sizeContainer').style.opacity = '0.3';
+        document.getElementById('multiplierContainer').style.opacity = '0.3';
+        document.getElementById('attackContainer').style.opacity = '1.0';
+        document.getElementById('releaseContainer').style.opacity = '1.0';
+    } else if (patternKey === 'chase_1_10' || patternKey === 'chase_10_1') {
+        speedInput.disabled = true;
+        speedInput.parentElement.style.opacity = '0.3';
+    }
+}
+
+function onPatternChange() {
+    saveCurrentPatternParams();
+    currentActivePattern = getSelectedPattern();
+    loadPatternIntoUI(currentActivePattern);
+}
+
+// Playlist Functions
+function addToPlaylist() {
+    if (playlistItems.length >= 20) {
+        alert("Maximum of 20 items allowed in the playlist.");
+        return;
+    }
+    saveCurrentPatternParams();
+    let cfg = patternConfigs[currentActivePattern];
+    let defaultName = currentActivePattern + " (" + playlistItems.length + ")";
+
+    let newItem = {
+        name: defaultName,
+        selected: true,
+        pattern: currentActivePattern,
+        audioEnabled: document.getElementById('audioToggle').checked,
+        clockDelay: parseFloat(document.getElementById('clockDelay').value),
+        antifreeze: parseInt(document.getElementById('globalAntifreeze').value),
+        speed: cfg.speed,
+        qty: cfg.qty,
+        size: cfg.size,
+        music: cfg.music,
+        freq: cfg.freq,
+        mult: cfg.multiplier,
+        attack: cfg.attack,
+        release: cfg.release
+    };
+
+    playlistItems.push(newItem);
+    renderPlaylist();
+    updatePlaylistSettings();
+    alert("Added current sequence configuration to playlist!");
+}
+
+function renderPlaylist() {
+    let container = document.getElementById('playlistContainer');
+    container.innerHTML = '';
+    if (playlistItems.length === 0) {
+        container.innerHTML = '<p style="color: #888; text-align: center;">Playlist is empty.</p>';
+        return;
+    }
+
+    playlistItems.forEach((item, index) => {
+        let div = document.createElement('div');
+        div.className = 'playlist-item';
+        div.innerHTML = `
+            <input type="checkbox" ${item.selected ? 'checked' : ''} onchange="toggleItemSelect(${index}, this.checked)">
+            <input type="text" value="${item.name}" onchange="updateItemName(${index}, this.value)">
+            <button class="delete-btn" onclick="deletePlaylistItem(${index})">&minus;</button>
+        `;
+        container.appendChild(div);
+    });
+}
+
+function toggleItemSelect(index, checked) {
+    playlistItems[index].selected = checked;
+    updatePlaylistSettings();
+}
+
+function updateItemName(index, newName) {
+    playlistItems[index].name = newName;
+    updatePlaylistSettings();
+}
+
+function deletePlaylistItem(index) {
+    playlistItems.splice(index, 1);
+    renderPlaylist();
+    updatePlaylistSettings();
+}
+
+function togglePlaylistPlay() {
+    isPlaying = !isPlaying;
+    updatePlayButtonUI();
+    updatePlaylistSettings();
+}
+
+function updatePlayButtonUI() {
+    let btn = document.getElementById('playBtn');
+    if (isPlaying) {
+        btn.innerText = "STOP";
+        btn.style.backgroundColor = "#cf6679";
+    } else {
+        btn.innerText = "PLAY";
+        btn.style.backgroundColor = "#03dac6";
+    }
+}
+
+function updatePlaylistSettings() {
+    saveCurrentPatternParams();
+
+    const data = {
+        audioEnabled: document.getElementById('audioToggle').checked,
+        clockDelay: parseFloat(document.getElementById('clockDelay').value),
+        antifreeze: parseInt(document.getElementById('globalAntifreeze').value),
+        pattern: currentActivePattern,
+        playlistPlaying: isPlaying,
+        playlistRandom: document.getElementById('randomToggle').checked,
+        playlistDuration: parseInt(document.getElementById('playlistDuration').value),
+        playlist: playlistItems,
+        mdSpeed: patternConfigs.moving_dot.speed, mdQty: patternConfigs.moving_dot.qty, mdSize: patternConfigs.moving_dot.size, mdMusic: patternConfigs.moving_dot.music, mdFreq: patternConfigs.moving_dot.freq, mdMult: patternConfigs.moving_dot.multiplier,
+        c1Speed: patternConfigs.chase_1_10.speed, c1Qty: patternConfigs.chase_1_10.qty, c1Size: patternConfigs.chase_1_10.size, c1Music: patternConfigs.chase_1_10.music, c1Freq: patternConfigs.chase_1_10.freq, c1Mult: patternConfigs.chase_1_10.multiplier,
+        c10Speed: patternConfigs.chase_10_1.speed, c10Qty: patternConfigs.chase_10_1.qty, c10Size: patternConfigs.chase_10_1.size, c10Music: patternConfigs.chase_10_1.music, c10Freq: patternConfigs.chase_10_1.freq, c10Mult: patternConfigs.chase_10_1.multiplier,
+        ccoSpeed: patternConfigs.center_out_chase.speed, ccoQty: patternConfigs.center_out_chase.qty, ccoSize: patternConfigs.center_out_chase.size, ccoMusic: patternConfigs.center_out_chase.music, ccoFreq: patternConfigs.center_out_chase.freq, ccoMult: patternConfigs.center_out_chase.multiplier,
+        vuSpeed: patternConfigs.vu_meter.speed, vuAttack: patternConfigs.vu_meter.attack, vuRelease: patternConfigs.vu_meter.release, vuMusic: patternConfigs.vu_meter.music, vuFreq: patternConfigs.vu_meter.freq,
+        vurSpeed: patternConfigs.vu_meter_rev.speed, vurAttack: patternConfigs.vu_meter_rev.attack, vurRelease: patternConfigs.vu_meter_rev.release, vurMusic: patternConfigs.vu_meter_rev.music, vurFreq: patternConfigs.vu_meter_rev.freq,
+        vudSpeed: patternConfigs.vu_dual.speed, vudAttack: patternConfigs.vu_dual.attack, vudRelease: patternConfigs.vu_dual.release, vudMusic: patternConfigs.vu_dual.music, vudFreq: patternConfigs.vu_dual.freq,
+        vucoSpeed: patternConfigs.vu_center_out.speed, vucoAttack: patternConfigs.vu_center_out.attack, vucoRelease: patternConfigs.vu_center_out.release, vucoMusic: patternConfigs.vu_center_out.music, vucoFreq: patternConfigs.vu_center_out.freq
+    };
+
+    fetch('/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+    })
+    .catch(error => console.log("Update error:", error));
+}
+
+setInterval(() => {
+    fetch('/ping', { cache: 'no-store' })
+    .then(response => {
+        if (response.ok) {
+            return response.json();
+        }
+        throw new Error();
+    })
+    .then(data => {
+        let badge1 = document.getElementById('connectionStatus');
+        badge1.innerText = "Connected to ESP32";
+        badge1.className = "connection-badge connected";
+
+        let badge2 = document.getElementById('connectionStatusPlaylist');
+        badge2.innerText = "Connected to ESP32";
+        badge2.className = "connection-badge connected";
+
+        if (data.playlistPlaying !== undefined && data.playlistPlaying !== isPlaying) {
+            isPlaying = data.playlistPlaying;
+            updatePlayButtonUI();
+        }
+    })
+    .catch(() => {
+        let badge1 = document.getElementById('connectionStatus');
+        badge1.innerText = "Disconnected / Reconnecting...";
+        badge1.className = "connection-badge disconnected";
+
+        let badge2 = document.getElementById('connectionStatusPlaylist');
+        badge2.innerText = "Disconnected / Reconnecting...";
+        badge2.className = "connection-badge disconnected";
+    });
+}, 4000);
+
+function updateSettings() {
+    updatePlaylistSettings();
+}
+
+function saveToEEPROM() {
+    fetch('/save', { method: 'POST' })
+        .then(response => response.text())
+        .then(result => alert("Preferences and Playlist saved successfully!"))
+        .catch(error => alert("Save Error: " + error));
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
+void handleRoot() {
+  server.send(200, "text/html", MAIN_PAGE);
+}
+
+void handlePing() {
+  JsonDocument doc;
+  doc["status"] = "pong";
+  doc["playlistPlaying"] = playlistPlaying;
+  String output;
+  serializeJson(doc, output);
+  server.send(200, "application/json", output);
+}
+
+void handleGetSettings() {
+  JsonDocument doc;
+  doc["audioEnabled"] = audioEnabled;
+  doc["clockDelay"] = clockDelay;
+  doc["antifreeze"] = antifreeze;
+  doc["pattern"] = activePattern;
+  doc["playlistPlaying"] = playlistPlaying;
+  doc["playlistRandom"] = playlistRandom;
+  doc["playlistDuration"] = playlistDuration;
+  
+  JsonArray plArray = doc["playlist"].to<JsonArray>();
+  for (int i = 0; i < playlistCount; i++) {
+    JsonObject item = plArray.add<JsonObject>();
+    item["name"] = playlist[i].name;
+    item["selected"] = playlist[i].selected;
+    item["pattern"] = playlist[i].pattern;
+    item["audioEnabled"] = playlist[i].audioEnabled;
+    item["clockDelay"] = playlist[i].clockDelay;
+    item["antifreeze"] = playlist[i].antifreeze;
+    item["speed"] = playlist[i].speed;
+    item["qty"] = playlist[i].qty;
+    item["size"] = playlist[i].size;
+    item["music"] = playlist[i].music;
+    item["freq"] = playlist[i].freq;
+    item["mult"] = playlist[i].mult;
+    item["attack"] = playlist[i].attack;
+    item["release"] = playlist[i].release;
+  }
+  
+  doc["mdSpeed"] = mdSpeed; doc["mdQty"] = mdQty; doc["mdSize"] = mdSize; doc["mdMusic"] = mdMusic; doc["mdFreq"] = mdFreq; doc["mdMult"] = mdMult;
+  doc["c1Speed"] = c1Speed; doc["c1Qty"] = c1Qty; doc["c1Size"] = c1Size; doc["c1Music"] = c1Music; doc["c1Freq"] = c1Freq; doc["c1Mult"] = c1Mult;
+  doc["c10Speed"] = c10Speed; doc["c10Qty"] = c10Qty; doc["c10Size"] = c10Size; doc["c10Music"] = c10Music; doc["c10Freq"] = c10Freq; doc["c10Mult"] = c10Mult;
+  doc["ccoSpeed"] = ccoSpeed; doc["ccoQty"] = ccoQty; doc["ccoSize"] = ccoSize; doc["ccoMusic"] = ccoMusic; doc["ccoFreq"] = ccoFreq; doc["ccoMult"] = ccoMult;
+  
+  doc["vuSpeed"] = vuSpeed; doc["vuAttack"] = vuAttack; doc["vuRelease"] = vuRelease; doc["vuMusic"] = vuMusic; doc["vuFreq"] = vuFreq;
+  doc["vurSpeed"] = vurSpeed; doc["vurAttack"] = vurAttack; doc["vurRelease"] = vurRelease; doc["vurMusic"] = vurMusic; doc["vurFreq"] = vurFreq;
+  doc["vudSpeed"] = vudSpeed; doc["vudAttack"] = vudAttack; doc["vudRelease"] = vudRelease; doc["vudMusic"] = vudMusic; doc["vudFreq"] = vudFreq;
+  doc["vucoSpeed"] = vucoSpeed; doc["vucoAttack"] = vucoAttack; doc["vucoRelease"] = vucoRelease; doc["vucoMusic"] = vucoMusic; doc["vucoFreq"] = vucoFreq;
+
+  String output;
+  serializeJson(doc, output);
+  server.send(200, "application/json", output);
+}
+
+void handleUpdate() {
+  if (server.hasArg("plain")) {
+    String payload = server.arg("plain");
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    
+    if (!error) {
+      audioEnabled = doc["audioEnabled"].as<bool>();
+      clockDelay = doc["clockDelay"].as<float>();
+      antifreeze = constrain(doc["antifreeze"].as<int>(), 1, 9);
+      activePattern = doc["pattern"].as<String>();
+      
+      bool newPlaylistPlaying = doc["playlistPlaying"].as<bool>();
+      if (newPlaylistPlaying && !playlistPlaying) {
+        // Started playing playlist from stopped state
+        playlistTrackStartTime = millis();
+        int firstSel = -1;
+        for (int i = 0; i < playlistCount; i++) {
+          if (playlist[i].selected) { firstSel = i; break; }
+        }
+        if (firstSel != -1) {
+          currentPlaylistIndex = firstSel;
+          loadPlaylistTrack(currentPlaylistIndex);
+        }
+      }
+      playlistPlaying = newPlaylistPlaying;
+      playlistRandom = doc["playlistRandom"].as<bool>();
+      playlistDuration = constrain(doc["playlistDuration"].as<int>(), 10, 60);
+
+      if (doc.containsKey("playlist")) {
+        JsonArray plArray = doc["playlist"].as<JsonArray>();
+        playlistCount = 0;
+        for (JsonObject item : plArray) {
+          if (playlistCount < MAX_PLAYLIST_ITEMS) {
+            strlcpy(playlist[playlistCount].name, item["name"] | "Track", sizeof(playlist[playlistCount].name));
+            playlist[playlistCount].selected = item["selected"] | true;
+            strlcpy(playlist[playlistCount].pattern, item["pattern"] | "moving_dot", sizeof(playlist[playlistCount].pattern));
+            playlist[playlistCount].audioEnabled = item["audioEnabled"] | true;
+            playlist[playlistCount].clockDelay = item["clockDelay"] | 1.0;
+            playlist[playlistCount].antifreeze = item["antifreeze"] | 2;
+            playlist[playlistCount].speed = item["speed"] | 0.1;
+            playlist[playlistCount].qty = item["qty"] | 1;
+            playlist[playlistCount].size = item["size"] | 1;
+            strlcpy(playlist[playlistCount].music, item["music"] | "BASS", sizeof(playlist[playlistCount].music));
+            playlist[playlistCount].freq = item["freq"] | 50;
+            playlist[playlistCount].mult = item["mult"] | 2;
+            playlist[playlistCount].attack = item["attack"] | 0.15;
+            playlist[playlistCount].release = item["release"] | 0.01;
+            playlistCount++;
+          }
+        }
+      }
+      
+      mdSpeed = doc["mdSpeed"].as<float>(); mdQty = doc["mdQty"].as<int>(); mdSize = doc["mdSize"].as<int>(); mdMusic = doc["mdMusic"].as<String>(); mdFreq = doc["mdFreq"].as<int>(); mdMult = constrain(doc["mdMult"].as<int>(), 1, 9);
+      c1Speed = doc["c1Speed"].as<float>(); c1Qty = doc["c1Qty"].as<int>(); c1Size = doc["c1Size"].as<int>(); c1Music = doc["c1Music"].as<String>(); c1Freq = doc["c1Freq"].as<int>(); c1Mult = constrain(doc["c1Mult"].as<int>(), 1, 9);
+      c10Speed = doc["c10Speed"].as<float>(); c10Qty = doc["c10Qty"].as<int>(); c10Size = doc["c10Size"].as<int>(); c10Music = doc["c10Music"].as<String>(); c10Freq = doc["c10Freq"].as<int>(); c10Mult = constrain(doc["c10Mult"].as<int>(), 1, 9);
+      ccoSpeed = doc["ccoSpeed"].as<float>(); ccoQty = doc["ccoQty"].as<int>(); ccoSize = doc["ccoSize"].as<int>(); ccoMusic = doc["ccoMusic"].as<String>(); ccoFreq = doc["ccoFreq"].as<int>(); ccoMult = constrain(doc["ccoMult"].as<int>(), 1, 9);
+      
+      vuSpeed = doc["vuSpeed"].as<float>(); vuAttack = doc["vuAttack"].as<float>(); vuRelease = doc["vuRelease"].as<float>(); vuMusic = doc["vuMusic"].as<String>(); vuFreq = doc["vuFreq"].as<int>();
+      vurSpeed = doc["vurSpeed"].as<float>(); vurAttack = doc["vurAttack"].as<float>(); vurRelease = doc["vurRelease"].as<float>(); vurMusic = doc["vurMusic"].as<String>(); vurFreq = doc["vurFreq"].as<int>();
+      vudSpeed = doc["vudSpeed"].as<float>(); vudAttack = doc["vudAttack"].as<float>(); vudRelease = doc["vudRelease"].as<float>(); vudMusic = doc["vudMusic"].as<String>(); vudFreq = doc["vudFreq"].as<int>();
+      vucoSpeed = doc["vucoSpeed"].as<float>(); vucoAttack = doc["vucoAttack"].as<float>(); vucoRelease = doc["vucoRelease"].as<float>(); vucoMusic = doc["vucoMusic"].as<String>(); vucoFreq = doc["vucoFreq"].as<int>();
+
+      // Automatically persist settings and playlist changes to EEPROM
+      preferences.begin("lightshow", false);
+      preferences.putBool("audioEnabled", audioEnabled);
+      preferences.putFloat("clockDelay", clockDelay);
+      preferences.putInt("antifreeze", antifreeze);
+      preferences.putString("pattern", activePattern);
+      
+      preferences.putFloat("mdSpeed", mdSpeed); preferences.putInt("mdQty", mdQty); preferences.putInt("mdSize", mdSize); preferences.putString("mdMusic", mdMusic); preferences.putInt("mdFreq", mdFreq); preferences.putInt("mdMult", mdMult);
+      preferences.putFloat("c1Speed", c1Speed); preferences.putInt("c1Qty", c1Qty); preferences.putInt("c1Size", c1Size); preferences.putString("c1Music", c1Music); preferences.putInt("c1Freq", c1Freq); preferences.putInt("c1Mult", c1Mult);
+      preferences.putFloat("c10Speed", c10Speed); preferences.putInt("c10Qty", c10Qty); preferences.putInt("c10Size", c10Size); preferences.putString("c10Music", c10Music); preferences.putInt("c10Freq", c10Freq); preferences.putInt("c10Mult", c10Mult);
+      preferences.putFloat("ccoSpeed", ccoSpeed); preferences.putInt("ccoQty", ccoQty); preferences.putInt("ccoSize", ccoSize); preferences.putString("ccoMusic", ccoMusic); preferences.putInt("ccoFreq", ccoFreq); preferences.putInt("ccoMult", ccoMult);
+      
+      preferences.putFloat("vuSpeed", vuSpeed); preferences.putFloat("vuAttack", vuAttack); preferences.putFloat("vuRelease", vuRelease); preferences.putString("vuMusic", vuMusic); preferences.putInt("vuFreq", vuFreq);
+      preferences.putFloat("vurSpeed", vurSpeed); preferences.putFloat("vurAttack", vurAttack); preferences.putFloat("vurRelease", vurRelease); preferences.putString("vurMusic", vurMusic); preferences.putInt("vurFreq", vurFreq);
+      preferences.putFloat("vudSpeed", vudSpeed); preferences.putFloat("vudAttack", vudAttack); preferences.putFloat("vudRelease", vudRelease); preferences.putString("vudMusic", vudMusic); preferences.putInt("vudFreq", vudFreq);
+      preferences.putFloat("vucoSpeed", vucoSpeed); preferences.putFloat("vucoAttack", vucoAttack); preferences.putFloat("vucoRelease", vucoRelease); preferences.putString("vucoMusic", vucoMusic); preferences.putInt("vucoFreq", vucoFreq);
+      preferences.end();
+
+      savePlaylistToEEPROM();
+
+      server.send(200, "text/plain", "Updated successfully");
+    } else {
+      server.send(400, "text/plain", "Invalid JSON");
+    }
+  } else {
+    server.send(400, "text/plain", "Bad Request");
+  }
+}
+
+void loadPlaylistTrack(int index) {
+  if (index < 0 || index >= playlistCount) return;
+  PlaylistItem &item = playlist[index];
+  
+  activePattern = String(item.pattern);
+  audioEnabled = item.audioEnabled;
+  clockDelay = item.clockDelay;
+  antifreeze = item.antifreeze;
+
+  if (activePattern == "moving_dot") {
+    mdSpeed = item.speed; mdQty = item.qty; mdSize = item.size; mdMusic = item.music; mdFreq = item.freq; mdMult = item.mult;
+  } else if (activePattern == "chase_1_10") {
+    c1Speed = item.speed; c1Qty = item.qty; c1Size = item.size; c1Music = item.music; c1Freq = item.freq; c1Mult = item.mult;
+  } else if (activePattern == "chase_10_1") {
+    c10Speed = item.speed; c10Qty = item.qty; c10Size = item.size; c10Music = item.music; c10Freq = item.freq; c10Mult = item.mult;
+  } else if (activePattern == "center_out_chase") {
+    ccoSpeed = item.speed; ccoQty = item.qty; ccoSize = item.size; ccoMusic = item.music; ccoFreq = item.freq; ccoMult = item.mult;
+  } else if (activePattern == "vu_meter") {
+    vuSpeed = item.speed; vuAttack = item.attack; vuRelease = item.release; vuMusic = item.music; vuFreq = item.freq;
+  } else if (activePattern == "vu_meter_rev") {
+    vurSpeed = item.speed; vurAttack = item.attack; vurRelease = item.release; vurMusic = item.music; vurFreq = item.freq;
+  } else if (activePattern == "vu_dual") {
+    vudSpeed = item.speed; vudAttack = item.attack; vudRelease = item.release; vudMusic = item.music; vudFreq = item.freq;
+  } else if (activePattern == "vu_center_out") {
+    vucoSpeed = item.speed; vucoAttack = item.attack; vucoRelease = item.release; vucoMusic = item.music; vucoFreq = item.freq;
+  }
+}
+
+void advancePlaylistTrack() {
+  int selectedIndices[MAX_PLAYLIST_ITEMS];
+  int selCount = 0;
+  for (int i = 0; i < playlistCount; i++) {
+    if (playlist[i].selected) {
+      selectedIndices[selCount++] = i;
+    }
+  }
+
+  if (selCount == 0) {
+    playlistPlaying = false;
+    return;
+  }
+
+  if (playlistRandom) {
+    int rIdx = random(0, selCount);
+    currentPlaylistIndex = selectedIndices[rIdx];
+  } else {
+    int nextIdx = -1;
+    for (int i = 0; i < selCount; i++) {
+      if (selectedIndices[i] > currentPlaylistIndex) {
+        nextIdx = selectedIndices[i];
+        break;
+      }
+    }
+    if (nextIdx == -1) {
+      nextIdx = selectedIndices[0];
+    }
+    currentPlaylistIndex = nextIdx;
+  }
+
+  loadPlaylistTrack(currentPlaylistIndex);
+  playlistTrackStartTime = millis();
+}
+
+void savePlaylistToEEPROM() {
+  preferences.begin("lightshow", false);
+  preferences.putInt("plCount", playlistCount);
+  preferences.putBool("plRandom", playlistRandom);
+  preferences.putInt("plDuration", playlistDuration);
+
+  for (int i = 0; i < playlistCount; i++) {
+    String prefix = "pl_" + String(i) + "_";
+    preferences.putString((prefix + "name").c_str(), playlist[i].name);
+    preferences.putBool((prefix + "sel").c_str(), playlist[i].selected);
+    preferences.putString((prefix + "pat").c_str(), playlist[i].pattern);
+    preferences.putBool((prefix + "audio").c_str(), playlist[i].audioEnabled);
+    preferences.putFloat((prefix + "delay").c_str(), playlist[i].clockDelay);
+    preferences.putInt((prefix + "anti").c_str(), playlist[i].antifreeze);
+    preferences.putFloat((prefix + "spd").c_str(), playlist[i].speed);
+    preferences.putInt((prefix + "qty").c_str(), playlist[i].qty);
+    preferences.putInt((prefix + "sz").c_str(), playlist[i].size);
+    preferences.putString((prefix + "mus").c_str(), playlist[i].music);
+    preferences.putInt((prefix + "frq").c_str(), playlist[i].freq);
+    preferences.putInt((prefix + "mlt").c_str(), playlist[i].mult);
+    preferences.putFloat((prefix + "atk").c_str(), playlist[i].attack);
+    preferences.putFloat((prefix + "rel").c_str(), playlist[i].release);
+  }
+  preferences.end();
+}
+
+void loadPlaylistFromEEPROM() {
+  preferences.begin("lightshow", true);
+  playlistCount = preferences.getInt("plCount", 0);
+  playlistRandom = preferences.getBool("plRandom", false);
+  playlistDuration = preferences.getInt("plDuration", 10);
+
+  for (int i = 0; i < playlistCount && i < MAX_PLAYLIST_ITEMS; i++) {
+    String prefix = "pl_" + String(i) + "_";
+    String n = preferences.getString((prefix + "name").c_str(), "Track");
+    strlcpy(playlist[i].name, n.c_str(), sizeof(playlist[i].name));
+    playlist[i].selected = preferences.getBool((prefix + "sel").c_str(), true);
+    String p = preferences.getString((prefix + "pat").c_str(), "moving_dot");
+    strlcpy(playlist[i].pattern, p.c_str(), sizeof(playlist[i].pattern));
+    playlist[i].audioEnabled = preferences.getBool((prefix + "audio").c_str(), true);
+    playlist[i].clockDelay = preferences.getFloat((prefix + "delay").c_str(), 1.0);
+    playlist[i].antifreeze = preferences.getInt((prefix + "anti").c_str(), 2);
+    playlist[i].speed = preferences.getFloat((prefix + "spd").c_str(), 0.1);
+    playlist[i].qty = preferences.getInt((prefix + "qty").c_str(), 1);
+    playlist[i].size = preferences.getInt((prefix + "sz").c_str(), 1);
+    String m = preferences.getString((prefix + "mus").c_str(), "BASS");
+    strlcpy(playlist[i].music, m.c_str(), sizeof(playlist[i].music));
+    playlist[i].freq = preferences.getInt((prefix + "frq").c_str(), 50);
+    playlist[i].mult = preferences.getInt((prefix + "mlt").c_str(), 2);
+    playlist[i].attack = preferences.getFloat((prefix + "atk").c_str(), 0.15);
+    playlist[i].release = preferences.getFloat((prefix + "rel").c_str(), 0.01);
+  }
+  preferences.end();
+}
+
+void handleSave() {
+  preferences.begin("lightshow", false);
+  preferences.putBool("audioEnabled", audioEnabled);
+  preferences.putFloat("clockDelay", clockDelay);
+  preferences.putInt("antifreeze", antifreeze);
+  preferences.putString("pattern", activePattern);
+  
+  preferences.putFloat("mdSpeed", mdSpeed); preferences.putInt("mdQty", mdQty); preferences.putInt("mdSize", mdSize); preferences.putString("mdMusic", mdMusic); preferences.putInt("mdFreq", mdFreq); preferences.putInt("mdMult", mdMult);
+  preferences.putFloat("c1Speed", c1Speed); preferences.putInt("c1Qty", c1Qty); preferences.putInt("c1Size", c1Size); preferences.putString("c1Music", c1Music); preferences.putInt("c1Freq", c1Freq); preferences.putInt("c1Mult", c1Mult);
+  preferences.putFloat("c10Speed", c10Speed); preferences.putInt("c10Qty", c10Qty); preferences.putInt("c10Size", c10Size); preferences.putString("c10Music", c10Music); preferences.putInt("c10Freq", c10Freq); preferences.putInt("c10Mult", c10Mult);
+  preferences.putFloat("ccoSpeed", ccoSpeed); preferences.putInt("ccoQty", ccoQty); preferences.putInt("ccoSize", ccoSize); preferences.putString("ccoMusic", ccoMusic); preferences.putInt("ccoFreq", ccoFreq); preferences.putInt("ccoMult", ccoMult);
+  
+  preferences.putFloat("vuSpeed", vuSpeed); preferences.putFloat("vuAttack", vuAttack); preferences.putFloat("vuRelease", vuRelease); preferences.putString("vuMusic", vuMusic); preferences.putInt("vuFreq", vuFreq);
+  preferences.putFloat("vurSpeed", vurSpeed); preferences.putFloat("vurAttack", vurAttack); preferences.putFloat("vurRelease", vurRelease); preferences.putString("vurMusic", vurMusic); preferences.putInt("vurFreq", vurFreq);
+  preferences.putFloat("vudSpeed", vudSpeed); preferences.putFloat("vudAttack", vudAttack); preferences.putFloat("vudRelease", vudRelease); preferences.putString("vudMusic", vudMusic); preferences.putInt("vudFreq", vudFreq);
+  preferences.putFloat("vucoSpeed", vucoSpeed); preferences.putFloat("vucoAttack", vucoAttack); preferences.putFloat("vucoRelease", vucoRelease); preferences.putString("vucoMusic", vucoMusic); preferences.putInt("vucoFreq", vucoFreq);
+  preferences.end();
+
+  savePlaylistToEEPROM();
+  
+  server.send(200, "text/plain", "Saved");
+}
+
+void clearAllChannels() {
+  for (int i = 0; i < 10; i++) {
+    digitalWrite(channelPins[i], LOW);
+  }
+}
+
+bool checkAudioBeat() {
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastSampleTime >= 1) {
+    lastSampleTime = currentMillis;
+    rawSampleVal = analogRead(AUDIO_PIN);
+
+    if (currentMusicMode == "FULL") {
+      filteredSample = rawSampleVal; 
+    } else {
+      float cutoff = max(5, freqThreshold);
+      float rc = 1.0 / (2.0 * 3.14159265 * cutoff);
+      float dt = 0.001;
+      float alpha = dt / (rc + dt);
+      filteredSample = filteredSample + alpha * (rawSampleVal - filteredSample);
+    }
+
+    int sampleVal = (currentMusicMode == "FULL") ? rawSampleVal : (int)filteredSample;
+    if (sampleVal > signalMax) signalMax = sampleVal;
+    if (sampleVal < signalMin) signalMin = sampleVal;
+  }
+
+  if (currentMillis - audioWindowStart >= 10) {
+    currentPeakToPeak = signalMax - signalMin; 
+    signalMax = 0;
+    signalMin = 4095;
+    audioWindowStart = currentMillis;
+
+    if (generatedSubBeatsCount > 0 && multiplier > 1) {
+      if (currentMillis >= nextSubBeatTargetTime) {
+        generatedSubBeatsCount--;
+        nextSubBeatTargetTime = currentMillis + (establishedInterval / multiplier);
+        return true;
+      }
+    }
+
+    if (currentPeakToPeak > 120) {
+      if (currentMillis - lastAcceptedBeatTime >= 200) {
+        if (lastRealBeatTime > 0) {
+          unsigned long interval = currentMillis - lastRealBeatTime;
+          if (interval >= 150 && interval <= 3000) {
+            beatIntervalHistory[historyIndex] = interval;
+            historyIndex = (historyIndex + 1) % HISTORY_SIZE;
+            if (historyCount < HISTORY_SIZE) historyCount++;
+          }
+        }
+        lastRealBeatTime = currentMillis;
+        lastAcceptedBeatTime = currentMillis;
+
+        if (historyCount > 0) {
+          unsigned long sum = 0;
+          for (int i = 0; i < historyCount; i++) {
+            sum += beatIntervalHistory[i];
+          }
+          establishedInterval = sum / historyCount;
+        } else {
+          establishedInterval = 500;
+        }
+
+        if (multiplier > 1 && establishedInterval > 200) {
+          generatedSubBeatsCount = multiplier - 1;
+          nextSubBeatTargetTime = currentMillis + (establishedInterval / multiplier);
+        }
+
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void executePatternStep(bool beatHeard) {
+  clearAllChannels();
+
+  if (activePattern == "moving_dot") {
+    int effQty = constrain(mdQty, 1, 10);
+    int dotSize = constrain(mdSize, 1, 5);
+    if (beatHeard) {
+      dotDirection = -dotDirection;
+    }
+
+    for (int q = 0; q < effQty; q++) {
+      int baseIdx = (currentStep + (q * 10) / effQty) % 10;
+      for (int s = 0; s < dotSize; s++) {
+        int idx = (baseIdx + s) % 10;
+        digitalWrite(channelPins[idx], HIGH);
+      }
+    }
+    
+    currentStep = (currentStep + dotDirection + 10) % 10;
+  }
+  else if (activePattern == "chase_1_10") {
+    int effQty = constrain(c1Qty, 1, 10);
+    int dotSize = constrain(c1Size, 1, 5);
+
+    for (int q = 0; q < effQty; q++) {
+      int baseIdx = (currentStep + (q * 10) / effQty) % 10;
+      for (int s = 0; s < dotSize; s++) {
+        int idx = (baseIdx + s) % 10;
+        digitalWrite(channelPins[idx], HIGH);
+      }
+    }
+    currentStep = (currentStep + 1) % 10;
+  }
+  else if (activePattern == "chase_10_1") {
+    int effQty = constrain(c10Qty, 1, 10);
+    int dotSize = constrain(c10Size, 1, 5);
+
+    for (int q = 0; q < effQty; q++) {
+      int baseIdx = (9 - currentStep - (q * 10) / effQty + 10) % 10;
+      for (int s = 0; s < dotSize; s++) {
+        int idx = (baseIdx - s + 10) % 10;
+        digitalWrite(channelPins[idx], HIGH);
+      }
+    }
+    currentStep = (currentStep + 1) % 10;
+  }
+  else if (activePattern == "center_out_chase") {
+    int effQty = constrain(ccoQty, 1, 10);
+    int dotSize = constrain(ccoSize, 1, 5);
+    if (beatHeard) {
+      currentStep = 0; // Restart burst from center on beat
+    }
+    
+    if (currentStep < 5) {
+      for (int q = 0; q < effQty; q++) {
+        int stepOffset = currentStep - (q * 2);
+        if (stepOffset >= 0 && stepOffset < 5) {
+          int lCenter = 4 - stepOffset;
+          int rCenter = 5 + stepOffset;
+          
+          for (int s = 0; s < dotSize; s++) {
+            int lIdx = lCenter - s;
+            int rIdx = rCenter + s;
+            if (lIdx >= 0) digitalWrite(channelPins[lIdx], HIGH);
+            if (rIdx < 10) digitalWrite(channelPins[rIdx], HIGH);
+          }
+        }
+      }
+    }
+  }
+  else if (activePattern.startsWith("vu_")) {
+    float targetLevel = map(constrain(currentPeakToPeak, 0, 180), 0, 180, 0, 10);
+    
+    if (targetLevel > masterVuSmooth) {
+      masterVuSmooth += VU_ATTACK_RATE * (targetLevel - masterVuSmooth); 
+    } else {
+      masterVuSmooth += VU_RELEASE_RATE * (targetLevel - masterVuSmooth); 
+    }
+    if (masterVuSmooth < 0.3) masterVuSmooth = 0;
+    int smoothLevel = constrain((int)(masterVuSmooth + 0.5), 0, 10);
+
+    unsigned long currentMillis = millis();
+
+    if (activePattern == "vu_meter") {
+      int level = smoothLevel;
+      if (level > vuPeakLevel) {
+        vuPeakLevel = level;
+        lastVuPeakFallTime = currentMillis;
+      } else if (currentMillis - lastVuPeakFallTime > 150) { 
+        if (vuPeakLevel > 0) vuPeakLevel--;
+        lastVuPeakFallTime = currentMillis;
+      }
+      for (int i = 0; i < level; i++) {
+        digitalWrite(channelPins[i], HIGH);
+      }
+      if (vuPeakLevel > level && vuPeakLevel <= 10 && vuPeakLevel > 0) {
+        digitalWrite(channelPins[vuPeakLevel - 1], HIGH);
+      }
+    }
+    else if (activePattern == "vu_meter_rev") {
+      int level = smoothLevel;
+      if (level > vurPeakLevel) {
+        vurPeakLevel = level;
+        lastVurPeakFallTime = currentMillis;
+      } else if (currentMillis - lastVurPeakFallTime > 150) {
+        if (vurPeakLevel > 0) vurPeakLevel--;
+        lastVurPeakFallTime = currentMillis;
+      }
+      for (int i = 0; i < level; i++) {
+        digitalWrite(channelPins[9 - i], HIGH);
+      }
+      if (vurPeakLevel > level && vurPeakLevel <= 10 && vurPeakLevel > 0) {
+        digitalWrite(channelPins[9 - (vurPeakLevel - 1)], HIGH);
+      }
+    }
+    else if (activePattern == "vu_dual") {
+      int level = smoothLevel / 2; 
+      level = constrain(level, 0, 5);
+      for (int i = 0; i < level; i++) {
+        digitalWrite(channelPins[i], HIGH);
+        digitalWrite(channelPins[9 - i], HIGH);
+      }
+    }
+    else if (activePattern == "vu_center_out") {
+      int level = smoothLevel / 2; 
+      level = constrain(level, 0, 5);
+      for (int i = 0; i < level; i++) {
+        digitalWrite(channelPins[4 - i], HIGH); 
+        digitalWrite(channelPins[5 + i], HIGH); 
+      }
+    }
+  }
+}
+
+void run240VDisplayPattern() {
+  unsigned long currentMillis = millis();
+
+  // Handle Playlist Timing & Transition
+  if (playlistPlaying) {
+    if (currentMillis - playlistTrackStartTime >= (unsigned long)(playlistDuration * 1000)) {
+      advancePlaylistTrack();
+    }
+  }
+
+  float currentSpeed = 0.1;
+
+  if (activePattern == "moving_dot") {
+    currentSpeed = mdSpeed; freqThreshold = mdFreq; multiplier = mdMult; currentMusicMode = mdMusic;
+  } else if (activePattern == "chase_1_10") {
+    currentSpeed = c1Speed; freqThreshold = c1Freq; multiplier = c1Mult; currentMusicMode = c1Music;
+  } else if (activePattern == "chase_10_1") {
+    currentSpeed = c10Speed; freqThreshold = c10Freq; multiplier = c10Mult; currentMusicMode = c10Music;
+  } else if (activePattern == "center_out_chase") {
+    currentSpeed = ccoSpeed; freqThreshold = ccoFreq; multiplier = ccoMult; currentMusicMode = ccoMusic;
+  } else if (activePattern == "vu_meter") {
+    currentSpeed = vuSpeed; freqThreshold = vuFreq; multiplier = 1; currentMusicMode = vuMusic;
+    VU_ATTACK_RATE = vuAttack; VU_RELEASE_RATE = vuRelease;
+  } else if (activePattern == "vu_meter_rev") {
+    currentSpeed = vurSpeed; freqThreshold = vurFreq; multiplier = 1; currentMusicMode = vurMusic;
+    VU_ATTACK_RATE = vurAttack; VU_RELEASE_RATE = vurRelease;
+  } else if (activePattern == "vu_dual") {
+    currentSpeed = vudSpeed; freqThreshold = vudFreq; multiplier = 1; currentMusicMode = vudMusic;
+    VU_ATTACK_RATE = vudAttack; VU_RELEASE_RATE = vudRelease;
+  } else if (activePattern == "vu_center_out") {
+    currentSpeed = vucoSpeed; freqThreshold = vucoFreq; multiplier = 1; currentMusicMode = vucoMusic;
+    VU_ATTACK_RATE = vucoAttack; VU_RELEASE_RATE = vucoRelease;
+  }
+
+  if (!audioEnabled) {
+    if (currentMillis - lastStepTime >= (unsigned long)(clockDelay * 1000)) {
+      lastStepTime = currentMillis;
+      executePatternStep(false);
+    }
+  } 
+  else {
+    bool beat = checkAudioBeat();
+
+    if (activePattern.startsWith("vu_")) {
+      executePatternStep(false); 
+    } 
+    else {
+      if (beat) {
+        lastBeatTime = currentMillis;
+        executePatternStep(true);
+      } 
+      else {
+        if (activePattern == "moving_dot") {
+          if (currentMillis - lastStepTime >= (unsigned long)(currentSpeed * 1000)) {
+            lastStepTime = currentMillis;
+            executePatternStep(false); 
+          }
+        }
+        else if (activePattern == "center_out_chase") {
+          if (currentMillis - lastStepTime >= (unsigned long)(currentSpeed * 1000)) {
+            lastStepTime = currentMillis;
+            if (currentStep < 5) {
+              currentStep++;
+              executePatternStep(false);
+            }
+          }
+        }
+
+        if (currentMillis - lastBeatTime >= (unsigned long)(antifreeze * 1000)) {
+          lastBeatTime = currentMillis; 
+          executePatternStep(false); 
+        }
+      }
+    }
+  }
+}
+
+void WiFiEvent(WiFiEvent_t event) {
+    switch (event) {
+        case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
+            Serial.println("Client connected to LightShow AP!");
+            break;
+        case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
+            Serial.println("Client disconnected from AP.");
+            break;
+        default:
+            break;
+    }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  esp_task_wdt_config_t wdt_config = {
+      .timeout_ms = 5000,
+      .idle_core_mask = (1 << 0),
+      .trigger_panic = true
+  };
+  esp_task_wdt_init(&wdt_config);
+  esp_task_wdt_add(NULL);
+
+  analogSetAttenuation(ADC_11db);
+  pinMode(AUDIO_PIN, INPUT);
+
+  for (int i = 0; i < 10; i++) {
+    pinMode(channelPins[i], OUTPUT);
+    digitalWrite(channelPins[i], LOW);
+  }
+
+  preferences.begin("lightshow", true);
+  audioEnabled = preferences.getBool("audioEnabled", true);
+  clockDelay = preferences.getFloat("clockDelay", 1.0);
+  antifreeze = preferences.getInt("antifreeze", 2);
+  activePattern = preferences.getString("pattern", "moving_dot");
+  
+  mdSpeed = preferences.getFloat("mdSpeed", 0.1); mdQty = preferences.getInt("mdQty", 1); mdSize = preferences.getInt("mdSize", 1); mdMusic = preferences.getString("mdMusic", "BASS"); mdFreq = preferences.getInt("mdFreq", 50); mdMult = preferences.getInt("mdMult", 2);
+  c1Speed = preferences.getFloat("c1Speed", 0.1); c1Qty = preferences.getInt("c1Qty", 1); c1Size = preferences.getInt("c1Size", 1); c1Music = preferences.getString("c1Music", "BASS"); c1Freq = preferences.getInt("c1Freq", 50); c1Mult = preferences.getInt("c1Mult", 2);
+  c10Speed = preferences.getFloat("c10Speed", 0.1); c10Qty = preferences.getInt("c10Qty", 1); c10Size = preferences.getInt("c10Size", 1); c10Music = preferences.getString("c10Music", "BASS"); c10Freq = preferences.getInt("c10Freq", 50); c10Mult = preferences.getInt("c10Mult", 2);
+  ccoSpeed = preferences.getFloat("ccoSpeed", 0.1); ccoQty = preferences.getInt("ccoQty", 1); ccoSize = preferences.getInt("ccoSize", 1); ccoMusic = preferences.getString("ccoMusic", "BASS"); ccoFreq = preferences.getInt("ccoFreq", 50); ccoMult = preferences.getInt("ccoMult", 2);
+  
+  vuSpeed = preferences.getFloat("vuSpeed", 0.1); vuAttack = preferences.getFloat("vuAttack", 0.15); vuRelease = preferences.getFloat("vuRelease", 0.01); vuMusic = preferences.getString("vuMusic", "BASS"); vuFreq = preferences.getInt("vuFreq", 50);
+  vurSpeed = preferences.getFloat("vurSpeed", 0.1); vurAttack = preferences.getFloat("vurAttack", 0.15); vurRelease = preferences.getFloat("vurRelease", 0.01); vurMusic = preferences.getString("vurMusic", "BASS"); vurFreq = preferences.getInt("vurFreq", 50);
+  vudSpeed = preferences.getFloat("vudSpeed", 0.1); vudAttack = preferences.getFloat("vudAttack", 0.15); vudRelease = preferences.getFloat("vudRelease", 0.01); vudMusic = preferences.getString("vudMusic", "BASS"); vudFreq = preferences.getInt("vudFreq", 50);
+  vucoSpeed = preferences.getFloat("vucoSpeed", 0.1); vucoAttack = preferences.getFloat("vucoAttack", 0.15); vucoRelease = preferences.getFloat("vucoRelease", 0.01); vucoMusic = preferences.getString("vucoMusic", "BASS"); vucoFreq = preferences.getInt("vucoFreq", 50);
+  preferences.end();
+
+  loadPlaylistFromEEPROM();
+
+  // Default to playing the playlist on power up if present, otherwise start on Page 1
+  if (playlistCount > 0) {
+    playlistPlaying = true;
+    playlistTrackStartTime = millis();
+    int firstSel = -1;
+    for (int i = 0; i < playlistCount; i++) {
+      if (playlist[i].selected) { firstSel = i; break; }
+    }
+    if (firstSel != -1) {
+      currentPlaylistIndex = firstSel;
+      loadPlaylistTrack(currentPlaylistIndex);
+    }
+  } else {
+    playlistPlaying = false;
+  }
+
+  WiFi.onEvent(WiFiEvent);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apSSID, apPassword);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  
+  Serial.println("");
+  Serial.print("Access Point IP address: ");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/ping", HTTP_GET, handlePing);
+  server.on("/settings", HTTP_GET, handleGetSettings);
+  server.on("/update", HTTP_POST, handleUpdate);
+  server.on("/save", HTTP_POST, handleSave);
+
+  server.begin();
+  Serial.println("HTTP server started successfully!");
+}
+
+void loop() {
+  esp_task_wdt_reset(); 
+  server.handleClient();
+  run240VDisplayPattern();
+  yield();
+}
