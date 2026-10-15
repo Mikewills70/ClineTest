@@ -30,6 +30,10 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             align-items: center;
         }
         h1 { font-size: 1.5rem; margin-bottom: 10px; text-align: center; color: var(--primary-color); }
+        /* (The circular-swatch CSS I added here was reverted: it changed the size and
+           shape of the Colour page boxes, which was not wanted. The white ring for
+           dark colours belongs on the NEW swatch row in Stage 2, not on these. */
+
         .nav-tabs {
             display: flex;
             gap: 5px;
@@ -547,15 +551,15 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         
         <div class="control-group">
             <label>Select Port (1 - 10)</label>
-            <select id="calPort" onchange="sendCalibrationRequest()">
+            <select id="calPort" onchange="updatePortLabels()">
                 <option value="0">Port 1</option><option value="1">Port 2</option><option value="2">Port 3</option>
                 <option value="3">Port 4</option><option value="4">Port 5</option><option value="5">Port 6</option>
                 <option value="6">Port 7</option><option value="7">Port 8</option><option value="8">Port 9</option><option value="9">Port 10</option>
             </select>
         </div>
 
-        <button id="calTestBtn" onclick="cycleColorOrder()">
-            <span>Order: <span id="orderNameText">RGB</span></span>
+        <button id="calTestBtn" onclick="testPortPressed()">
+            <span>TEST <span id="testPortNum">PORT 1</span></span>
             <span style="display:inline-flex; gap:5px;">
                 <span class="color-block" style="background:#FF0000;" title="Red Group"></span>
                 <span class="color-block" style="background:#00FF00;" title="Green Group"></span>
@@ -563,7 +567,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             </span>
         </button>
 
-        <button class="btn" style="margin-top:15px;" onclick="saveCalibration()">Save Port Calibration to EEPROM</button>
+        <button class="btn" style="margin-top:15px;" onclick="saveCalibration()">SAVE <span id="savePortNum">PORT 1</span></button>
 
         <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 25px 0 15px 0;">
 
@@ -571,23 +575,15 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         
         <label>Select Theme Preset</label>
         <div class="theme-group">
-            <button class="theme-btn active" onclick="setTheme('Disco')">Disco</button>
-            <button class="theme-btn" onclick="setTheme('Christmas')">Christmas</button>
-            <button class="theme-btn" onclick="setTheme('Halloween')">Halloween</button>
-            <button class="theme-btn" onclick="setTheme('Animations')">Animations</button>
+            <button class="theme-btn active" onclick="themePreviewEnabled = true; setTheme('Disco')">Disco</button>
+            <button class="theme-btn" onclick="themePreviewEnabled = true; setTheme('Christmas')">Christmas</button>
+            <button class="theme-btn" onclick="themePreviewEnabled = true; setTheme('Halloween')">Halloween</button>
+            <button class="theme-btn" onclick="themePreviewEnabled = true; setTheme('Animations')">Animations</button>
         </div>
 
-        <label>Number of Colors (2 to 8)</label>
-        <div class="count-group" id="countButtonsContainer">
-            <button class="count-btn" onclick="setColorCount(2)">2</button>
-            <button class="count-btn" onclick="setColorCount(3)">3</button>
-            <button class="count-btn active" onclick="setColorCount(4)">4</button>
-            <button class="count-btn" onclick="setColorCount(5)">5</button>
-            <button class="count-btn" onclick="setColorCount(6)">6</button>
-            <button class="count-btn" onclick="setColorCount(7)">7</button>
-            <button class="count-btn" onclick="setColorCount(8)">8</button>
-        </div>
-
+        <!-- The "Number of Colors" selector was REMOVED. All themes now have eight
+             colours, so there was nothing to select - a theme that should behave as
+             four repeats its first four into slots 5-8. -->
         <label>Color Slots (Active vs Greyed Out)</label>
         <div class="color-boxes-row" id="colorBoxesContainer"></div>
 
@@ -751,7 +747,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 <tr>
                     <td class="name-col">Speed</td>
                     <td>
-                        <input type="range" id="paramSpeedLED" min="0.005" max="0.50" step="0.001" value="0.007" oninput="liveParamChanged('LED')">
+                        <input type="range" id="paramSpeedLED" min="0.002" max="0.50" step="0.001" value="0.005" oninput="liveParamChanged('LED')">
                         <span id="speedValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.005s</span>
                     </td>
                 </tr>
@@ -863,6 +859,11 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
         if (tabId === 'calibrate') {
             sendCalibrationRequest();
+        } else {
+            // Leaving the Colours page: STOP the calibration test. It is otherwise
+            // latched on the device, so the strip stayed lit showing the last
+            // tested order every time the page was opened.
+            fetch('/calibrate-stop').catch(() => {});
         }
         if (tabId === 'ws2811') {
             setTimeout(resizeCanvas, 50);
@@ -873,15 +874,88 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     }
 
     let colorOrders = ['RGB', 'GRB', 'BRG', 'RBG', 'GBR', 'BGR'];
+    let storedCalLoaded = false;   // the saved order is fetched once, from /config
+    let userCycled = false;        // true once TEST has been pressed: stop /config
+                                   // overwriting orderIndex after the user chose
+    let calSessionActive = false;  // true while a test is lit: next TEST cycles
+
     let orderIndex = 0;
 
-    function cycleColorOrder() {
-        orderIndex = (orderIndex + 1) % colorOrders.length;
-        document.getElementById('orderNameText').innerText = colorOrders[orderIndex];
-        sendCalibrationRequest();
+    // TEST: ask the DEVICE what is stored for this port and show it.
+    //
+    // This used to cycle the page's own orderIndex and light that, so TEST always
+    // showed the order AFTER the stored one - confirming a save by displaying the
+    // wrong colour. The device owns the stored value, so the device shows it.
+    // Both buttons must name the port currently selected. Called by the port
+    // dropdown AND by every calibration entry point - it used to be updated only
+    // inside the functions the TEST button called, so changing the port left both
+    // labels showing the old port number.
+    function updatePortLabels() {
+        let port = document.getElementById('calPort').value;
+        let n = 'PORT ' + (parseInt(port) + 1);
+        let t = document.getElementById('testPortNum');
+        if (t) t.innerText = n;
+        let s = document.getElementById('savePortNum');
+        if (s) s.innerText = n;
+        calSessionActive = false;   // new port: next TEST shows the stored value
+        // BLANK THE STRIPS ON PORT CHANGE. Without this the previous port's test
+        // pixels stayed lit, so they looked like the new port's colours.
+        fetch('/calibrate-stop').catch(() => {});
+        note('Port selected: ' + n);
     }
 
+    // ONE BUTTON, TWO JOBS:
+    //   1st press  -> show the STORED value for this port (confirms a save)
+    //   later presses -> cycle to the next order (find a new one)
+    // The stored value is shown FIRST, which is what makes it a confirmation rather
+    // than the old behaviour of always advancing past it.
+    function testPortPressed() {
+        if (!calSessionActive) {
+            calSessionActive = true;
+            showStoredCalibration();
+        } else {
+            cycleColorOrder();
+        }
+    }
+
+    function showStoredCalibration() {
+        let port = document.getElementById('calPort').value;
+        note('TEST pressed: asking the device for the stored order of port ' + (parseInt(port) + 1));
+        fetch(`/calibrate-show?port=${port}`)
+            .then(r => r.text())
+            .then(data => note('TEST result: ' + data))
+            .catch(e => note('TEST FAILED -> ' + e.message));
+    }
+
+    function cycleColorOrder() {
+        userCycled = true;      // stop the async /config fetch overwriting our choice
+        orderIndex = (orderIndex + 1) % colorOrders.length;
+        note('CYCLE: now sending order=' + orderIndex + ' (' + colorOrders[orderIndex] + ')');
+        sendCalibrationTest();
+    }
+
+    // Called on tab entry and on port change. Updates the port name and loads the
+    // stored order, but does NOT light the strip - the strip must only light when
+    // the TEST button is pressed.
     function sendCalibrationRequest() {
+        let port = document.getElementById('calPort').value;
+        // BOTH buttons name the port being tested / saved.
+        let lbl = document.getElementById('testPortNum');
+        if (lbl) lbl.innerText = 'PORT ' + (parseInt(port) + 1);
+        let slbl = document.getElementById('savePortNum');
+        if (slbl) slbl.innerText = 'PORT ' + (parseInt(port) + 1);
+
+        if (!storedCalLoaded) {
+            storedCalLoaded = true;
+            fetch('/config').then(r => r.json()).then(cfg => {
+                if (cfg && cfg.portCal && cfg.portCal[port] !== undefined) {
+                    orderIndex = cfg.portCal[port];
+                }
+            }).catch(() => {});
+        }
+    }
+
+    function sendCalibrationTest() {
         let port = document.getElementById('calPort').value;
         note('calibrate-test port=' + port + ' order=' + orderIndex + ' ...');
         fetch(`/calibrate-test?port=${port}&order=${orderIndex}`)
@@ -890,22 +964,90 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             .catch(err => note('calibrate FAILED -> ' + err.message));
     }
 
+    function sendCalibrationRequest() {
+        let port = document.getElementById('calPort').value;
+        // Show which port the button is testing.
+        let lbl = document.getElementById('testPortNum');
+        if (lbl) lbl.innerText = 'PORT ' + (parseInt(port) + 1);
+
+        // SHOW THE STORED ORDER, not an assumed RGB.
+        //
+        // The page used to start at orderIndex = 0 every time and never read the
+        // saved value. So cycling to the order that made the strip render RGB, then
+        // reloading or saving later, stored 0 (RGB = no reorder) instead - and on
+        // the next power cycle the strip showed its raw wiring, which is the
+        // "powers up showing RBG" symptom. The stored value is what the hardware
+        // already applies, so the UI must display the same number.
+        if (!storedCalLoaded) {
+            storedCalLoaded = true;
+            fetch('/config').then(r => r.json()).then(cfg => {
+                // ONLY apply the stored value if the user has NOT cycled yet.
+                //
+                // This fetch is ASYNC, so it could return AFTER the user had already
+                // pressed TEST and cycled to the order that matched - silently
+                // overwriting orderIndex with the old stored value. SAVE then stored
+                // that overwritten value, which is why a value that rendered RGB
+                // during testing came back as BRG after a power cycle.
+                if (!userCycled && cfg && cfg.portCal && cfg.portCal[port] !== undefined) {
+                    orderIndex = cfg.portCal[port];
+                    note('STARTUP: stored order for port ' + (parseInt(port) + 1) + ' = ' + orderIndex + ' (' + colorOrders[orderIndex] + ')');
+                } else if (userCycled) {
+                    note('STARTUP: /config ignored - you have already cycled');
+                }
+                sendCalibrationRequest();
+            }).catch(() => {});
+            return;
+        }
+
+        // *** NO TEST IS SENT HERE. ***
+        //
+        // This function is called by switchTab('calibrate'), so anything that sends
+        // /calibrate-test in it lights the three calibration pixels the instant the
+        // Colours page is selected.
+        //
+        // The original body ENDED with exactly that send. When the new guarded logic
+        // was added ABOVE it, the old tail was left in place - so it ran on every
+        // call, including the recursive one from the /config callback. That is the
+        // strip lighting up on the Colours page, and it is why every firmware-side
+        // fix made no difference: the PAGE was sending the test.
+        //
+        // The test is sent ONLY by sendCalibrationTest(), which only cycleColorOrder()
+        // calls - i.e. only when the TEST button is pressed.
+    }
+
     function saveCalibration() {
         let port = document.getElementById('calPort').value;
-        fetch(`/calibrate-save?port=${port}&order=${orderIndex}`)
+        // SAVE WHAT IS ON THE STRIP, not the page's orderIndex.
+        //
+        // Sending orderIndex overwrote a correct stored value with stale page
+        // state: TEST showed RGB (the stored value), then SAVE wrote the page's
+        // unrelated index, so the flash showed BRG and the port came back wrong.
+        // The device saves its own calOrder, which is exactly what is illuminated.
+        note('SAVE pressed: saving what is on the strip for port ' + (parseInt(port) + 1));
+        fetch(`/calibrate-savecurrent?port=${port}`)
             .then(response => response.text())
             .then(data => alert(data))
             .catch(err => alert('Error saving calibration: ' + err));
     }
 
     let currentTheme = 'Disco';
-    let activeColorCount = 4;
+    // ALL themes now have exactly eight colours, so this is a constant. The
+    // "Number of Colors" selector and its setColorCount/updateCountButtons plumbing
+    // were removed with it.
+    const activeColorCount = 8;
 
+    // ORIGINAL theme colours, restored exactly as they were before I changed them.
+    //
+    // Christmas, Halloween and Animations each have FOUR colours plus four blacks,
+    // which is how they have always been. All eight slots are stored and persisted
+    // INDIVIDUALLY, so you can duplicate or extend them yourself - the theme does
+    // not decide that for you. The black slots need the white ring to be visible,
+    // which is why the swatch row borders them.
     const themePresets = {
-        'Disco': { max: 8, colors: ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#800080', '#00FFFF', '#FFFFFF', '#FFA500'] },
-        'Christmas': { max: 4, colors: ['#FF0000', '#228B22', '#87CEFA', '#FFD700', '#000000', '#000000', '#000000', '#000000'] },
-        'Halloween': { max: 4, colors: ['#FF0000', '#00FF00', '#4B0082', '#FFA500', '#000000', '#000000', '#000000', '#000000'] },
-        'Animations': { max: 4, colors: ['#FF4500', '#00CED1', '#FF1493', '#ADFF2F', '#000000', '#000000', '#000000', '#000000'] }
+        'Disco':      { max: 8, colors: ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#800080', '#00FFFF', '#FFFFFF', '#FFA500'] },
+        'Christmas':  { max: 8, colors: ['#FF0000', '#228B22', '#87CEFA', '#FFD700', '#000000', '#000000', '#000000', '#000000'] },
+        'Halloween':  { max: 8, colors: ['#FF0000', '#00FF00', '#4B0082', '#FFA500', '#000000', '#000000', '#000000', '#000000'] },
+        'Animations': { max: 8, colors: ['#FF4500', '#00CED1', '#FF1493', '#ADFF2F', '#000000', '#000000', '#000000', '#000000'] }
     };
 
     // Suppress the theme preview while the page is first loading so the
@@ -918,34 +1060,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             b.classList.toggle('active', b.innerText === theme);
         });
 
-        let maxForTheme = themePresets[theme].max;
-        if (activeColorCount > maxForTheme) activeColorCount = maxForTheme;
-
-        updateCountButtons();
         loadThemeColorsToUI();
         buildColorBoxes();
         if (themePreviewEnabled) sendThemePreview();
-    }
-
-    function setColorCount(count) {
-        activeColorCount = count;
-        updateCountButtons();
-        updateColorBoxesState();
-        sendThemePreview();
-    }
-
-    function updateCountButtons() {
-        let maxForTheme = themePresets[currentTheme].max;
-        let buttons = document.querySelectorAll('.count-btn');
-        buttons.forEach(b => {
-            let val = parseInt(b.innerText);
-            if (val > maxForTheme) {
-                b.classList.add('hidden');
-            } else {
-                b.classList.remove('hidden');
-                b.classList.toggle('active', val === activeColorCount);
-            }
-        });
     }
 
     function loadThemeColorsToUI() {
@@ -1743,7 +1860,8 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 }
                 if (cfg.themeCount) {
                     themePresets[savedTheme].max = Math.max(themePresets[savedTheme].max, cfg.themeCount);
-                    activeColorCount = cfg.themeCount;
+                    // (activeColorCount is gone: all themes have eight colours now.)
+
                 }
                 if (cfg.brightness !== undefined) {
                     let b = document.getElementById('masterBrightness');
@@ -1756,9 +1874,19 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 restoreParams(cfg);
                 currentTheme = savedTheme;
                 setTheme(savedTheme);
-                themePreviewEnabled = true;
+                // themePreviewEnabled is deliberately NOT armed here.
+                //
+                // Arming it at page startup meant that from that moment ANY
+                // setTheme() call posted /theme-preview, which sets previewMode = 2
+                // and paints EVERY strip in the theme colours reordered by their
+                // calibration. That is the strip lighting up when the Colours page
+                // is opened, and why six firmware-side fixes changed nothing: the
+                // page kept sending the preview.
+                //
+                // It is armed on the theme BUTTONS instead, so only an explicit
+                // user action previews.
             })
-            .catch(() => { setTheme('Disco'); themePreviewEnabled = true; })
+            .catch(() => { setTheme('Disco'); })
             .finally(() => {
                 buildColorBoxes();
                 loadPlaylistFromServer();

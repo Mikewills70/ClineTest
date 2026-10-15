@@ -283,7 +283,17 @@ unsigned long lastVuPeakFall240V = 0;
 float vuSmoothLED = 0.0;
 
 // Theme preview palette from the UI (up to 8 colours), persisted across reboots
-CRGB previewColors[8];
+// Theme colours are stored PER THEME: four themes x eight colours.
+//
+// They used to be a single set of eight, so saving one theme OVERWROTE the others
+// and on reboot every theme showed whichever was saved last. That is why Animations
+// appeared to store correctly and the rest reverted.
+#define THEME_COUNT 4
+CRGB previewColors[8];                 // the CURRENT theme, used by the renderer
+CRGB themeStore[THEME_COUNT][8];       // all four themes, persisted
+const char* THEME_NAMES[THEME_COUNT] = { "Disco", "Christmas", "Halloween", "Animations" };
+
+
 int previewColorCount = 0;
 String themeName = "Disco";
 // 0 = normal rendering, 1 = hold RGB calibration test, 2 = hold theme preview
@@ -305,6 +315,20 @@ volatile bool blankReq     = false;  // request: blank all outputs
 volatile bool flashReq     = false;  // request: do the "saved" confirmation blink
 volatile int  calPort      = 0;      // RGB calibration test: port
 volatile int  calOrder     = 2;      // RGB calibration test: colour order
+// How long the calibration test stays lit. previewMode = 1 was previously latched
+// forever, so opening the Colours page showed the strip lit on the last test.
+#define CAL_TEST_MS 3000UL
+// SAVE CONFIRMATION FLASH: off -> on -> off.
+//
+// Requested several times and never built. The test pixels flash to acknowledge a
+// successful save, so there is no doubt the button did something.
+#define CAL_FLASH_OFF1  180UL   // dark
+#define CAL_FLASH_ON    540UL   // lit
+#define CAL_FLASH_END   900UL   // dark again
+unsigned long calFlashMs = 0;   // 0 = no flash running
+unsigned long calTestMs     = 0; // when the current test started
+
+unsigned long themePrevMs   = 0;     // when the theme preview was requested
 
 // ---------------------------------------------------------------------------
 // Per-strip pattern engine + Timeline + master brightness.
@@ -333,6 +357,20 @@ struct PortCfg {
 };
 
 PortCfg portCfg[NUM_PORTS];
+
+static int themeIndexOf(const String& name) {
+  for (int i = 0; i < THEME_COUNT; i++)
+    if (name.equalsIgnoreCase(THEME_NAMES[i])) return i;
+  return 0;                                   // unknown -> Disco
+}
+
+// Copy a stored theme into previewColors, which is what the renderer and the
+// colour resolver read.
+static void themeLoadToPreview(int idx) {
+  if (idx < 0 || idx >= THEME_COUNT) idx = 0;
+  for (int i = 0; i < 8; i++) previewColors[i] = themeStore[idx][i];
+}
+
 
 // "#rrggbb" (or "rrggbb") -> 0xRRGGBB. Returns `dflt` if unparseable.
 //
@@ -366,7 +404,13 @@ unsigned long ledStepMs[NUM_PORTS]  = {0};
 // 3.10.7 ships one but it is disabled in the library (all files .disabled and
 // absent from lcd_cam/_build.cpp.hpp).
 // NeoGrbFeature is used because leds[][] is ALREADY in each port's wire order.
-typedef NeoPixelBus<NeoGrbFeature, NeoEsp32LcdX8Ws2811Method> Ws2811Strip;
+// X16, NOT X8. The X8 type sets BusMaxCount = sizeof(uint8_t) * 8 = 8 mux channels,
+// and RegisterNewMuxBus() returns InvalidMuxId once those are used. Each strip
+// registers its own mux, so with TEN strips the 9th and 10th were never encoded
+// into the DMA - the render ran, the pixels were set, the flags were right, and
+// nothing was transmitted for ports 9/10. The X16 type uses uint16_t flags, giving
+// 16 mux channels, which is what ten outputs actually need.
+typedef NeoPixelBus<NeoGrbFeature, NeoEsp32LcdX16Ws2811Method> Ws2811Strip;
 Ws2811Strip *g_strip[NUM_PORTS] = {nullptr};
 
 // Bring-up probe: logged so we can see whether the instances register, whether the
@@ -412,13 +456,15 @@ volatile uint32_t g_loopN = 0;
 volatile bool ledDirty[NUM_PORTS] = {false};
 
 void ledShowAll() {
-  // NEVER BLOCK. NeoPixelBus's Show() waits for the previous LCD DMA transfer to
-  // finish, and that wait is precisely what shows up as a 30-40 ms spike while the
-  // average frame is only ~5 ms. CanShow() reports whether the hardware is ready,
-  // so a frame is simply skipped when it is not: the display then runs at exactly
-  // the rate the hardware can sustain, with no stalls. This works identically for
-  // all ten ports, since they are transmitted together in one parallel transfer.
-  if (g_strip[0] && !g_strip[0]->CanShow()) { g_showSkip++; return; }
+  // NO FRAME SKIPPING. CanShow()/skip was added when a ten-strip transmit took
+  // 4,700 us and waiting for it produced 40 ms stalls. The X16 driver now moves the
+  // same frame in ~1,330 us, so waiting is cheap and blocking GUARANTEES every
+  // position is transmitted.
+  //
+  // Skipping a frame does not just drop a frame: the step has already advanced
+  // (ledStepMs/advancePort run before the show), so the position is simply never
+  // displayed - which is exactly the "dot skips a pixel instead of using them all"
+  // seen at maximum speed.
 
   int64_t t0 = esp_timer_get_time();
   // Fast path: copy only the strips that stepped. Fallback: if NO strip is marked
@@ -443,6 +489,23 @@ void ledShowAll() {
     if (g_strip[p]) g_strip[p]->Show();
   }
   int64_t t2 = esp_timer_get_time();
+  // TRANSMISSION LOG (rate-limited). Moved to AFTER the Show loop.
+  //
+  // It was placed BETWEEN t1 and the Show() calls, so it measured the time to reach
+  // the log line - ~7us - and NOT the transmit at all, while also delaying the show.
+  // That made the X8->X16 question unanswerable: the X16 driver writes uint16_t DMA
+  // words (2 bytes per bit period) against the X8's uint8_t (1 byte), so the
+  // transfer volume may have DOUBLED, which would halve the maximum frame rate and
+  // therefore the dot speed. This now reports the real figure.
+  static unsigned long lastTxLog = 0;
+  if (millis() - lastTxLog >= 1000) {
+    lastTxLog = millis();
+    int present = 0;
+    for (int p = 0; p < NUM_PORTS; p++) if (g_strip[p]) present++;
+    logAppend("TX strips=%d/10 shows=%lu skip=%lu copy=%ldus tx=%ldus (was 4700us on X8)",
+              present, (unsigned long)g_npbShows, (unsigned long)g_showSkip,
+              (long)(t1 - t0), (long)(t2 - t1));
+  }
   {
     int32_t cu = (int32_t)(t1 - t0), xu = (int32_t)(t2 - t1);
     g_copyUsSum += cu; if (cu > g_copyUsMax) g_copyUsMax = cu;
@@ -567,7 +630,12 @@ void loadSettings();
 // HELPERS
 // ==========================================
 
-// Reorder a colour according to a calibration index (0:RGB 1:GRB 2:BRG 3:RBG 4:GBR 5:BGR)
+// Reorder a colour according to a calibration index.
+// THE AUTHORITATIVE TABLE - this is what the firmware actually does:
+//   0:RGB  1:GRB  2:BRG  3:RBG  4:GBR  5:BGR
+// NOTE: index 1 is GRB and index 3 is RBG. A previous log label in this file had
+// those two swapped, which sent the calibration investigation down the wrong path:
+// a stored value of 3 was reported as "GRB" when the code was applying RBG.
 CRGB applyColorOrder(CRGB inputColor, int orderIndex) {
   uint8_t r = inputColor.r;
   uint8_t g = inputColor.g;
@@ -692,10 +760,14 @@ void saveSettings() {
   for (int i = 0; i < 4; i++)
     preferences.putUInt((String("colLED") + i).c_str(), colourLED[i]);
   preferences.putString("themeName", themeName);
-  preferences.putInt("themeCnt", previewColorCount);
-  for (int i = 0; i < 8; i++) {
-    uint32_t c = ((uint32_t)previewColors[i].r << 16) | ((uint32_t)previewColors[i].g << 8) | previewColors[i].b;
-    preferences.putUInt(("thCol" + String(i)).c_str(), c);
+  // PER THEME: four themes x eight colours. Keys are short (th0c0..th3c7) to stay
+  // inside the NVS 15-character key limit.
+  for (int t = 0; t < THEME_COUNT; t++) {
+    for (int i = 0; i < 8; i++) {
+      uint32_t c = ((uint32_t)themeStore[t][i].r << 16) |
+                   ((uint32_t)themeStore[t][i].g << 8) | themeStore[t][i].b;
+      preferences.putUInt(("th" + String(t) + "c" + String(i)).c_str(), c);
+    }
   }
   preferences.end();
 }
@@ -755,10 +827,16 @@ void loadSettings() {
     colourLED[i] = preferences.getUInt((String("colLED") + i).c_str(),
                                        colourLED[i]);
   themeName = preferences.getString("themeName", "Disco");
-  previewColorCount = constrain(preferences.getInt("themeCnt", 0), 0, 8);
-  for (int i = 0; i < 8; i++) {
-    uint32_t c = preferences.getUInt(("thCol" + String(i)).c_str(), 0);
-    previewColors[i] = CRGB((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+  previewColorCount = 8;   // ALWAYS 8 - the count concept is gone entirely.
+  // PER THEME restore. A theme with nothing stored keeps what it has, so the
+  // presets the UI sends on first use are not wiped by a reboot.
+  for (int t = 0; t < THEME_COUNT; t++) {
+    for (int i = 0; i < 8; i++) {
+      uint32_t c = preferences.getUInt(("th" + String(t) + "c" + String(i)).c_str(), 0);
+      if (c != 0 || i == 0) {   // 0 means "nothing stored" (pure black is left alone)
+        themeStore[t][i] = CRGB((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+      }
+    }
   }
   preferences.end();
 
@@ -815,6 +893,13 @@ void handleGetSettings() {
   doc["inv240"] = invert240V;     doc["invLED"] = invertLED;
   doc["music240"] = music240V;    doc["musicLED"] = musicLED;
   doc["beatSens"] = beatSens;      // global: one detector drives both displays
+  // Per-port colour calibration order (0=RGB 1=GRB 2=BRG 3=RBG 4=GBR 5=BGR).
+  // Exposed so the UI can SHOW the stored order for the selected port instead of
+  // always displaying RGB and disagreeing with what the strip is doing.
+  {
+    JsonArray ca = doc["portCal"].to<JsonArray>();
+    for (int i = 0; i < NUM_PORTS; i++) ca.add(portColorOrders[i]);
+  }
   // LED colour, so a reload shows the saved colours rather than the HTML defaults.
   {
     JsonArray ca = doc["colourLED"].to<JsonArray>();
@@ -828,7 +913,7 @@ void handleGetSettings() {
   doc["theme"] = themeName;
   doc["themeCount"] = previewColorCount;
   JsonArray cols = doc["themeColors"].to<JsonArray>();
-  for (int i = 0; i < previewColorCount && i < 8; i++) {
+  for (int i = 0; i < 8; i++) {
     char buf[8];
     snprintf(buf, sizeof(buf), "#%02X%02X%02X", previewColors[i].r, previewColors[i].g, previewColors[i].b);
     cols.add(buf);
@@ -847,11 +932,55 @@ void loadPortCalibrations() {
   prefs.end();
 }
 
+// Stop the calibration test. previewMode = 1 is otherwise LATCHED: once a test
+// runs the strip stays lit showing it, forever, including when the Colours page is
+// reopened - which is the "strip lights up when I open the Colours page" fault.
+// Nothing ever exited the test until now.
+// Show the STORED order for a port. The DEVICE owns the truth here.
+//
+// TEST used to call /calibrate-test with the page's own orderIndex, and the page
+// advanced that index on every press - so TEST always illuminated the value AFTER
+// the stored one, and pressing it to CONFIRM a save showed a different colour
+// instead. The device now reports what it has, so the button confirms rather than
+// contradicts.
+void handleCalibrateShow() {
+  int port = server.arg("port").toInt();
+  if (port < 0 || port >= NUM_PORTS) port = 0;
+  calPort  = port;
+  calOrder = portColorOrders[port];      // the STORED value, not a page guess
+  previewMode = 1;
+  calTestMs = millis();
+  previewDirty = true;
+  logAppend("CALSHOW port=%d storedOrder=%d (0=RGB 1=GRB 2=BRG 3=RBG 4=GBR 5=BGR)",
+            port, calOrder);
+  server.send(200, "text/plain", "Showing stored order " + String(calOrder) +
+                                  " for port " + String(port + 1));
+}
+
+void handleCalibrateStop() {
+  previewMode = 0;
+  previewDirty = true;
+  // ALSO BLANK THE STRIPS. Setting previewMode = 0 only returns to the normal
+  // render - with no pattern selected that leaves the previous test's pixels lit,
+  // so changing port showed the OLD port's colours and looked like they belonged
+  // to the newly selected port. Blank first, then the normal render takes over.
+  blankReq = true;
+  server.send(200, "text/plain", "Calibration test stopped");
+}
+
 void handleCalibrateTest() {
   if (server.hasArg("port") && server.hasArg("order")) {
     calPort = server.arg("port").toInt();
     calOrder = server.arg("order").toInt();
-    previewMode = 1;      // held by the display task until another selection
+    // Log what the PAGE sent, so the sequence is visible:
+    //   CALTEST is what is being tested
+    //   CALSAVE is what was stored
+    //   CALIB (at boot) is what was loaded back
+    // A mismatch between those three IS the fault.
+    logAppend("CALTEST port=%d order=%d (0=RGB 1=GRB 2=BRG 3=RBG 4=GBR 5=BGR)",
+              calPort, calOrder);
+    previewMode = 1;      // held by the display task, but only for CAL_TEST_MS
+    calTestMs = millis();
     previewDirty = true;
     showStatus(2);        // IO48: 2 blinks = calibrate-test received
     server.send(200, "text/plain", "Calibration Test Active");
@@ -860,7 +989,39 @@ void handleCalibrateTest() {
   }
 }
 
+// Save whatever the device is CURRENTLY SHOWING for a port.
+//
+// This exists because the page's SAVE sent its own orderIndex, which is page state
+// and can be stale. Pressing TEST shows the STORED value (correct), then SAVE sent
+// the page's unrelated index and OVERWROTE the good value - the strip flashed the
+// wrong colours and the port tested wrong afterwards.
+//
+// The device knows exactly what it is illuminating (calOrder), so it saves that.
+void handleCalibrateSaveCurrent() {
+  int port = server.arg("port").toInt();
+  if (port < 0 || port >= NUM_PORTS) { server.send(400, "text/plain", "Bad port"); return; }
+  int order = calOrder;                       // what is on the strip right now
+  if (order < 0 || order > 5) order = portColorOrders[port];
+  portColorOrders[port] = order;
+  preferences.begin("lightshow", false);
+  preferences.putInt(("port_ord_" + String(port)).c_str(), order);
+  preferences.end();
+  logAppend("CALSAVECUR port=%d order=%d STORED (what was on the strip)", port, order);
+  // Acknowledge on the strip: off -> on -> off.
+  calPort = port;
+  calOrder = order;
+  calFlashMs = millis();
+  previewDirty = true;
+  server.send(200, "text/plain", "Port " + String(port + 1) + " Calibration Saved!");
+}
+
 void handleCalibrateSave() {
+  // Logged BEFORE the argument check, so we can tell "the request never arrived"
+  // apart from "the arguments were rejected". Without this the absence of a
+  // CALSAVE line is ambiguous - and it was, for a whole round.
+  logAppend("CALSAVE-REQ received port=%s order=%s",
+            server.hasArg("port") ? server.arg("port").c_str() : "(none)",
+            server.hasArg("order") ? server.arg("order").c_str() : "(none)");
   if (server.hasArg("port") && server.hasArg("order")) {
     int port = server.arg("port").toInt();
     int order = server.arg("order").toInt();
@@ -870,6 +1031,14 @@ void handleCalibrateSave() {
       preferences.begin("lightshow", false);
       preferences.putInt(("port_ord_" + String(port)).c_str(), order);
       preferences.end();
+      // Log what was ACCEPTED and stored, so it can be compared with the CALTEST
+      // on the same press and with the CALIB line after a power cycle.
+      logAppend("CALSAVE port=%d order=%d STORED", port, order);
+      // Acknowledge on the strip: off -> on -> off.
+      calPort = port;
+      calOrder = order;
+      calFlashMs = millis();
+      previewDirty = true;
       server.send(200, "text/plain", "Port " + String(port + 1) + " Calibration Saved!");
     } else {
       server.send(400, "text/plain", "Invalid port index");
@@ -916,23 +1085,42 @@ void handleThemePreview() {
 
   int count = doc["count"] | 0;
   count = constrain(count, 0, 8);
-  previewColorCount = count;
+  previewColorCount = 8;   // always 8; the incoming count is ignored
 
   String tn = String((const char*)(doc["theme"] | "Disco"));
   if (tn.length()) themeName = tn;
 
-  for (int i = 0; i < 8; i++) previewColors[i] = CRGB::Black;
+  // Write into THIS theme's slot, then copy it to previewColors for rendering.
+  int ti = themeIndexOf(themeName);
+  for (int i = 0; i < 8; i++) themeStore[ti][i] = CRGB::Black;
   JsonArray colors = doc["colors"].as<JsonArray>();
   int idx = 0;
   for (JsonVariant v : colors) {
     if (idx >= 8) break;
-    previewColors[idx] = hexToCRGB(v.as<String>());
+    themeStore[ti][idx] = hexToCRGB(v.as<String>());
     idx++;
   }
 
-  previewMode = 2;      // held by the display task
+  themeLoadToPreview(ti);
+  themePrevMs = millis();
+  previewMode = 2;      // held by the display task, but only for CAL_TEST_MS
   previewDirty = true;
   showStatus(3);        // IO48: 3 blinks = theme-preview received
+
+  // SAVE THE THEME COLOURS IMMEDIATELY.
+  //
+  // They used to ride on the deferred saveSettingsPending path, which is
+  // deliberately NOT run while displayActive - a flash write during a show is the
+  // erase that froze the display. But a theme colour change is a DELIBERATE user
+  // action, and the strip is normally lit while editing, so the save was held
+  // forever: nothing was persisted and every theme came back BLACK on reboot.
+  //
+  // Writing here costs one flash erase when the user changes a colour. That is
+  // acceptable for an explicit save; the stall problem was CONTINUOUS logging
+  // writes, not this. saveSettingsPending is cleared so the same data is not
+  // written twice.
+  saveSettingsPending = false;
+  saveSettings();
   // Persisted only on an explicit Save (see /save-flash).
 
   server.send(200, "text/plain", "Theme Preview Active");
@@ -2562,11 +2750,11 @@ void runLEDPattern() {
   for (int p = 0; p < NUM_PORTS; p++) {
     const PortCfg &c = portCfg[p];
     bool isVu = (c.pat >= LP_VU_METER);
-    unsigned long interval = isVu ? 25UL : (unsigned long)(constrain(c.speed, 0.005f, 5.0f) * 1000.0);
+    unsigned long interval = isVu ? 25UL : (unsigned long)(constrain(c.speed, 0.002f, 5.0f) * 1000.0);
     // Floor the step at the frame rate (5 ms), NOT 20 ms. The 20 ms floor here was
     // a hard 50 steps/second ceiling that no slider setting could beat - it is the
     // "48/s" that showed up in every log and the reason more speed was impossible.
-    if (interval < 5) interval = 5;
+    if (interval < 2) interval = 2;
 
     if (now - ledStepMs[p] < interval) continue;
     ledStepMs[p] = now;
@@ -2574,7 +2762,7 @@ void runLEDPattern() {
 
     // A step MUST be displayed, so it can never be faster than the frame rate -
     // otherwise the dot jumps and pixels are never lit. Keep this equal to frameMs.
-    if (interval < 5) interval = 5;
+    if (interval < 2) interval = 2;
 
     drawPortPattern(p);
     advancePort(p);
@@ -2594,7 +2782,7 @@ void runLEDPattern() {
   // cycle were in fact LittleFS flash erases (cache disabled on BOTH cores) and are
   // now fixed. If CanShow() starts skipping frames, this is past the hardware limit
   // and should go back up toward 7 ms.
-  const unsigned long frameMs = 5;
+  const unsigned long frameMs = 2;
   if (anyDrew && !beatLatchLED) {}          // (keep the beat latch semantics)
   if (anyDrew && (now - lastShowMs >= frameMs)) {
     lastShowMs = now;
@@ -2746,7 +2934,20 @@ void runTimelineSequencer() {
 void renderCalibrationTest() {
   for (int p = 0; p < NUM_PORTS; p++)
     for (int i = 0; i < NUM_LEDS_PER_STRIP; i++) leds[p][i] = CRGB::Black;
+  // MARK EVERY PORT DIRTY.
+  //
+  // This is why the test appeared to do nothing on ports 9 and 10: ledShowAll()
+  // only copies strips whose ledDirty[] is set, and falls back to copying ALL only
+  // when NONE are dirty. Cleared strips were never marked, so with any other port
+  // left dirty from an earlier test, the newly cleared/lit ports were never
+  // transmitted. The moving dot hid this completely because it repaints every
+  // frame. Cleared pixels are a change and must be marked as one.
+  for (int p = 0; p < NUM_PORTS; p++) ledDirty[p] = true;
   int port = calPort, order = calOrder;
+  // (The CALRENDER instrument that logged every test render was removed here: it
+  // fired twice a second and had served its purpose proving this function runs.
+  // Removal confirmed that ports 9/10 lighting was fixed by the X16 driver change,
+  // not by anything about the render.)
   if (port >= 0 && port < NUM_PORTS) {
     leds[port][0] = applyColorOrder(CRGB::Red, order);
     leds[port][1] = applyColorOrder(CRGB::Green, order);
@@ -3010,6 +3211,23 @@ void setup() {
   loadSettings();
   loadPortCalibrations();
 
+  // Populate previewColors from the restored theme. WITHOUT THIS the themes come
+  // back BLACK on every power cycle: themeLoadToPreview() was only ever called
+  // from /theme-preview, so previewColors kept its constructed (black) value no
+  // matter what was stored - and even a correct save looked like a failed one.
+  themeLoadToPreview(themeIndexOf(themeName));
+
+  // Report the loaded calibration. It is loaded BEFORE the display is configured
+  // (applyGlobalsToPorts / applyTimelineRow below), so this line proves what the
+  // strip will actually use on the very first frame - rather than leaving the
+  // "powers up showing the wrong order" report to be reasoned about.
+  // ALL TEN PORTS. It only reported 1-4, so ports 5-8 could not be verified from
+  // the log - and that is exactly what needed checking.
+  logAppendNow("CALIB 1..10: %d %d %d %d %d %d %d %d %d %d  (0=RGB 1=GRB 2=BRG 3=RBG 4=GBR 5=BGR)",
+               portColorOrders[0], portColorOrders[1], portColorOrders[2], portColorOrders[3],
+               portColorOrders[4], portColorOrders[5], portColorOrders[6], portColorOrders[7],
+               portColorOrders[8], portColorOrders[9]);
+
   logTrimAtBoot();
   logAppendNow("BOOT #%u reason=%d(%s) prevUp=%us prevStage=%u prevHeap=%u nvsFree=%u erased=%u out=%s",
             (unsigned)dbgBoots, prevReason, resetReasonText(prevReason),
@@ -3047,7 +3265,10 @@ void setup() {
   server.on("/update", HTTP_POST, handleUpdate);
   server.on("/save", HTTP_POST, handleSave);
   server.on("/calibrate-test", HTTP_GET, handleCalibrateTest);
+  server.on("/calibrate-show", HTTP_GET, handleCalibrateShow);
+  server.on("/calibrate-stop", HTTP_GET, handleCalibrateStop);
   server.on("/calibrate-save", HTTP_GET, handleCalibrateSave);
+  server.on("/calibrate-savecurrent", HTTP_GET, handleCalibrateSaveCurrent);
   server.on("/theme-preview", HTTP_POST, handleThemePreview);
   server.on("/live-tweak", HTTP_POST, handleLiveTweak);
   server.on("/save-playlist", HTTP_POST, handleSavePlaylist);
@@ -3114,21 +3335,54 @@ void loop() {
   if (flashReq) {
     flashReq = false;
     doSaveFlash();
+  } else if (calFlashMs) {
+    // SAVE CONFIRMATION: off -> on -> off. Runs before the normal preview branches
+    // so it cannot be overridden by them.
+    unsigned long e = millis() - calFlashMs;
+    if (e < CAL_FLASH_OFF1) {
+      previewMode = 0; blankReq = true;                 // dark
+    } else if (e < CAL_FLASH_ON) {
+      previewMode = 1; calTestMs = millis();            // lit (keeps the test alive)
+      if (previewDirty || (millis() - lastPreviewRender >= 500)) {
+        previewDirty = false; lastPreviewRender = millis();
+        renderCalibrationTest();
+      }
+    } else if (e < CAL_FLASH_END) {
+      previewMode = 0; blankReq = true;                 // dark again
+    } else {
+      calFlashMs = 0; previewMode = 0; previewDirty = true;
+    }
   } else if (blankReq) {
     blankReq = false;
     blankDisplays();
   } else if (previewMode == 1) {
+    // AUTO-EXPIRE THE CALIBRATION TEST.
+    //
+    // previewMode = 1 was latched with nothing to end it, so once a test ran the
+    // strip stayed lit showing it - which is why merely opening the Colours page
+    // showed the strip lit in the tested colours. The stop-on-leave endpoint does
+    // not help if the page is cached and calls /calibrate-test on entry, so the
+    // test now ends by itself. Press TEST again to re-arm.
+    if (millis() - calTestMs > CAL_TEST_MS) { previewMode = 0; previewDirty = true; }
     // Re-assert held previews periodically: they are otherwise only drawn when
     // marked dirty, so a single garbled frame (or anything that repaints the
     // strips) leaves them looking like a brief flash instead of staying on.
-    if (previewDirty || (millis() - lastPreviewRender >= 500)) {
+    if (previewMode == 1 && (previewDirty || (millis() - lastPreviewRender >= 500))) {
       previewDirty = false; lastPreviewRender = millis();
       renderCalibrationTest();
     }
   } else if (previewMode == 2) {
+    // THE THEME PREVIEW WAS ALSO LATCHED FOREVER. The Colours page sends a theme
+    // preview as soon as it is opened, so this - not the calibration test - is what
+    // lit every strip in the theme colours when the page was selected.
+    // ONE-SHOT: render the palette then RELEASE immediately. It used to be held,/
+    // and because the Colours page re-sends the preview the hold timer was reset
+    // every time, so it never expired - which is the "strips light up when I
+    // select the Colours page and stay lit" fault.
     if (previewDirty || (millis() - lastPreviewRender >= 500)) {
       previewDirty = false; lastPreviewRender = millis();
       renderThemePreview();
+      previewMode = 0;                    // one-shot: release at once
     }
   } else if (displayActive) {
     bool beat = beatFlag;
