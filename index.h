@@ -724,6 +724,31 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             </thead>
             <tbody>
                 <tr>
+                    <td class="name-col">Beat Sensitivity</td>
+                    <td>
+                        <!-- Beat sensitivity: LEFT = fewer, only strong kicks.
+                             RIGHT = more beats, catches quieter/denser music.
+                             Global: one detector drives BOTH the strips and the 240V. -->
+                        <input type="range" id="paramBeatSens" min="0.01" max="1.00" step="0.01" value="0.20" oninput="liveParamChanged('LED')">
+                        <span id="beatSensVal" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.20</span>
+                    </td>
+                </tr>
+                <tr>
+                    <td class="name-col">Colour</td>
+                    <td>
+                        <!-- One box for the dot/chase patterns; four for the VU meters.
+                             The four share the same total width as the single box (they
+                             are flex siblings, so the row length never changes). -->
+                        <div id="colourBoxesLED" style="display:flex; gap:4px; width:100%;">
+                            <input type="color" id="paramColourLED0" value="#ffffff" oninput="liveParamChanged('LED')" style="flex:1 1 0; min-width:0; width:100%; height:34px; padding:2px; border:1px solid var(--border-color); border-radius:4px; background:var(--surface-color); cursor:pointer;">
+                            <input type="color" id="paramColourLED1" value="#ffd000" oninput="liveParamChanged('LED')" style="flex:1 1 0; min-width:0; width:100%; height:34px; padding:2px; border:1px solid var(--border-color); border-radius:4px; background:var(--surface-color); cursor:pointer; display:none;">
+                            <input type="color" id="paramColourLED2" value="#ff7000" oninput="liveParamChanged('LED')" style="flex:1 1 0; min-width:0; width:100%; height:34px; padding:2px; border:1px solid var(--border-color); border-radius:4px; background:var(--surface-color); cursor:pointer; display:none;">
+                            <input type="color" id="paramColourLED3" value="#ff0000" oninput="liveParamChanged('LED')" style="flex:1 1 0; min-width:0; width:100%; height:34px; padding:2px; border:1px solid var(--border-color); border-radius:4px; background:var(--surface-color); cursor:pointer; display:none;">
+                        </div>
+                        <span id="colourHintLED" style="font-size:0.75rem; display:block; color:var(--text-secondary); margin-top:2px;"></span>
+                    </td>
+                </tr>
+                <tr>
                     <td class="name-col">Speed</td>
                     <td>
                         <input type="range" id="paramSpeedLED" min="0.005" max="0.50" step="0.001" value="0.007" oninput="liveParamChanged('LED')">
@@ -1032,6 +1057,10 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     function updateParamLabels(section) {
         let suffix = (section === '240V') ? '240' : 'LED';
         document.getElementById('speedVal' + suffix).innerText = parseFloat(document.getElementById('paramSpeed' + suffix).value).toFixed(3) + 's';
+        // Beat sensitivity is global (no section suffix).
+        let bsEl = document.getElementById('paramBeatSens');
+        let bsLbl = document.getElementById('beatSensVal');
+        if (bsEl && bsLbl) bsLbl.innerText = parseFloat(bsEl.value).toFixed(2);
         document.getElementById('qtyVal' + suffix).innerText = document.getElementById('paramQuantity' + suffix).value;
         document.getElementById('sizeVal' + suffix).innerText = document.getElementById('paramSize' + suffix).value;
         document.getElementById('freqVal' + suffix).innerText = document.getElementById('paramFrequency' + suffix).value + 'Hz';
@@ -1054,6 +1083,16 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         const chk = (id, v) => { let e = document.getElementById(id); if (e && v !== undefined) e.checked = !!v; };
 
         set('paramSpeed240', cfg.speed240);   set('paramSpeedLED', cfg.speedLED);
+        set('paramBeatSens', cfg.beatSens);   // global
+        // Restore the saved LED colours. Guarded: an older saved config has no
+        // colourLED array, and we must not blank the inputs in that case.
+        if (cfg.colourLED && cfg.colourLED.length) {
+            for (let i = 0; i < 4 && i < cfg.colourLED.length; i++) {
+                let el = document.getElementById('paramColourLED' + i);
+                if (el && /^#[0-9a-f]{6}$/i.test(cfg.colourLED[i])) el.value = cfg.colourLED[i];
+            }
+        }
+        updateColourBoxes('LED');
         set('paramQuantity240', cfg.qty240);  set('paramQuantityLED', cfg.qtyLED);
         set('paramSize240', cfg.size240);     set('paramSizeLED', cfg.sizeLED);
         chk('paramWrap240', cfg.wrap240);     chk('paramWrapLED', cfg.wrapLED);
@@ -1072,6 +1111,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
     function liveParamChanged(section) {
         updateParamLabels(section);
+        updateColourBoxes(section);
 
         clearTimeout(window.liveTimer);
         window.liveTimer = setTimeout(() => {
@@ -1102,8 +1142,37 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             decay: (section === '240V') ? document.getElementById('paramDecay240_240').value : document.getElementById('paramDecayLed_LED').value,
             musicSource: document.getElementById('paramMusicSource' + suffix).value,
             frequency: document.getElementById('paramFrequency' + suffix).value,
-            beatMult: document.getElementById('paramBeatMult' + suffix).value
+            beatMult: document.getElementById('paramBeatMult' + suffix).value,
+            // Global beat-detection sensitivity (one detector, both displays), so
+            // it is sent with either section.
+            beatSens: document.getElementById('paramBeatSens').value,
+            // Only the LED section has colour. Omitted (undefined) for 240V, which
+            // JSON.stringify drops, so the backend array parse never sees it.
+            colour: (section === '240V') ? undefined
+                    : [0, 1, 2, 3].map(i => document.getElementById('paramColourLED' + i).value)
         };
+    }
+
+    // A VU pattern uses four colour boxes; every other LED pattern uses one.
+    // The boxes are flex siblings in a fixed-width row, so four boxes share
+    // exactly the space the single box occupies - the row length never changes.
+    function isVuPattern() {
+        let sel = document.getElementById('patternLayoutSelectLED');
+        if (!sel) return false;
+        let txt = (sel.value || '') + ' ' +
+                  (sel.options && sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex].text : '');
+        return /vu/i.test(txt) || /vu/i.test(selectedPatternNameLED || '');
+    }
+
+    function updateColourBoxes(section) {
+        if (section === '240V') return;
+        let four = isVuPattern();
+        for (let i = 0; i < 4; i++) {
+            let el = document.getElementById('paramColourLED' + i);
+            if (el) el.style.display = (i === 0 || four) ? '' : 'none';
+        }
+        let hint = document.getElementById('colourHintLED');
+        if (hint) hint.innerText = four ? '4 bands: low \u2192 peak' : '';
     }
 
     function getLayoutSvgIcon(layout) {

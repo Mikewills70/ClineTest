@@ -25,14 +25,18 @@ try {
 Start-Sleep -Milliseconds 400
 $port.Write('L')            # ask the firmware to dump /log.txt
 
+# The firmware ALSO prints its 30 s heartbeat live to serial (logAppend does both),
+# because the flash log is deliberately NOT written while a show is running - a
+# LittleFS write is a flash erase that freezes both cores, which was the display
+# stall. So capture long enough to guarantee a live heartbeat arrives, and do NOT
+# stop at the dump's END marker or the live lines after it would be missed.
 $sb = New-Object System.Text.StringBuilder
-$deadline = (Get-Date).AddSeconds(20)
+$deadline = (Get-Date).AddSeconds(45)
 while ((Get-Date) -lt $deadline) {
     if ($port.BytesToRead -gt 0) {
         [void]$sb.Append($port.ReadExisting())
     }
     Start-Sleep -Milliseconds 150
-    if ($sb.Length -gt 0 -and $sb.ToString() -match '-----END-----') { break }
 }
 $port.Close()
 

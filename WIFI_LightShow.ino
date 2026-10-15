@@ -65,6 +65,23 @@ float speedLED = 0.005;   int quantityLED = 1; int sizeLED = 1;
 int   freqLED  = 50;    int multLED     = 2; String musicLED = "BASS";
 float attackLED = 0.15; float decayLED = 0.01;
 bool  wrapLED = false;  bool invertLED = false;
+// LED page colour, 0xRRGGBB. [0] drives every non-VU pattern; [0..3] are the VU
+// meter's four bands, low level first. Defaults reproduce the previous look.
+uint32_t colourLED[4] = { 0xFFFFFF, 0xFFD000, 0xFF7000, 0xFF0000 };
+
+// BEAT SENSITIVITY - the absolute part of the onset threshold, and the control
+// that actually matters. thr = local_mean * ODF_K + beatSens.
+//
+// The novelty curve spends most of its time near zero, so local_mean sits around
+// 0.11 and the adaptive term contributes almost nothing. A value of 0.02 put the
+// threshold at ~0.12 while peaks reach 0.43, so nearly every peak fired - 4-5
+// detections a SECOND. At 0.15 the bar sits mid-peak and only real kicks clear it.
+//
+// GLOBAL: one detector drives both the strips and the 240V. Exposed in the UI as
+// "Beat Sensitivity" with the scale REVERSED so the slider's right-hand end is the
+// most sensitive (most beats), which is how such a control should read.
+// thr = (1 - beatSens) * 60, so 0.2 is the equivalent of the old 0.8.
+float beatSens = 0.2f;
 
 // ---- Playlist ----
 PlaylistItem playlist[MAX_PLAYLIST_ITEMS];
@@ -111,7 +128,7 @@ int ledExplosionStep = 0;
 // could not be made to mean anything. 512 points gives ~21 Hz bins, enough to
 // resolve 30-100 Hz kick content properly. The window becomes ~48 ms, which is
 // still fast enough for beat timing.
-#define FFT_SAMPLES   512
+#define FFT_SAMPLES   1024
 #define FFT_MID_MAX   2000.0f      // upper edge of the "mid" band, in Hz
 float fftReal[FFT_SAMPLES];
 float fftImag[FFT_SAMPLES];
@@ -306,9 +323,29 @@ struct PortCfg {
   int   size   = 1;
   bool  wrap   = false;
   bool  invert = false;
+  // Per-port colour, 0xRRGGBB.
+  //   colour[0]          - the colour used by every non-VU pattern (dot, chase,
+  //                        centre-out, knight rider) and by Invert.
+  //   colour[0]..[3]     - the four bands of the VU meters, low level first.
+  // Defaults preserve the previous look exactly: white for the dot patterns,
+  // and the classic green -> yellow -> orange -> red VU gradient.
+  uint32_t colour[4] = { 0xFFFFFF, 0xFFD000, 0xFF7000, 0xFF0000 };
 };
 
 PortCfg portCfg[NUM_PORTS];
+
+// "#rrggbb" (or "rrggbb") -> 0xRRGGBB. Returns `dflt` if unparseable.
+//
+// NOTE: this deliberately sits BELOW the type declarations. The Arduino IDE
+// inserts auto-generated function prototypes just before the sketch's FIRST
+// function, so defining any function above LedPattern/PortCfg moves that block
+// above them and the build fails with "<type> does not name a type".
+uint32_t parseHexColor(const char* s, uint32_t dflt) {
+  if (!s) return dflt;
+  while (*s == ' ' || *s == '#') s++;
+  if (!*s) return dflt;
+  return (uint32_t)strtoul(s, nullptr, 16) & 0xFFFFFFUL;
+}
 
 int           ledPosArr[NUM_PORTS]  = {0};
 // Direction of travel per strip. EVERY element must be non-zero: the initialiser
@@ -651,6 +688,9 @@ void saveSettings() {
   preferences.putBool("inv240", invert240V);
   preferences.putBool("wrapLED", wrapLED);
   preferences.putBool("invLED", invertLED);
+  preferences.putFloat("beatSens2", beatSens);
+  for (int i = 0; i < 4; i++)
+    preferences.putUInt((String("colLED") + i).c_str(), colourLED[i]);
   preferences.putString("themeName", themeName);
   preferences.putInt("themeCnt", previewColorCount);
   for (int i = 0; i < 8; i++) {
@@ -686,10 +726,34 @@ void loadSettings() {
   decayLED = preferences.getFloat("decLED", 0.01);
   masterBrightness = preferences.getInt("brightness", 100);
   wrap240V = preferences.getBool("wrap240", false);
-  beatOffsetMs = (unsigned long)preferences.getInt("beatOff", 50);
+  // Beat offset default is now 20 ms, NOT 200.
+  //
+  // The 200 ms default was latency compensation for the CLOCK path, where the
+  // visible event lagged detection. On the onset detector it is simply 200 ms of
+  // ADDED lag, and against a 300-600 ms beat interval that reads as sluggish -
+  // exactly the reported symptom.
+  //
+  // Genuine latency in this path is ~20 ms: about 16 ms of group delay in the
+  // 4-pole high-pass at low frequencies (4/(2*pi*f) at 40 Hz), ~3 ms in the
+  // low-pass, and ~5 ms from the 10 ms ODF window.
+  //
+  // A NEW KEY is used deliberately: the old 200 is persisted in NVS, so changing
+  // the default alone would leave it in place. Clamped so it cannot drift back.
+  beatOffsetMs = (unsigned long)preferences.getInt("beatOff2", 20);
+  if (beatOffsetMs > 80) beatOffsetMs = 80;
+
   invert240V = preferences.getBool("inv240", false);
   wrapLED = preferences.getBool("wrapLED", false);
   invertLED = preferences.getBool("invLED", false);
+  // NEW KEY: the old value was on the un-reversed scale (0.8 = strict), so loading
+  // it here would make the detector almost maximally sensitive. 0.2 is the
+  // equivalent of that old 0.8 on the reversed scale.
+  beatSens  = preferences.getFloat("beatSens2", 0.2f);
+  if (beatSens < 0.01f) beatSens = 0.01f;
+  if (beatSens > 1.00f) beatSens = 1.00f;
+  for (int i = 0; i < 4; i++)
+    colourLED[i] = preferences.getUInt((String("colLED") + i).c_str(),
+                                       colourLED[i]);
   themeName = preferences.getString("themeName", "Disco");
   previewColorCount = constrain(preferences.getInt("themeCnt", 0), 0, 8);
   for (int i = 0; i < 8; i++) {
@@ -750,6 +814,16 @@ void handleGetSettings() {
   doc["wrap240"] = wrap240V;      doc["wrapLED"] = wrapLED;
   doc["inv240"] = invert240V;     doc["invLED"] = invertLED;
   doc["music240"] = music240V;    doc["musicLED"] = musicLED;
+  doc["beatSens"] = beatSens;      // global: one detector drives both displays
+  // LED colour, so a reload shows the saved colours rather than the HTML defaults.
+  {
+    JsonArray ca = doc["colourLED"].to<JsonArray>();
+    char buf[8];
+    for (int i = 0; i < 4; i++) {
+      snprintf(buf, sizeof(buf), "#%06lx", (unsigned long)(colourLED[i] & 0xFFFFFFUL));
+      ca.add(buf);
+    }
+  }
   doc["brightness"] = masterBrightness;
   doc["theme"] = themeName;
   doc["themeCount"] = previewColorCount;
@@ -892,13 +966,30 @@ void handleLiveTweak() {
   if (music.equalsIgnoreCase("FULL RANGE") || music.equalsIgnoreCase("FULL")) music = "FULL";
   else music = "BASS";
 
+  // Beat sensitivity is GLOBAL - one detector drives both displays - so it is
+  // applied here regardless of section.
+  if (doc.containsKey("beatSens")) {
+    float bs = jsonNumF(doc["beatSens"], beatSens);
+    beatSens = constrain(bs, 0.01f, 1.00f);
+  }
+
   if (section == "LED") {
     if (id.length()) activePatternLED = id;
     speedLED = spd; quantityLED = constrain(qty, 1, 8); sizeLED = constrain(sz, 1, 10);
     freqLED = frq; multLED = constrain(bm, 1, 9); musicLED = music;
     attackLED = atk; decayLED = dec;
     wrapLED = wrap; invertLED = inv;
-  } else {
+    // Colour: the UI sends an array of "#rrggbb" strings. Index 0 is used by the
+    // dot/chase/centre-out patterns, and 0..3 are the VU meter's four bands.
+    JsonArray ca = doc["colour"].as<JsonArray>();
+    if (!ca.isNull()) {
+      int i = 0;
+      for (JsonVariant v : ca) {
+        if (i >= 4) break;
+        colourLED[i] = parseHexColor(v.as<const char*>(), colourLED[i]);
+        i++;
+      }
+    }
     if (id.length()) activePattern240V = id;
     speed240V = spd; quantity240V = constrain(qty, 1, 4); size240V = constrain(sz, 1, 4);
     freq240V = frq; mult240V = constrain(bm, 1, 9); music240V = music;
@@ -913,7 +1004,10 @@ void handleLiveTweak() {
   applyTimelineRow(tlRow, false);
 
   previewMode = 0;                        // a new selection cancels any held preview/calibration
-  showStatus(1);                          // IO48: 1 blink = live-tweak received
+  // NOTE: no IO48 blink here. IO48 is reserved for the raw beat detector (one
+  // flash per detection, in loop()) so that what you see on the board is the
+  // detector's behaviour and nothing else. A blink per slider twitch made that
+  // impossible to read while adjusting the display during playback.
 
   // The shared detector follows the most recently tweaked section
   freqThreshold = constrain(frq, 20, 100);
@@ -1092,6 +1186,23 @@ void logAppend(const char* fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
+
+  // ALSO out to USB serial, not just the RAM ring.
+  //
+  // The ring is drained to LittleFS by logService(), which is deliberately NOT
+  // called while a show is running: a LittleFS write is a flash erase, and an
+  // erase freezes BOTH cores for 20-40 ms - that was the display stall. The price
+  // of that fix was that the log went dark exactly while the display was running,
+  // i.e. when the instrument matters most.
+  //
+  // Serial does not touch flash, so it is safe during a show. The write is paced
+  // by availableForWrite() and the line is DROPPED if the CDC FIFO is short of
+  // room: an unread FIFO blocking a write is what caused the original freeze
+  // symptom, so it must never block here.
+  if (Serial.availableForWrite() >= 160) {
+    Serial.printf("[%8lus] %s\n", (unsigned long)(millis() / 1000), buf);
+  }
+
   portENTER_CRITICAL(&logLineMux);
   uint8_t next = (uint8_t)((logQHead + 1) % LOG_QUEUE);
   if (next != logQTail) {                    // drop the line if the ring is full
@@ -1237,7 +1348,7 @@ void handleLeakTest() {
 // so it is adjustable at runtime and persisted.
 void handleBeatOffset() {
   if (server.hasArg("ms")) {
-    beatOffsetMs = (unsigned long)constrain(server.arg("ms").toInt(), 0, 400);
+    beatOffsetMs = (unsigned long)constrain(server.arg("ms").toInt(), 0, 80);
     saveSettingsPending = true;      // deferred to core 0: never write flash here
     server.send(200, "text/plain", "beat offset = " + String(beatOffsetMs) + " ms");
   } else {
@@ -1300,70 +1411,453 @@ static inline float trackFloor(float &floor, float db) {
   return floor;
 }
 
+// ---------------------------------------------------------------------------
+// FAST ADC PATH
+//
+// analogRead() costs ~58 us per call: the Arduino core takes a mutex, runs a
+// oneshot conversion AND applies a calibration curve every time. That capped the
+// capture at 16.8 kHz - below the 24 kHz a 12 kHz microphone needs.
+//
+// adc_oneshot_read() is the same conversion with no calibration pass, so it is a
+// few microseconds instead of ~58. It returns raw 0-4095, which is what
+// analogRead() returned anyway, so the FFT, the envelope and the DC tracker are
+// all unaffected.
+//
+// AUDIO_PIN is GPIO2 = ADC1 channel 1. It MUST be ADC1 - WiFi owns ADC2.
+//
+// SAFETY: the Arduino core also claims this pin for analogRead(), and a channel
+// cannot always be configured on two handles at once. So configuration is
+// attempted once, and any failure permanently falls back to analogRead(). The
+// active path is reported in the heartbeat, so the log says which one is running
+// rather than leaving it to be assumed.
+// ---------------------------------------------------------------------------
+#include <esp_adc/adc_oneshot.h>
+#include <esp_adc/adc_continuous.h>
+
+#define AUDIO_ADC_UNIT  ADC_UNIT_1
+#define AUDIO_ADC_CHAN  ADC_CHANNEL_1      // GPIO2 on the ESP32-S3
+
+// Target sample rate for continuous capture. A 12 kHz microphone needs >= 24 kHz,
+// and the standard 10-band EQ's top band is 16 kHz, so 26 kHz keeps real headroom
+// over the Nyquist limit while staying cheap.
+#define AUDIO_ADC_RATE 26000
+
+static adc_oneshot_unit_handle_t   audioAdc    = nullptr;
+static adc_continuous_handle_t     audioDma    = nullptr;
+static bool                        audioAdcFast = false;
+static bool                        audioDmaOk   = false;
+
+// DMA frame buffer. conv_frame_size must be a multiple of 4; SOC_ADC_DIGI_RESULT_BYTES
+// bytes per conversion (2 on the ESP32-S3 for TYPE2 output).
+#define AUDIO_DMA_FRAME 256
+static uint8_t audioDmaBuf[AUDIO_DMA_FRAME];
+
+// ---------------------------------------------------------------------------
+// DMA CAPTURE IS DISABLED.
+//
+// adc_continuous_start() reported success but delivered nothing: fs collapsed to
+// 3,923 Hz (from 16.8 kHz on the oneshot path) and every band read 0.00 / -120 dB
+// - i.e. silence. Frames either never arrive or the TYPE2 frame layout is not what
+// the parse assumes, so adc_continuous_read() times out and retries, which is
+// slower than the per-sample path it was meant to replace. Note this failed
+// SILENTLY: it reported a working mode while producing no audio, which is why the
+// heartbeat prints adc= and the band levels rather than just "started OK".
+//
+// The code below is kept so the investigation is not lost, but is not started.
+// To retry: set to 1, then check adc= reads dma AND that bass/mid/treb are
+// non-zero. A silent audio path is worse than a slow one.
+//
+// The oneshot path (16.8 kHz, verified clean: copy max ~130 us, beats firing)
+// is what runs.
+// ---------------------------------------------------------------------------
+#define AUDIO_USE_DMA 0
+
+static void audioAdcInit() {
+  // ---- path 1: oneshot, raw (no calibration). THE ACTIVE PATH. ---------------
+  adc_oneshot_unit_init_cfg_t ucfg = {};
+  ucfg.unit_id  = AUDIO_ADC_UNIT;
+  ucfg.ulp_mode = ADC_ULP_MODE_DISABLE;
+  if (adc_oneshot_new_unit(&ucfg, &audioAdc) == ESP_OK) {
+    adc_oneshot_chan_cfg_t ccfg = {};
+    ccfg.bitwidth = ADC_BITWIDTH_12;
+    ccfg.atten    = ADC_ATTEN_DB_11;   // matches analogSetPinAttenuation(..., 3)
+    if (adc_oneshot_config_channel(audioAdc, AUDIO_ADC_CHAN, &ccfg) != ESP_OK) {
+      audioAdc = nullptr;
+    } else {
+      audioAdcFast = true;
+    }
+  }
+
+#if AUDIO_USE_DMA
+  // ---- path 2: continuous + DMA. NOT STARTED - see the note above. -----------
+  adc_continuous_handle_cfg_t dcfg = {};
+  dcfg.max_store_buf_size = AUDIO_DMA_FRAME * 4;
+  dcfg.conv_frame_size    = AUDIO_DMA_FRAME;
+  if (adc_continuous_new_handle(&dcfg, &audioDma) != ESP_OK) {
+    audioDma = nullptr;
+    return;
+  }
+
+  adc_digi_pattern_config_t pat = {};
+  pat.atten     = ADC_ATTEN_DB_11;
+  pat.channel   = AUDIO_ADC_CHAN;
+  pat.unit      = AUDIO_ADC_UNIT;
+  pat.bit_width = ADC_BITWIDTH_12;
+
+  adc_continuous_config_t ccfg2 = {};
+  ccfg2.sample_freq_hz = AUDIO_ADC_RATE;
+  ccfg2.conv_mode      = ADC_CONV_SINGLE_UNIT_1;      // never ADC2: WiFi owns it
+  ccfg2.format         = ADC_DIGI_OUTPUT_FORMAT_TYPE2; // ESP32-S3
+  ccfg2.pattern_num    = 1;
+  ccfg2.adc_pattern    = &pat;
+  if (adc_continuous_config(audioDma, &ccfg2) != ESP_OK) {
+    adc_continuous_deinit(audioDma);
+    audioDma = nullptr;
+    return;
+  }
+  if (adc_continuous_start(audioDma) != ESP_OK) {
+    adc_continuous_deinit(audioDma);
+    audioDma = nullptr;
+    return;
+  }
+  audioDmaOk = true;
+#endif
+}
+
+// One raw sample from the oneshot path. Falls back to analogRead() for good if the
+// fast path ever errors.
+static inline int audioAdcRead() {
+  if (audioAdcFast) {
+    int v = 0;
+    if (adc_oneshot_read(audioAdc, AUDIO_ADC_CHAN, &v) == ESP_OK) return v;
+    audioAdcFast = false;               // one failure is enough; don't retry
+  }
+  return analogRead(AUDIO_PIN);
+}
+
+// ---------------------------------------------------------------------------
+// ORIGINAL 10 ms BEAT WINDOW - restored
+//
+// The original firmware evaluated peak-to-peak every 10 ms and asked "is there a
+// beat?" 100 times a second, firing on a fixed threshold with a 200 ms refractory.
+//
+// This one waited for the FFT window (62 ms), so it asked 16 times a second: a
+// kick was detected up to 62 ms late, and two kicks inside one window collapsed
+// into ONE. That is what made the response feel weak and sluggish compared with
+// the original - it was never a filter or a threshold problem, it was that the
+// detector was welded to the FFT window and nothing had questioned it.
+//
+// The window is back to 10 ms. Timing comes from a SAMPLE COUNTER (not millis())
+// so the inner loop stays cheap, and the decision is made here rather than once
+// per FFT window.
+// ---------------------------------------------------------------------------
+#define BEAT_HZ 100
+static int beatStride = 168;               // samples per 10 ms; set from audioFs
+static int beatMax = 0, beatMin = 4095, beatCount = 0;
+volatile bool fastBeatFlag = false;        // consumed by checkAudioBeat()
+
+// Threshold + refractory, evaluated every 10 ms. This is the ORIGINAL detector's
+// logic, at the original rate. p2pThr is adaptive (half the running average,
+// floored above room noise) rather than the original's fixed 120, because the
+// comment on the old threshold records that this microphone only produces
+// 27-122 counts - so a fixed 120 sat right on the edge and caught only the
+// loudest hits. The rise test stays: at 10 ms it means a real attack, whereas at
+// 62 ms it was comparing smoothed trends.
+static void fastBeatCheck() {
+  if (p2pAvg <= 0.0f) p2pAvg = (float)envP2P;
+  p2pAvg += ((float)envP2P - p2pAvg) * 0.02f;      // ~1.5 s of history
+  p2pThr = p2pAvg * 0.5f;
+  // Floor 40 - BETWEEN silence and music, which is the whole job.
+  //
+  // Measured with this envelope filter: silence gives p2p ~12, music 59-223. The
+  // floor has to sit in that gap or the detector either fires on room noise or
+  // misses beats. Lowering it to 6 and then 2 (while chasing a problem the
+  // band-pass had created) made silence fire 4 beats/second - the dot changed
+  // direction rapidly with no music playing at all.
+  //
+  // The adaptive part is half the running average; this floor stops that average
+  // following the ROOM down during quiet passages.
+  if (p2pThr < 40.0f) p2pThr = 40.0f;
+
+  // REFRACTORY ONLY - exactly the original detector's logic, no hysteresis.
+  //
+  // I added hysteresis here (the level had to dip below 70% of the threshold
+  // before re-arming). It was wrong: in a loud, dense passage the level never
+  // dips, so it fell through to the 400 ms timeout and capped detection at 2.5
+  // beats/second. At 178 BPM - 337 ms between beats - that discarded every second
+  // beat, measured as inserted=63 against hits=57 (more beats generated by the
+  // clock than detected).
+  //
+  // The 200 ms refractory is the original's mechanism and is sufficient: a hit's
+  // decaying tail is long gone inside 200 ms, so nothing double-fires. And since
+  // 337 ms > 200 ms it never limits a real tempo.
+  static unsigned long fastLastBeatMs = 0;
+  unsigned long now = millis();
+
+  if (envP2P > p2pThr && (now - fastLastBeatMs) >= 200) {
+    fastLastBeatMs  = now;
+    lastTrigMs      = now;
+    rawBeatFlag     = true;                // IO48: flash on every detection
+    beatLatch240    = true;                // latched so a beat falling between
+    beatLatchLED    = true;                // FFT windows is never lost
+    fastBeatFlag    = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ONSET DETECTION FUNCTION - the spectral-flux equivalent
+//
+// Professional beat detectors do NOT use an amplitude envelope. They compute
+// SPECTRAL FLUX: the sum of positive bin-to-bin changes between frames. It works
+// because a beat IS a change - a sustained bass note produces zero flux, overall
+// level is irrelevant, and uncorrelated noise cancels.
+//
+// A real spectral flux needs ~50-100 frames/second. Our FFT runs at 17/second
+// (one 1024-point transform per 58 ms), far too coarse to time beats. So this is
+// the single-band time-domain equivalent, evaluated every 10 ms:
+//
+//     band-pass 40-250 Hz  ->  rectify  ->  NORMALISE by running level
+//                          ->  positive first difference  ->  short averager
+//
+// Normalising BEFORE differencing is the crucial step: it makes the detector
+// immune to volume, which the envelope follower could never be. That is why
+// silence and music both measured p2p=6-8 on the old scheme, and why silence
+// fired 4 beats a second.
+//
+// Replaces: low-pass -> peak-to-peak -> compare to half a running average.
+// ---------------------------------------------------------------------------
+#define ODF_HP_HZ    40.0f      // band bottom: removes rumble and DC
+#define ODF_LP_HZ   250.0f      // band top: keeps the kick, rejects snare/hat/vocal
+#define ODF_HIST      32        // 320 ms of novelty history for the local mean
+#define ODF_K        0.85f      // trigger at local_mean * ODF_K + beatSens
+#define ODF_MIN_GAP    90UL     // minimum ms between onsets
+
+// BEAT SENSITIVITY - the absolute part of the threshold, and the control that
+// actually matters.
+//
+// thr = local_mean * ODF_K + beatSens
+//
+// The novelty curve spends most of its time near zero, so local_mean sits around
+// 0.11 and the adaptive term contributes almost nothing. A delta of 0.02 put the
+// threshold at ~0.12 while peaks reach 0.43 - so nearly every peak fired, giving
+// 4-5 detections a SECOND. Raised to 0.15 the threshold sits mid-peak and the
+// detector fires on real kicks only.
+//
+// Exposed to the UI as "Beat Sensitivity" (declared with the globals near the top).
+
+// Level-follower coefficient. This was 0.001 (~60 ms), which LAGGED the kick and
+// flattened the normalised ratio - measured peaks 0.116 against a local mean of
+// 0.126, i.e. the peaks were BELOW the mean, so no value of ODF_K above ~0.9
+// could ever trigger. 0.004 is ~15 ms: fast enough to track the kick's own
+// envelope so the PEAK stands proud of the average instead of being smoothed into
+// it. This is the difference between "detects some beats" and "detects the beat".
+#define ODF_LEVEL_A  0.004f
+
+static float odfHp1 = 0, odfHp2 = 0, odfHp1Prev = 0, odfHp2Prev = 0;
+static float odfLp1 = 0, odfLp2 = 0, odfLp3 = 0, odfLp4 = 0;
+static float odfRectPrev = 0, rectAvg = 0, odfNormPrev = 0, odfNovelty = 0, winMax = 0, odfPrevWin = 0;
+static float odfHist[ODF_HIST];
+static int   odfHistIdx = 0, odfHistCount = 0;
+static unsigned long odfLastMs = 0;
+volatile bool odfDisplayBeat = false;   // onset latch for the DOT, consumed in loop()
+float odfThr = 0.0f;            // logged, so the threshold can be read directly
+
+// Peak-picking, every 10 ms. A LOCAL mean (not a global one) adapts to how dense
+// the music is, and the delta stops a quiet passage triggering on its own noise.
+static void odfEvaluate() {
+  odfHist[odfHistIdx] = odfNovelty;
+  odfHistIdx = (odfHistIdx + 1) % ODF_HIST;
+  if (odfHistCount < ODF_HIST) odfHistCount++;
+
+  // ABSOLUTE threshold scaled by the sensitivity slider. No local mean.
+  //
+  // The local mean was the other half of the dense-mix fault: it rose with the
+  // music, so the bar rose too, and the detector's behaviour depended on how busy
+  // the mix was. The original firmware used a fixed bar and worked on drums for
+  // that reason. beatSens 0.15 -> 9 counts, 1.00 -> 60. Band peaks in music reach
+  // 5-40, so the whole slider range is usable.
+  // REVERSED SCALE: beatSens is now SENSITIVITY, so higher = MORE beats, and the
+  // slider's right-hand end is the most sensitive - as it should read.
+  //
+  // thr = (1 - beatSens) * 60
+  //   beatSens 0.2 -> thr 48   (strict: the setting you chose)
+  //   beatSens 1.0 -> thr  0   (most sensitive, most beats)
+  //   beatSens 0.0 -> thr 60   (least sensitive)
+  odfThr = (1.0f - beatSens) * 60.0f;
+
+  unsigned long now = millis();
+  if (odfNovelty > odfThr && (now - odfLastMs) >= ODF_MIN_GAP) {
+    odfLastMs       = now;
+    lastTrigMs      = now;
+    rawBeatFlag     = true;                // IO48: one flash per onset
+    odfDisplayBeat  = true;                // THE DOT: direction change on this onset
+    beatLatch240    = true;                // latched so an onset falling between
+    beatLatchLED    = true;                // FFT windows is never lost
+    fastBeatFlag    = true;
+  }
+}
+
+// Per-sample processing, shared by both acquisition paths so they cannot drift.
+static inline void audioProcessSample(float s, int &onsetSub, int stride) {
+  // Original envelope detection. alpha = dt/(rc+dt) makes the filter rate
+  // independent, so it behaves the same at any sample rate.
+  // ---- ONSET DETECTION FUNCTION (header comment is above odfEvaluate) --------
+  float dt = 1.0f / audioFs;
+
+  // The Frequency slider sets the band's LOWER edge (20-100 Hz), so it still does
+  // something real: raise it to reject bass-guitar rumble and tighten onto the
+  // kick, lower it to let the deep end in. The upper edge is fixed at 250 Hz.
+  float hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
+
+  // 2-pole high-pass at hpHz: removes rumble and DC. Two cascaded one-poles,
+  // which is cheap, stable and steep enough to reject the room.
+  float rcLo = 1.0f / (2.0f * 3.14159265f * hpHz);
+  float aLo  = rcLo / (rcLo + dt);
+  odfHp1 = aLo * (odfHp1 + s - odfHp1Prev);       odfHp1Prev = s;
+  odfHp2 = aLo * (odfHp2 + odfHp1 - odfHp2Prev);  odfHp2Prev = odfHp1;
+
+  // 2-pole low-pass at 250 Hz: keeps the kick, rejects snare, hats and vocals.
+  float rcHi = 1.0f / (2.0f * 3.14159265f * ODF_LP_HZ);
+  float aHi  = dt / (rcHi + dt);
+  odfLp1 += aHi * (odfHp2 - odfLp1);
+  odfLp2 += aHi * (odfLp1 - odfLp2);
+  // Two more poles: 24 dB/octave above 250 Hz. This is what keeps vocals, snare
+  // and guitars out - at 12 dB/octave they leaked through and swamped the onset
+  // function whenever the mix got busy.
+  odfLp3 += aHi * (odfLp2 - odfLp3);
+  odfLp4 += aHi * (odfLp3 - odfLp4);
+
+  float bpRect = fabsf(odfLp4);
+
+  // NORMALISE by the running level BEFORE differencing. This is the step that
+  // makes the detector immune to volume: the ratio sits around 1.0 whatever the
+  // music is doing, so a kick stands out equally in a quiet or a loud passage.
+  // The envelope follower could not do this, which is why it could not tell
+  // music from a quiet room.
+  rectAvg += 0.0f * (bpRect - rectAvg); // unused   // level follower, ~15 ms
+  if (bpRect > winMax) winMax = bpRect;     // peak within this 10 ms window
+
+  // Plain level readings, kept only for the log.
+  float v = bpRect;
+  if (v > envMax) envMax = v;
+  if (v < envMin) envMin = v;
+
+  // ---- evaluate the ODF every 10 ms ----------------------------------------
+  if (v > (float)beatMax) beatMax = (int)v;
+  if (v < (float)beatMin) beatMin = (int)v;
+  if (++beatCount >= beatStride) {
+    beatCount = 0;
+    envP2P = beatMax - beatMin;
+    beatMax = 0;
+    beatMin = 4095;
+
+    // ABSOLUTE frame-to-frame change in band energy. NO normalisation.
+    //
+    // It used to be normalised by a running average, and THAT was why dense mixes
+    // went wild: as instruments and vocals arrived the average rose, so the
+    // normaliser compressed the signal - which amplifies any proportional
+    // fluctuation. The detector became hypersensitive exactly when the mix got
+    // busy. An absolute change cannot behave that way, and the original firmware's
+    // fixed threshold worked on drums for precisely this reason.
+    //
+    // Combined with the 4-pole low-pass above, vocals now contribute neither
+    // leakage nor compression.
+    float flux = (float)winMax - odfPrevWin;
+    odfPrevWin = (float)winMax;
+    odfNovelty = (flux > 0.0f) ? flux : 0.0f;
+    winMax = 0.0f;
+
+    odfEvaluate();
+  }
+
+  // Sample-level envelope, kept only to feed the autocorrelation's onset history.
+  // It is NOT a trigger: it works on raw full-bandwidth samples, so hi-hats move
+  // it as much as a kick drum, which is what made IO48 flicker like a flame.
+  dcAvg += (s - dcAvg) * 0.0005f;                     // ~0.2 s DC tracker
+  float rect = fabsf(s - dcAvg);
+  if (rect > envA) envA = rect;                       // instant attack
+  else             envA += (rect - envA) * 0.02f;     // ~60 ms release
+  if (envA > envPeak) envPeak = envA; else envPeak *= 0.9995f;
+
+  // Onset-strength history at a fixed 100 Hz. The stride comes from the MEASURED
+  // sample rate so the tempo scaling stays right at any rate.
+  if (++onsetSub >= stride) {
+    onsetSub = 0;
+    float nov = (envA > onsetPrev) ? (envA - onsetPrev) : 0.0f;
+    onsetPrev = envA;
+    onsetBuf[onsetIdx] = nov;
+    onsetIdx = (onsetIdx + 1) % ONSET_LEN;
+    if (onsetCount < ONSET_LEN) onsetCount++;
+  }
+}
+
 // Capture one audio window and run the FFT, updating the band levels.
 static void audioAnalyse() {
   int64_t t0 = esp_timer_get_time();
   envMax = 0; envMin = 4095;              // fresh peak-to-peak window
+
+  // ---------------------------------------------------------------------------
+  // CAPTURE PACING REMOVED.
+  //
+  // This loop used to take 8 samples and then busy-wait 300 us. With 512 samples
+  // that is 64 bursts x 300 us = 19.2 ms of deliberate delay inside a ~49 ms
+  // window, which capped the capture at ~10.4 kHz - the "fs=10450" in every
+  // heartbeat. The ADC was never the limit; the delay was. A 12 kHz microphone
+  // needs >= 24 kHz sampling, so the pacing was throwing away more than half of
+  // what the mic can deliver.
+  //
+  // Sampling now runs in bursts of 256 with a real vTaskDelay(1) between them
+  // (4 per window instead of 64). The yield is NOT optional: without it this task
+  // holds core 0 for ~30 ms and starves the WiFi radio and the idle task.
+  //
+  // `stride` is hoisted out of the loop - it was a float division per sample, and
+  // the loop now runs ~3x more often.
+  // ---------------------------------------------------------------------------
+  static int onsetSub = 0;
+  int stride = (int)(audioFs / (float)ONSET_HZ);
+  if (stride < 1) stride = 1;
+  // Samples per 10 ms beat window, from the measured rate. Hoisted out of the
+  // per-sample loop so there is no float division in there.
+  beatStride = (int)(audioFs / (float)BEAT_HZ);
+  if (beatStride < 1) beatStride = 1;
+
   int i = 0;
-  while (i < FFT_SAMPLES) {
-    // analogRead() is far too slow to pace every sample precisely, so take
-    // small bursts and yield ~1 ms between them. The rate is jittery but the
-    // TRUE average is measured and used as the FFT sampling frequency.
-    for (int k = 0; k < 8 && i < FFT_SAMPLES; k++, i++) {
-      float s = (float)analogRead(AUDIO_PIN);
-      fftReal[i] = s;
-      fftImag[i] = 0.0f;
-
-      // Original envelope detection, fed from the same samples. alpha =
-      // dt/(rc+dt) makes the filter rate independent, so it behaves exactly like
-      // the old 5 ms sampler even though we now sample ~40x faster.
-      if (musicFullMode) {
-        envFiltered = s;
-      } else {
-        float cutoff = (freqThreshold > 5) ? (float)freqThreshold : 5.0f;
-        float rc = 1.0f / (2.0f * 3.14159265f * cutoff);
-        float dt = 1.0f / audioFs;
-        float alpha = dt / (rc + dt);
-        envFiltered = envFiltered + alpha * (s - envFiltered);
+  if (audioDmaOk) {
+    // ---- DMA path: the hardware has already sampled; this only collects. ------
+    // No per-sample driver call, which is what cost ~60 us a sample and capped
+    // the rate at 16.8 kHz. The guard stops a stalled ADC from hanging the task.
+    uint32_t guard = millis() + 250;
+    while (i < FFT_SAMPLES && (int32_t)(millis() - guard) < 0) {
+      uint32_t n = 0;
+      if (adc_continuous_read(audioDma, audioDmaBuf, AUDIO_DMA_FRAME, &n, 20) != ESP_OK) {
+        continue;
       }
-      float v = musicFullMode ? s : envFiltered;
-      if (v > envMax) envMax = v;
-      if (v < envMin) envMin = v;
-
-      // Sample-level onset trigger (see the globals above).
-      dcAvg += (s - dcAvg) * 0.0005f;                     // ~0.2 s DC tracker
-      float rect = fabsf(s - dcAvg);
-      if (rect > envA) envA = rect;                       // instant attack
-      else             envA += (rect - envA) * 0.02f;     // ~60 ms release
-      if (envA > envPeak) envPeak = envA; else envPeak *= 0.9995f;
-      // NOTE: this raw, full-bandwidth envelope NO LONGER TRIGGERS ANYTHING. It is
-      // kept only to feed the autocorrelation's onset history. As a trigger it was
-      // wrong: it works on the raw samples, so hi-hats and cymbals move it exactly
-      // as much as a kick drum - which is what made IO48 flicker like a flame.
-      // The decision now comes from the filtered peak-to-peak in checkAudioBeat(),
-      // which is the detector the original firmware used.
-
-      // Onset-strength history at a fixed 100 Hz, for the autocorrelation. The
-      // stride comes from the MEASURED sample rate so the tempo scaling is right.
-      static int onsetSub = 0;
-      int stride = (int)(audioFs / (float)ONSET_HZ);
-      if (stride < 1) stride = 1;
-      if (++onsetSub >= stride) {
-        onsetSub = 0;
-        float nov = (envA > onsetPrev) ? (envA - onsetPrev) : 0.0f;
-        onsetPrev = envA;
-        onsetBuf[onsetIdx] = nov;
-        onsetIdx = (onsetIdx + 1) % ONSET_LEN;
-        if (onsetCount < ONSET_LEN) onsetCount++;
+      // SOC_ADC_DIGI_RESULT_BYTES per conversion (2 on the S3, TYPE2: 12-bit data
+      // in the low bits, channel in the high nibble).
+      for (uint32_t b = 0; b + SOC_ADC_DIGI_RESULT_BYTES <= n && i < FFT_SAMPLES;
+           b += SOC_ADC_DIGI_RESULT_BYTES) {
+        uint16_t w = (uint16_t)audioDmaBuf[b] | ((uint16_t)audioDmaBuf[b + 1] << 8);
+        float s = (float)(w & 0x0FFF);
+        fftReal[i] = s;
+        fftImag[i] = 0.0f;
+        audioProcessSample(s, onsetSub, stride);
+        i++;
       }
     }
-    // Pace the bursts with a micro-second delay instead of vTaskDelay(1). On a
-    // 1 ms tick that call can sleep for 2 ms, so 16 bursts stretched the window to
-    // ~25 ms and every beat was reported at the END of it - the "late and drifting
-    // later" seen on IO48. This keeps the window at a few milliseconds.
-    delayMicroseconds(300);
+    // Backfill any shortfall with silence rather than leaving stale data in the
+    // FFT, so a missed frame shows up as a quiet window instead of a false peak.
+    for (; i < FFT_SAMPLES; i++) { fftReal[i] = 0.0f; fftImag[i] = 0.0f; }
+  } else {
+    // ---- oneshot path: one driver call per sample -----------------------------
+    for (i = 0; i < FFT_SAMPLES; i++) {
+      float s = (float)audioAdcRead();
+      fftReal[i] = s;
+      fftImag[i] = 0.0f;
+      audioProcessSample(s, onsetSub, stride);
+      if ((i & 255) == 255) vTaskDelay(1);   // 4 yields per 1024-sample window
+    }
   }
-  vTaskDelay(1);                          // yield once per window, not per burst
+  vTaskDelay(1);                          // one yield per window, either path
   envP2P = envMax - envMin;
   float elapsedUs = (float)(esp_timer_get_time() - t0);
   audioFs = (float)FFT_SAMPLES * 1000000.0f / elapsedUs;
@@ -1459,17 +1953,17 @@ bool checkAudioBeat() {
   // enough"). Track the running average and trigger at half of it, with a floor
   // well above the quiet-room noise. This is what keeps it musical as the
   // volume varies.
-  if (p2pAvg <= 0.0f) p2pAvg = (float)envP2P;
-  p2pAvg += ((float)envP2P - p2pAvg) * 0.02f;      // ~1.5 s of history
-  p2pThr = p2pAvg * 0.5f;
-  if (p2pThr < 40.0f) p2pThr = 40.0f;              // never trigger on room noise
-  // Require a RISE as well as a threshold crossing. Without it a single drum hit
-  // triggers twice - on the attack and again as the level falls back through the
-  // threshold - which halved the learnt tempo (204-273 ms = 220-290 BPM, far too
-  // fast to be the music) and scrambled the bar phase.
-  static int lastEnvP2P = 0;
-  bool rising = (envP2P > lastEnvP2P);
-  lastEnvP2P = envP2P;
+  // The beat was ALREADY decided in fastBeatCheck(), every 10 ms, inside the
+  // sample loop - see the header comment above it. That is the whole fix: this
+  // function used to make the decision, but it only runs once per FFT window
+  // (62 ms), so it was asking "is there a beat?" 16 times a second instead of 100.
+  // Consume the latch here. `triggered` was declared above.
+  if (fastBeatFlag) {
+    fastBeatFlag  = false;
+    triggered     = true;
+    beatTriggerMs = lastTrigMs;
+  }
+  bool realBeat = triggered;
 
   // ---- THE ORIGINAL DETECTOR (restored properly this time) ------------------
   // The beat now comes from the RC-FILTERED PEAK-TO-PEAK (envP2P), which is the
@@ -1483,15 +1977,11 @@ bool checkAudioBeat() {
   // far weaker response than the original. The FFT still runs for the VU meters,
   // and its levels are still logged.
   //
-  // p2pThr is the adaptive threshold (half the running average, floored well above
-  // room noise) and `rising` prevents a hit double-triggering on its falling edge.
-  if (rising && envP2P > p2pThr && (now - lastAcceptedBeatTime) >= 200) {
-    triggered     = true;
-    beatTriggerMs = now;
-    rawBeatFlag   = true;                 // IO48: flash on every detection
-    lastTrigMs    = now;
-  }
-  bool realBeat = triggered && (now - lastAcceptedBeatTime >= 120);
+  // NOTE: the trigger test that used to live here has moved to fastBeatCheck(),
+  // which runs every 10 ms inside the per-sample loop. It CANNOT be done here:
+  // this function only runs once per FFT window (62 ms), which is exactly what
+  // made the response feel weak - it was asking "is there a beat?" 16 times a
+  // second instead of 100. `realBeat` is set above from the latched flag.
 
   // ---- TEMPO BY AUTOCORRELATION (every ~2.5 s) -----------------------------
   // The clock is driven by the measured beat period rather than by individual
@@ -1944,7 +2434,23 @@ void applyGlobalsToPorts() {
     portCfg[p].size   = constrain(sizeLED, 1, 10);
     portCfg[p].wrap   = wrapLED;
     portCfg[p].invert = invertLED;
+    for (int i = 0; i < 4; i++) portCfg[p].colour[i] = colourLED[i];
   }
+}
+
+// Colour for a VU meter LED at absolute index `idx`, from a 4-entry palette.
+// The four bands are FIXED along the strip (the top quarter is always the peak
+// colour), which is the classic VU bar look - a red LED means "near full scale",
+// regardless of how much is lit.
+//
+// Takes the palette array rather than a PortCfg reference on purpose: the Arduino
+// IDE inserts auto-generated prototypes ABOVE the type declarations, so a
+// signature mentioning PortCfg cannot be parsed there and fails the whole build.
+CRGB vuBandColor(const uint32_t *pal, int idx) {
+  if (idx < 0 || idx >= NUM_LEDS_PER_STRIP) return CRGB::Black;
+  int band = (idx * 4) / NUM_LEDS_PER_STRIP;
+  if (band > 3) band = 3;
+  return CRGB(pal[band]);
 }
 
 // Draw the current frame of ONE strip using its own pattern + parameters
@@ -1954,6 +2460,7 @@ void drawPortPattern(int port) {
   const int lc = (N / 2) - 1;
   const int rc = N / 2;
   const PortCfg &c = portCfg[port];
+  const CRGB mainCol(c.colour[0]);
 
   for (int i = 0; i < N; i++) leds[port][i] = CRGB::Black;
 
@@ -1963,22 +2470,28 @@ void drawPortPattern(int port) {
   if (c.pat == LP_CENTER_OUT) {
     int off = ledExplArr[port];
     for (int s = 0; s < dotLen; s++) {
-      setLed(port, lc - off - s, CRGB::White);
-      setLed(port, rc + off + s, CRGB::White);
+      setLed(port, lc - off - s, mainCol);
+      setLed(port, rc + off + s, mainCol);
     }
   }
   else if (c.pat >= LP_VU_METER) {
     int level = constrain(computeVuLevel(vuSmoothLED, attackLED, decayLED), 0, 10);
     int lit = level * (N / 10);
     if (c.pat == LP_VU_METER) {                       // left -> right
-      for (int i = 0; i < lit; i++) setLed(port, i, CRGB::Green);
+      for (int i = 0; i < lit; i++) setLed(port, i, vuBandColor(c.colour, i));
     } else if (c.pat == LP_VU_REV) {                  // right -> left
-      for (int i = 0; i < lit; i++) setLed(port, N - 1 - i, CRGB::Green);
+      for (int i = 0; i < lit; i++) setLed(port, N - 1 - i, vuBandColor(c.colour, N - 1 - i));
     } else if (c.pat == LP_VU_DUAL) {                 // both ends inward
-      for (int i = 0; i < lit / 2; i++) { setLed(port, i, CRGB::Green); setLed(port, N - 1 - i, CRGB::Green); }
+      for (int i = 0; i < lit / 2; i++) {
+        setLed(port, i, vuBandColor(c.colour, i));
+        setLed(port, N - 1 - i, vuBandColor(c.colour, N - 1 - i));
+      }
     } else {                                          // centre -> outward
       int half = lit / 2;
-      for (int i = 0; i < half; i++) { setLed(port, lc - i, CRGB::Green); setLed(port, rc + i, CRGB::Green); }
+      for (int i = 0; i < half; i++) {
+        setLed(port, lc - i, vuBandColor(c.colour, lc - i));
+        setLed(port, rc + i, vuBandColor(c.colour, rc + i));
+      }
     }
   }
   else {
@@ -1986,12 +2499,16 @@ void drawPortPattern(int port) {
     int pos = ledPosArr[port];
     for (int q = 0; q < effQty; q++) {
       int base = (pos + (q * N) / effQty) % N;
-      for (int s = 0; s < dotLen; s++) setLed(port, (base + s) % N, CRGB::White);
+      for (int s = 0; s < dotLen; s++) setLed(port, (base + s) % N, mainCol);
     }
     if (c.pat == LP_KNIGHT_RIDER) {
+      // Tail is a dimmed version of the port's own colour, so the trail always
+      // matches the dot rather than being hardcoded red.
+      CRGB tail = mainCol;
+      tail.nscale8(50);
       for (int t = 1; t <= 6; t++) {
         int idx = (pos - ledDirArr[port] * t + N) % N;
-        setLed(port, idx, CRGB(50, 0, 0));
+        setLed(port, idx, tail);
       }
     }
   }
@@ -2000,7 +2517,7 @@ void drawPortPattern(int port) {
     for (int i = 0; i < N; i++) {
       CRGB col = leds[port][i];
       if (col.r == 0 && col.g == 0 && col.b == 0)
-        leds[port][i] = applyCalibrationOrder(CRGB::White, portColorOrders[port]);
+        leds[port][i] = applyCalibrationOrder(mainCol, portColorOrders[port]);
       else
         leds[port][i] = CRGB::Black;
     }
@@ -2476,6 +2993,10 @@ void setup() {
 
   analogSetAttenuation(ADC_11db);
   pinMode(AUDIO_PIN, INPUT);
+  // Try the fast (raw, uncalibrated) ADC path. If it cannot claim the channel -
+  // the Arduino core also holds this pin - audioAdcRead() falls back to
+  // analogRead() permanently and the heartbeat reports which path is live.
+  audioAdcInit();
 
   for (int i = 0; i < 10; i++) {
     pinMode(channelPins[i], OUTPUT);
@@ -2626,7 +3147,18 @@ void loop() {
     } else {
       lastAnti = millis();
     }
-    if (beat) { beatLatch240 = true; beatLatchLED = true; }
+    // The DOT follows ONLY real onsets (set in odfEvaluate from the onset
+    // detection function). It is deliberately NOT latched from the clock here.
+    //
+    // This was `beatLatch240 = true; beatLatchLED = true;` - the clock latching
+    // both displays. That made the strip a METRONOME: it stepped on the predicted
+    // grid rather than on the music, which is why it kept ticking 2-3 times a
+    // second in silence and only lined up with the music some of the time. The
+    // detector was finding the beats correctly; the display simply was not using
+    // them. 240V keeps the clock latch (its behaviour is established and working).
+    // 240V is NOT latched from the clock any more. The same detected onset drives
+    // both displays (see the odfDisplayBeat block below), which also removes the
+    // clock's sub-beat insertion - the reason the 240V had run so fast it blurred.
     // IO48 is the RAW DETECTOR INDICATOR: flash on every detection, so the
     // detector's behaviour can be judged directly (claps, transients, misses).
     // The lights below follow the CLOCK, not these detections.
@@ -2637,9 +3169,33 @@ void loop() {
     }
 
     // Hold the display event back by beatOffsetMs so the change lands in the
-    // middle of the beat pulse. The detection time is unchanged, so the clock and
-    // tempo maths stay exact; only the visible event is offset.
-    if (beat) { fireAtMs = millis() + beatOffsetMs; firePending = true; }
+    // middle of the beat pulse.
+    //
+    // THE DOT IS DRIVEN FROM THE DETECTED ONSET (odfDisplayBeat), NOT from the
+    // clock. This is the line that makes the difference between a metronome and a
+    // display that follows the music:
+    //
+    //   was:  if (beat) { fireAtMs = ...; firePending = true; }   // clock tick
+    //   now:  if (odfDisplayBeat) { ... }                          // real onset
+    //
+    // Removing beatLatchLED earlier did nothing, because this is what actually
+    // moves the dot - `doBeat` below. That is why silence still stepped 2-3 times
+    // a second. The clock still runs the 240V display, whose behaviour is fine.
+    if (odfDisplayBeat) {
+      odfDisplayBeat = false;
+      beatLatch240 = true;
+      // A pending fire must be allowed to COMPLETE before a new one is armed.
+      //
+      // Without this guard, an onset arriving faster than beatOffsetMs (200 ms)
+      // reset fireAtMs before it ever elapsed, so doBeat never became true and
+      // there were NO direction changes at all - the opposite of what loosening
+      // the threshold was supposed to achieve. Sparse onsets completed the delay;
+      // dense ones starved it.
+      if (!firePending) {
+        fireAtMs = millis() + beatOffsetMs;
+        firePending = true;
+      }
+    }
     bool doBeat = false;
     if (firePending && (long)(millis() - fireAtMs) >= 0) { firePending = false; doBeat = true; }
 
@@ -2743,14 +3299,39 @@ void loop() {
               "fastled",
               (double)audioFs, (double)audioBass, (double)audioMid,
               (double)audioTreble, (double)audioLevel);
+
+    // ONE compact instrument. The others did their job and were removed; this is
+    // the set that actually proved decisive, so it stays.
+    //
+    //   fs   - measured audio sample rate. A 12 kHz microphone needs >= 24 kHz, and
+    //          the old 300 us burst pacing was holding this at ~10.4 kHz.
+    //   win  - audio window length in ms, i.e. how often the FFT runs and how much
+    //          CPU the audio task costs per second.
+    //   copy - ledShowAll's pixel copy. THE stall indicator: when a flash erase was
+    //          freezing the CPU this pure CPU loop jumped from ~85 us to 27,000 us.
+    //          Low hundreds of us == the display is not being interfered with.
+    //   tx   - the ten-strip parallel transmit. ~4.7 ms is the hardware floor.
+    //   skip - frames dropped because the DMA was still busy (frame-rate ceiling).
+    logAppend("audio fs=%.0fHz win=%.0fms adc=%s | copy avg=%ldus max=%ldus | tx avg=%ldus max=%ldus | skip=%lu",
+              (double)audioFs,
+              (double)(1000.0f * (float)FFT_SAMPLES / (audioFs > 1.0f ? audioFs : 1.0f)),
+              audioDmaOk ? "dma" : (audioAdcFast ? "fast" : "core"),
+              (long)(g_showUsN ? g_copyUsSum / (int32_t)g_showUsN : 0), (long)g_copyUsMax,
+              (long)(g_showUsN ? g_txUsSum / (int32_t)g_showUsN : 0), (long)g_txUsMax,
+              (unsigned long)g_showSkip);
+    g_copyUsSum = g_copyUsMax = g_txUsSum = g_txUsMax = 0;
+    g_showUsN = 0;
+    g_showSkip = 0;
+    g_stepCount = 0;
     logAppend("audio p2p=%d thr=%.0f (avg=%.0f) | tempo=%lums hist=%d | raw mid=%.0f",
               envP2P, (double)p2pThr, (double)p2pAvg, establishedInterval, historyCount,
               (double)rawMid);
     // The bass-band beat detector's own numbers, so bassOverThr can be set from
     // measurements rather than guessed. A kick should show a large over= figure;
     // if over= stays near the threshold, lower it.
-    logAppend("bassbeat over=%.1fdB rise=%.1fdB thr=%.1fdB | level=%.1fdB floor=%.1fdB band=%.0f-%.0fHz",
-              (double)bassOverDb, (double)bassRiseDb, (double)bassOverThr,
+    logAppend("onset nov=%.3f thr=%.3f | rect=%d | over=%.1fdB rise=%.1fdB | level=%.1fdB floor=%.1fdB band=%.0f-%.0fHz",
+              (double)odfNovelty, (double)odfThr, envP2P,
+              (double)bassOverDb, (double)bassRiseDb,
               (double)bassDbLevel, (double)bandFloorBass, (double)bassBandLo, (double)bassBandHi);
     logAppend("clock period=%lums next-in=%ldms hits=%lu inserted=%lu offset=%lums | AC tempo=%lums score=%.0f",
               clockPeriod,
@@ -2768,77 +3349,6 @@ void loop() {
               (double)(barEnergyCnt[3] ? barEnergySum[3] / barEnergyCnt[3] : 0.0f),
               infillMode ? 1 : 0, firedCount);
     firedCount = 0;
-    // Fired-beat intervals - the visible timing, so drift shows up directly.
-    // The step interval actually in use, versus what the slider asked for. 47
-    // steps/second means ~21 ms, not the 5 ms the fastest setting implies - so
-    // something between the slider and portCfg[] is not what it appears.
-    logAppend("stepint port1 speed=%.3fs interval=%lums pat=%d qty=%d size=%d",
-              (double)portCfg[0].speed,
-              (unsigned long)(constrain(portCfg[0].speed, 0.005f, 5.0f) * 1000.0),
-              portCfg[0].pat, portCfg[0].qty, portCfg[0].size);
-
-    // Loop attribution: what a whole pass costs, and the web server's share of it.
-    // If looptime avg is ~20000us the render loop is being blocked by about 20 ms
-    // of work that is not the LED show (measured at ~5 ms).
-    if (g_loopN) {
-      logAppend("looptime avg=%ldus max=%ldus n=%lu | client avg=%ldus max=%ldus | render avg=%ldus max=%ldus",
-                (long)(g_loopSumUs / (int32_t)g_loopN), (long)g_loopMaxUs,
-                (unsigned long)g_loopN,
-                (long)(g_clientSumUs / (int32_t)g_loopN), (long)g_clientMaxUs,
-                (long)(g_renderSumUs / (int32_t)g_loopN), (long)g_renderMaxUs);
-    } else {
-      logAppend("looptime (no passes since last log)");
-    }
-    g_loopSumUs = g_loopMaxUs = g_clientSumUs = g_clientMaxUs = g_renderSumUs = g_renderMaxUs = 0;
-    g_loopN = 0;
-
-    // Copy vs transmit split, plus how often strips actually stepped. If steps is
-    // far below what the shown interval implies, the motion is being gated by
-    // something other than the interval.
-    if (g_showUsN) {
-      logAppend("show split: copy avg=%ldus max=%ldus | tx avg=%ldus max=%ldus | steps=%lu skipped=%lu in 30s",
-                (long)(g_copyUsSum / (int32_t)g_showUsN), (long)g_copyUsMax,
-                (long)(g_txUsSum / (int32_t)g_showUsN), (long)g_txUsMax,
-                (unsigned long)g_stepCount, (unsigned long)g_showSkip);
-    if (g_showSkip) logAppend("show skipped %lu frames (hardware busy)", (unsigned long)g_showSkip);
-    }
-    g_copyUsSum = g_copyUsMax = g_txUsSum = g_txUsMax = 0;
-    g_stepCount = 0;
-
-    // How long a full ten-strip show really takes, so the frame rate can be set
-    // from a measurement instead of an assumption. avg/max are microseconds for
-    // the whole parallel transfer including the buffer copy.
-    if (g_showUsN) {
-      logAppend("showtime avg=%ldus max=%ldus n=%lu",
-                (long)(g_showUsSum / (int32_t)g_showUsN), (long)g_showUsMax,
-                (unsigned long)g_showUsN);
-    } else {
-      logAppend("showtime (no shows since last log)");
-    }
-    g_showUsMax = 0; g_showUsSum = 0; g_showUsN = 0;
-
-    // NeoPixelBus bring-up probe: created / ready / shows completed. If created
-    // stays 0 the instances failed; if ready is 0 the LCD driver never came up;
-    // if shows climbs but nothing lights, Show() is not reaching the transfer.
-    logAppend("npb created=%d ready=%d shows=%lu | heapNow=%u",
-              g_npbCreated, g_npbReady, (unsigned long)g_npbShows,
-              (unsigned)ESP.getFreeHeap());
-
-    // Heap attribution: what every FastLED.show() call costs, measured around the
-    // call itself. perShow is the number that matters - if it is not ~0, the
-    // allocation is inside the show call and the driver is the cause.
-    if (g_showDeltaN) {
-      logAppend("showheap n=%lu totalDelta=%ld perShow=%ld bytes | heapNow=%u",
-                (unsigned long)g_showDeltaN,
-                (long)g_showHeapDelta,
-                (long)(g_showHeapDelta / (int32_t)g_showDeltaN),
-                (unsigned)ESP.getFreeHeap());
-    } else {
-      logAppend("showheap n=0 (no shows since last log) heapNow=%u",
-                (unsigned)ESP.getFreeHeap());
-    }
-    g_showHeapDelta = 0;
-    g_showDeltaN = 0;
 
     logAppend("fires %lu %lu %lu %lu %lu %lu %lu %lu",
               fireInt[0], fireInt[1], fireInt[2], fireInt[3],
