@@ -90,6 +90,59 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             opacity: 0.4;
             cursor: not-allowed;
         }
+        /* ---------------------------------------------------------------------
+           Range sliders: large, easy to grab, and a drag NEVER scrolls the page.
+           The generic rule above left the hit area ~8px high with the browser's
+           default thin thumb, so a slightly imprecise press landed on the page
+           background and scrolled it instead of moving the slider.
+           - height 44px  : a big touch target, hard to miss
+           - touch-action : none  -> a drag is claimed by the slider, not the page
+           - a 30px round thumb with the track drawn behind it
+           --------------------------------------------------------------------- */
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 44px;
+            padding: 0;
+            margin: 0;
+            background: transparent;
+            border: none;
+            touch-action: none;
+            cursor: pointer;
+        }
+        input[type="range"]::-webkit-slider-runnable-track {
+            height: 8px;
+            border-radius: 4px;
+            background: #2c2c2c;
+            border: 1px solid var(--border-color);
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 30px;
+            height: 30px;
+            margin-top: -12px;          /* centre the thumb on the track */
+            border-radius: 50%;
+            background: var(--primary-color);
+            border: 2px solid #000;
+        }
+        input[type="range"]:active::-webkit-slider-thumb {
+            background: #ffffff;
+            transform: scale(1.1);
+        }
+        input[type="range"]::-moz-range-track {
+            height: 8px;
+            border-radius: 4px;
+            background: #2c2c2c;
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: var(--primary-color);
+            border: 2px solid #000;
+        }
+        input[type="range"]:focus { outline: none; }
         .btn {
             background-color: var(--secondary-color);
             color: #000;
@@ -629,8 +682,8 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 <tr>
                     <td class="name-col">Frequency</td>
                     <td>
-                        <input type="range" id="paramFrequency240" min="0" max="400" step="1" value="150" oninput="liveParamChanged('240V')">
-                        <span id="freqVal240" style="font-size:0.85rem; display:block; color:var(--primary-color);">50Hz</span>
+                        <input type="range" id="paramFrequency240" min="20" max="100" step="1" value="60" oninput="liveParamChanged('240V')">
+                        <span id="freqVal240" style="font-size:0.85rem; display:block; color:var(--primary-color);">60Hz</span>
                     </td>
                 </tr>
                 <tr>
@@ -673,8 +726,8 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 <tr>
                     <td class="name-col">Speed</td>
                     <td>
-                        <input type="range" id="paramSpeedLED" min="0.01" max="1.0" step="0.01" value="0.50" oninput="liveParamChanged('LED')">
-                        <span id="speedValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.50s</span>
+                        <input type="range" id="paramSpeedLED" min="0.005" max="0.50" step="0.001" value="0.007" oninput="liveParamChanged('LED')">
+                        <span id="speedValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.005s</span>
                     </td>
                 </tr>
                 <tr>
@@ -731,8 +784,8 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 <tr>
                     <td class="name-col">Frequency</td>
                     <td>
-                        <input type="range" id="paramFrequencyLED" min="0" max="400" step="1" value="150" oninput="liveParamChanged('LED')">
-                        <span id="freqValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">50Hz</span>
+                        <input type="range" id="paramFrequencyLED" min="20" max="100" step="1" value="60" oninput="liveParamChanged('LED')">
+                        <span id="freqValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">60Hz</span>
                     </td>
                 </tr>
                 <tr>
@@ -978,7 +1031,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     // Read-out labels only - no request to the ESP32.
     function updateParamLabels(section) {
         let suffix = (section === '240V') ? '240' : 'LED';
-        document.getElementById('speedVal' + suffix).innerText = parseFloat(document.getElementById('paramSpeed' + suffix).value).toFixed(2) + 's';
+        document.getElementById('speedVal' + suffix).innerText = parseFloat(document.getElementById('paramSpeed' + suffix).value).toFixed(3) + 's';
         document.getElementById('qtyVal' + suffix).innerText = document.getElementById('paramQuantity' + suffix).value;
         document.getElementById('sizeVal' + suffix).innerText = document.getElementById('paramSize' + suffix).value;
         document.getElementById('freqVal' + suffix).innerText = document.getElementById('paramFrequency' + suffix).value + 'Hz';

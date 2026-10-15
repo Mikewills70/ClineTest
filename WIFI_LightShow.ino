@@ -61,7 +61,7 @@ int   freq240V  = 50;   int mult240V     = 2; String music240V = "BASS";
 float attack240V = 0.15; float decay240V = 0.01;
 bool  wrap240V = false; bool invert240V = false;
 
-float speedLED = 1.0;   int quantityLED = 1; int sizeLED = 1;
+float speedLED = 0.005;   int quantityLED = 1; int sizeLED = 1;
 int   freqLED  = 50;    int multLED     = 2; String musicLED = "BASS";
 float attackLED = 0.15; float decayLED = 0.01;
 bool  wrapLED = false;  bool invertLED = false;
@@ -338,22 +338,93 @@ volatile int g_npbReady   = -1;    // -1 = not sampled, else CanShow() result
 volatile int g_npbCreated = 0;     // instances successfully created
 volatile int g_npbShows   = 0;     // Show() calls completed
 
+// How long one complete 10-strip show ACTUALLY takes, in microseconds. This is the
+// number that sets the maximum dot speed: a step must be displayed, so the frame
+// interval can only be as short as a show lasts. With true parallel output all ten
+// strips are clocked in one DMA transfer, so this should be a few milliseconds -
+// not the ~30 ms a serial transmission would need.
+volatile int32_t  g_showUsMax = 0;
+volatile int32_t  g_showUsSum = 0;
+volatile uint32_t g_showUsN   = 0;
+
+// Split of the show time, so the spike and the per-frame overhead can be seen
+// separately rather than hidden in one aggregate: copy = filling NeoPixelBus's
+// pixel buffers, tx = the Show() calls and their wait for the LCD DMA.
+volatile int32_t  g_copyUsSum = 0, g_copyUsMax = 0;
+volatile int32_t  g_txUsSum   = 0, g_txUsMax   = 0;
+
+// How often a strip actually advances. If the calculated interval says 5 ms but
+// this counts ~48 steps/second, then something other than the shown interval is
+// gating the motion.
+volatile uint32_t g_stepCount = 0;
+volatile uint32_t g_showSkip  = 0;   // frames skipped because the hardware was busy
+
+// Loop timing, split by stage, so a slow loop can be attributed instead of
+// guessed at. g_loop* is the whole pass; g_client* is the web server's share;
+// g_render* is the pattern engine's share (which includes ledShowAll).
+volatile int32_t  g_loopSumUs = 0,   g_loopMaxUs = 0;
+volatile int32_t  g_clientSumUs = 0, g_clientMaxUs = 0;
+volatile int32_t  g_renderSumUs = 0, g_renderMaxUs = 0;
+volatile uint32_t g_loopN = 0;
+
+// Per-port "this strip's buffer changed since the last show". Copying all 1000
+// pixels every frame was ~5 ms of the frame time even when nine strips were
+// unchanged; only the strips that actually stepped need copying now, so the
+// per-frame cost drops roughly tenfold and the frame rate (which sets the maximum
+// dot speed) is no longer dragged down by redundant work.
+volatile bool ledDirty[NUM_PORTS] = {false};
+
 void ledShowAll() {
+  // NEVER BLOCK. NeoPixelBus's Show() waits for the previous LCD DMA transfer to
+  // finish, and that wait is precisely what shows up as a 30-40 ms spike while the
+  // average frame is only ~5 ms. CanShow() reports whether the hardware is ready,
+  // so a frame is simply skipped when it is not: the display then runs at exactly
+  // the rate the hardware can sustain, with no stalls. This works identically for
+  // all ten ports, since they are transmitted together in one parallel transfer.
+  if (g_strip[0] && !g_strip[0]->CanShow()) { g_showSkip++; return; }
+
+  int64_t t0 = esp_timer_get_time();
+  // Fast path: copy only the strips that stepped. Fallback: if NO strip is marked
+  // dirty, something wrote leds[][] directly (blank, preview, save-flash,
+  // calibration) instead of through drawPortPattern(), so copy them all. That makes
+  // this self-correcting rather than depending on every writer remembering to mark.
+  bool anyDirty = false;
+  for (int p = 0; p < NUM_PORTS; p++) { if (ledDirty[p]) { anyDirty = true; break; } }
+  if (!anyDirty) for (int p = 0; p < NUM_PORTS; p++) ledDirty[p] = true;
+
   for (int p = 0; p < NUM_PORTS; p++) {
     Ws2811Strip *s = g_strip[p];
     if (!s) continue;
-    for (int i = 0; i < NUM_LEDS_PER_STRIP; i++)
-      s->SetPixelColor(i, RgbColor(leds[p][i].r, leds[p][i].g, leds[p][i].b));
-    s->Show();
+    if (ledDirty[p]) {
+      ledDirty[p] = false;
+      for (int i = 0; i < NUM_LEDS_PER_STRIP; i++)
+        s->SetPixelColor(i, RgbColor(leds[p][i].r, leds[p][i].g, leds[p][i].b));
+    }
+  }
+  int64_t t1 = esp_timer_get_time();
+  for (int p = 0; p < NUM_PORTS; p++) {
+    if (g_strip[p]) g_strip[p]->Show();
+  }
+  int64_t t2 = esp_timer_get_time();
+  {
+    int32_t cu = (int32_t)(t1 - t0), xu = (int32_t)(t2 - t1);
+    g_copyUsSum += cu; if (cu > g_copyUsMax) g_copyUsMax = cu;
+    g_txUsSum   += xu; if (xu > g_txUsMax)   g_txUsMax   = xu;
   }
   g_npbShows++;
+  int32_t us = (int32_t)(t2 - t0);
+  g_showUsSum += us;
+  g_showUsN++;
+  if (us > g_showUsMax) g_showUsMax = us;
 }
 
 // Blank every strip buffer. FastLED.clear() only clears REGISTERED controllers
 // and with our own driver nothing is registered, so do it explicitly.
 void ledClearAll() {
-  for (int p = 0; p < NUM_PORTS; p++)
+  for (int p = 0; p < NUM_PORTS; p++) {
     for (int i = 0; i < NUM_LEDS_PER_STRIP; i++) leds[p][i] = CRGB::Black;
+    ledDirty[p] = true;              // the clear must be copied out too
+  }
 }
 
 #define TL_ROWS 8
@@ -627,7 +698,7 @@ void loadSettings() {
   }
   preferences.end();
 
-  freqThreshold = constrain(freqLED, 5, 400);
+  freqThreshold = constrain(freqLED, 20, 100);
   multiplier = constrain(multLED, 1, 9);
   currentMusicMode = musicLED;
 }
@@ -845,7 +916,7 @@ void handleLiveTweak() {
   showStatus(1);                          // IO48: 1 blink = live-tweak received
 
   // The shared detector follows the most recently tweaked section
-  freqThreshold = constrain(frq, 5, 400);
+  freqThreshold = constrain(frq, 20, 100);
   multiplier = constrain(bm, 1, 9);
   currentMusicMode = music;
   musicFullMode = (music == "FULL");
@@ -1315,10 +1386,16 @@ static void audioAnalyse() {
   // carry almost no energy in music, and the beat detector then never fires at all -
   // which is exactly what happened with the slider at 31 Hz (IO48 went silent).
   // The slider can still raise the top edge freely above 90 Hz.
+  // The Frequency slider (20-100 Hz) selects the TOP of the beat band; the band
+  // runs from the first usable FFT bin up to that value. A 33 Hz setting - the one
+  // that gave the best visual response on the original firmware - was impossible
+  // before now because an artificial 90 Hz floor was clamping it, so the control
+  // did nothing below 90. The floor is gone: the slider means what it says.
+  // Bin width is audioFs/FFT_SAMPLES (~21 Hz at 512 points), so the very lowest
+  // setting gives a one-bin band; higher settings widen it into the kick region.
   float binW = audioFs / (float)FFT_SAMPLES;
   if (binW < 1.0f) binW = 1.0f;
-  float bassTop    = constrain((float)freqThreshold, 20.0f, 400.0f);
-  if (bassTop < 90.0f) bassTop = 90.0f;
+  float bassTop    = constrain((float)freqThreshold, 20.0f, 100.0f);
   float bassBottom = binW;
   if (bassTop < bassBottom + binW) bassTop = bassBottom + binW;
   bassBandLo = bassBottom;               // logged, so the band in use is visible
@@ -1394,20 +1471,21 @@ bool checkAudioBeat() {
   bool rising = (envP2P > lastEnvP2P);
   lastEnvP2P = envP2P;
 
-  // ---- THE ORIGINAL DETECTOR, now actually wired in -------------------------
-  // p2pAvg/p2pThr were being computed and logged every 30 s but were never used
-  // to make a decision - the live trigger was the raw-sample envelope, which is
-  // full bandwidth and therefore fires on cymbals and hiss as readily as a kick.
-  // That is what made IO48 flicker like a flame, and it is why tightening the
-  // numbers never behaved predictably.
+  // ---- THE ORIGINAL DETECTOR (restored properly this time) ------------------
+  // The beat now comes from the RC-FILTERED PEAK-TO-PEAK (envP2P), which is the
+  // original firmware's detector, and the Frequency slider is its low-pass cutoff.
+  // At 33 Hz that is a gentle one-pole filter, which in practice acts as a
+  // BROADBAND envelope detector - it is why 33 Hz felt right and why it responds
+  // to the whole body of a kick rather than one narrow slice of it.
   //
-  // This is the old firmware's detector: the RC-filtered peak-to-peak compared
-  // with a threshold, a required RISE so a hit cannot double-trigger on its own
-  // falling edge, and the same 200 ms refractory. It reads ONE level per 10 ms
-  // window rather than a sample-by-sample envelope, so treble content cannot
-  // drive it.
-  if (bassOverDb > bassOverThr && bassRiseDb > 1.5f &&
-      (now - lastAcceptedBeatTime) >= 200) {
+  // The FFT bass band is NOT used for the beat any more. At 33 Hz with ~21 Hz bins
+  // it selected a single, almost empty bin, so the same slider number produced a
+  // far weaker response than the original. The FFT still runs for the VU meters,
+  // and its levels are still logged.
+  //
+  // p2pThr is the adaptive threshold (half the running average, floored well above
+  // room noise) and `rising` prevents a hit double-triggering on its falling edge.
+  if (rising && envP2P > p2pThr && (now - lastAcceptedBeatTime) >= 200) {
     triggered     = true;
     beatTriggerMs = now;
     rawBeatFlag   = true;                 // IO48: flash on every detection
@@ -1872,6 +1950,7 @@ void applyGlobalsToPorts() {
 // Draw the current frame of ONE strip using its own pattern + parameters
 void drawPortPattern(int port) {
   const int N = NUM_LEDS_PER_STRIP;
+  ledDirty[port] = true;              // this strip's data changed; it must be copied
   const int lc = (N / 2) - 1;
   const int rc = N / 2;
   const PortCfg &c = portCfg[port];
@@ -1966,29 +2045,41 @@ void runLEDPattern() {
   for (int p = 0; p < NUM_PORTS; p++) {
     const PortCfg &c = portCfg[p];
     bool isVu = (c.pat >= LP_VU_METER);
-    unsigned long interval = isVu ? 25UL : (unsigned long)(constrain(c.speed, 0.01f, 5.0f) * 1000.0);
-    if (interval < 20) interval = 20;
+    unsigned long interval = isVu ? 25UL : (unsigned long)(constrain(c.speed, 0.005f, 5.0f) * 1000.0);
+    // Floor the step at the frame rate (5 ms), NOT 20 ms. The 20 ms floor here was
+    // a hard 50 steps/second ceiling that no slider setting could beat - it is the
+    // "48/s" that showed up in every log and the reason more speed was impossible.
+    if (interval < 5) interval = 5;
 
     if (now - ledStepMs[p] < interval) continue;
     ledStepMs[p] = now;
+    g_stepCount++;
+
+    // A step MUST be displayed, so it can never be faster than the frame rate -
+    // otherwise the dot jumps and pixels are never lit. Keep this equal to frameMs.
+    if (interval < 5) interval = 5;
 
     drawPortPattern(p);
     advancePort(p);
     anyDrew = true;
   }
 
-  // ONE show per frame, never one per port.
+  // One show per frame, never one per port.
   //
-  // MEASURED, not assumed: the heap falls by 231-247 BYTES on every single
-  // FastLED.show() call. A ten-strip show needs ~30 ms to transmit, so the
-  // hardware can drain about 30 per second at the very most; asking for more fills
-  // the driver's queue until the heap hits the floor and the board restarts after
-  // ~20-40 s. Calling show() once per port step asked for ~50/s - guaranteed to
-  // queue. At 20/s (50 ms) there is margin, the queue stays empty, and no memory
-  // accumulates.
+  // 10 ms (100 fps) as a starting point. A ten-strip parallel transfer should be
+  // only a few milliseconds, so this is deliberately conservative until the
+  // measured figure is read back from the log (showtime avg/max). With parallel
+  // output the frame rate - not the transmission - sets the maximum dot speed:
+  // 10 ms = 100 pixels/second = ~1 s to traverse a 100-LED strip.
   static unsigned long lastShowMs = 0;
+  // 5 ms (200 fps) - the hardware floor. A ten-strip transmit takes a hard 4.7 ms,
+  // so this is as fast as the bus can be driven. The 40 ms stalls blamed on this duty
+  // cycle were in fact LittleFS flash erases (cache disabled on BOTH cores) and are
+  // now fixed. If CanShow() starts skipping frames, this is past the hardware limit
+  // and should go back up toward 7 ms.
+  const unsigned long frameMs = 5;
   if (anyDrew && !beatLatchLED) {}          // (keep the beat latch semantics)
-  if (anyDrew && (now - lastShowMs >= 50UL)) {
+  if (anyDrew && (now - lastShowMs >= frameMs)) {
     lastShowMs = now;
     dbgStage = 8;
     ledShowCount++;
@@ -2186,7 +2277,23 @@ void doSaveFlash() {
 // The display task is the ONLY renderer, so Wi-Fi, the UI and the audio work
 // can never stall or corrupt a frame.
 // ==========================================
-// Audio, logging and deferred saves run on their OWN task again, on core 0.
+// ---------------------------------------------------------------------------
+// WEB TASK - core 0.
+// CARDINAL RULE: the display must never be affected by any CPU demand. A single
+// HTTP request was measured at 188 ms, and because the web server shared loop()
+// with the render, that request blocked the lights (looptime max ~300 ms versus a
+// ~6 ms average). The web server now runs on its own low-priority task on core 0,
+// so a request can only ever delay other web work - never a frame.
+// WiFi is an editing tool; it is not in the display's path.
+// ---------------------------------------------------------------------------
+void webTask(void *param) {
+  (void)param;
+  for (;;) {
+    server.handleClient();
+    vTaskDelay(1);          // yield so the audio task and the radio are not starved
+  }
+}
+
 //
 // They were merged into loop() earlier because a second task appeared to break the
 // LED output - but that was FastLED's RMT path. NeoPixelBus drives the strips from
@@ -2196,13 +2303,36 @@ void doSaveFlash() {
 void audioTask(void *param) {
   (void)param;
   for (;;) {
-    logService();                        // flash writes happen here
-    if (saveSettingsPending) {           // deferred NVS save
+    // CARDINAL RULE: the display must never be affected by any CPU demand.
+    //
+    // MEASURED: copy (a pure CPU memory loop) spiked to 27,465 us and tx to
+    // 37,073 us in the same window. No DMA fault can stall a CPU memory loop, so
+    // the CPU itself was stopped - and a 20-40 ms freeze is the signature of a
+    // FLASH ERASE, which disables the cache on BOTH cores. Draining the log to
+    // LittleFS here is that erase (logWriteNow -> open/write -> sector erase).
+    //
+    // Moving this task to core 0 did not help because the cache is shared: the
+    // erase stalls core 1's render regardless of which core issued it.
+    //
+    // The log queue is already a RAM ring buffer, so while a show is running we
+    // simply do not drain it. It is flushed when the show stops (the condition
+    // goes false), so nothing is lost - and the 30 s heartbeat still goes out on
+    // serial in the meantime. No flash write ever happens during a show.
+    if (!displayActive) {
+      logService();                        // flash writes happen here
+    }
+    if (saveSettingsPending && !displayActive) {   // deferred NVS save
       saveSettingsPending = false;
       saveSettings();
     }
     if (audioEnabled) {
       if (checkAudioBeat()) beatFlag = true;
+      // Yield between analysis windows. This task previously spun with no delay at
+      // all, saturating core 0 and contending for the bus the LCD DMA reads its
+      // buffer from - which showed up as the transmit occasionally taking 42 ms
+      // instead of its 4.7 ms average. A window is 30-50 ms, so a 1 ms yield costs
+      // nothing and takes that pressure off the display.
+      vTaskDelay(1);
     } else {
       vTaskDelay(pdMS_TO_TICKS(20));
     }
@@ -2375,7 +2505,12 @@ void setup() {
   tlRowStart = millis();
 
   WiFi.mode(WIFI_AP);
-  WiFi.setSleep(false);                 // keep the radio responsive for the UI
+  // Modem sleep ENABLED. This was set to false ("keep the radio responsive") which
+  // forces the radio awake continuously - a permanent CPU load that costs frame
+  // rate during playback, and playback is exactly when WiFi is not needed. The UI
+  // only sends small edits, one strip at a time, so sleeping between beacons costs
+  // nothing noticeable while editing and frees the render loop while running.
+  WiFi.setSleep(true);
   WiFi.onEvent(WiFiEvent);
   WiFi.softAP(apSSID, apPassword);
   // Reduced from 19.5 dBm (maximum). The radio at full power draws a large current
@@ -2410,16 +2545,26 @@ void setup() {
   server.begin();
 
   // --- Start the audio task on core 0 (rendering stays in loop() on core 1) ---
-  // Audio on its own task (core 0). The display is DMA-driven by the LCD_CAM
-  // peripheral, so it does not depend on this task's timing.
+  // Audio on its own task (core 0).
   xTaskCreatePinnedToCore(audioTask, "audio", 4096, NULL, 2, NULL, 0);
+  // Web server on its own task (core 0, low priority) so HTTP can never stall the
+  // render loop on core 1. CARDINAL RULE: the display is immune to CPU demands.
+  xTaskCreatePinnedToCore(webTask, "web", 8192, NULL, 1, NULL, 0);
 }
 
 void loop() {
   // Web UI and rendering. Audio, logging and deferred saves run on core 0
   // (audioTask) so a 30-50 ms FFT window cannot stall the display.
+  //
+  // The web server is serviced at a bounded rate rather than on every pass. WiFi is
+  // used for building the show and for small tweaks to one strip, NOT during
+  // playback - so handling it every 5 ms keeps the UI responsive while leaving the
+  // render loop free to hit the frame rate that sets the dot speed.
   dbgStage = 1;
-  server.handleClient();
+  // server.handleClient() is NOT called here. It runs on its own core-0 task
+  // (webTask) so an HTTP request can never stall a frame - see webTask().
+  unsigned long loopNow = millis();
+  (void)loopNow;
 
   // Serial command interface: 'L' dumps /log.txt over USB, 'D' prints /diag.
   // Lets a host read the diagnostics without the Wi-Fi AP (and without relying
@@ -2589,7 +2734,7 @@ void loop() {
   // --- 30 s heartbeat into /log.txt: makes the heap drain rate directly visible
   // (compare "heap" between consecutive lines) without typing anything out.
   static unsigned long lastLogHb = 0;
-  if (millis() - lastLogHb >= 5000) {   // 5 s for this diagnostic build: the board dies at ~20 s
+  if (millis() - lastLogHb >= 30000) {
     lastLogHb = millis();
     logAppend("hb up=%us heap=%u min=%u shows=%lu display=%d out=%s fs=%.0f bass=%.2f mid=%.2f treb=%.2f lvl=%.2f",
               (unsigned)(millis() / 1000), (unsigned)ESP.getFreeHeap(),
@@ -2624,6 +2769,54 @@ void loop() {
               infillMode ? 1 : 0, firedCount);
     firedCount = 0;
     // Fired-beat intervals - the visible timing, so drift shows up directly.
+    // The step interval actually in use, versus what the slider asked for. 47
+    // steps/second means ~21 ms, not the 5 ms the fastest setting implies - so
+    // something between the slider and portCfg[] is not what it appears.
+    logAppend("stepint port1 speed=%.3fs interval=%lums pat=%d qty=%d size=%d",
+              (double)portCfg[0].speed,
+              (unsigned long)(constrain(portCfg[0].speed, 0.005f, 5.0f) * 1000.0),
+              portCfg[0].pat, portCfg[0].qty, portCfg[0].size);
+
+    // Loop attribution: what a whole pass costs, and the web server's share of it.
+    // If looptime avg is ~20000us the render loop is being blocked by about 20 ms
+    // of work that is not the LED show (measured at ~5 ms).
+    if (g_loopN) {
+      logAppend("looptime avg=%ldus max=%ldus n=%lu | client avg=%ldus max=%ldus | render avg=%ldus max=%ldus",
+                (long)(g_loopSumUs / (int32_t)g_loopN), (long)g_loopMaxUs,
+                (unsigned long)g_loopN,
+                (long)(g_clientSumUs / (int32_t)g_loopN), (long)g_clientMaxUs,
+                (long)(g_renderSumUs / (int32_t)g_loopN), (long)g_renderMaxUs);
+    } else {
+      logAppend("looptime (no passes since last log)");
+    }
+    g_loopSumUs = g_loopMaxUs = g_clientSumUs = g_clientMaxUs = g_renderSumUs = g_renderMaxUs = 0;
+    g_loopN = 0;
+
+    // Copy vs transmit split, plus how often strips actually stepped. If steps is
+    // far below what the shown interval implies, the motion is being gated by
+    // something other than the interval.
+    if (g_showUsN) {
+      logAppend("show split: copy avg=%ldus max=%ldus | tx avg=%ldus max=%ldus | steps=%lu skipped=%lu in 30s",
+                (long)(g_copyUsSum / (int32_t)g_showUsN), (long)g_copyUsMax,
+                (long)(g_txUsSum / (int32_t)g_showUsN), (long)g_txUsMax,
+                (unsigned long)g_stepCount, (unsigned long)g_showSkip);
+    if (g_showSkip) logAppend("show skipped %lu frames (hardware busy)", (unsigned long)g_showSkip);
+    }
+    g_copyUsSum = g_copyUsMax = g_txUsSum = g_txUsMax = 0;
+    g_stepCount = 0;
+
+    // How long a full ten-strip show really takes, so the frame rate can be set
+    // from a measurement instead of an assumption. avg/max are microseconds for
+    // the whole parallel transfer including the buffer copy.
+    if (g_showUsN) {
+      logAppend("showtime avg=%ldus max=%ldus n=%lu",
+                (long)(g_showUsSum / (int32_t)g_showUsN), (long)g_showUsMax,
+                (unsigned long)g_showUsN);
+    } else {
+      logAppend("showtime (no shows since last log)");
+    }
+    g_showUsMax = 0; g_showUsSum = 0; g_showUsN = 0;
+
     // NeoPixelBus bring-up probe: created / ready / shows completed. If created
     // stays 0 the instances failed; if ready is 0 the LCD driver never came up;
     // if shows climbs but nothing lights, Show() is not reaching the transfer.
