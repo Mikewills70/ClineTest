@@ -33,7 +33,8 @@ int portColorOrders[NUM_PORTS] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2}; // Default to B
 // (LCD_CAM / I80), selected in build_opt.h. No RMT anywhere in this project.
 
 
-uint8_t ledBrightnessScale = 255;    // master brightness as 0..255
+// (ledBrightnessScale was removed: it was assigned here and never read - the
+// brightness actually applied is the one FastLED.setBrightness() receives below.)
 
 // NOTE: ledShowAll()/ledClearAll() are defined further DOWN, after the pattern
 // type declarations. The Arduino builder inserts its automatic prototypes just
@@ -62,9 +63,13 @@ float attack240V = 0.15; float decay240V = 0.01;
 bool  wrap240V = false; bool invert240V = false;
 
 float speedLED = 0.005;   int quantityLED = 1; int sizeLED = 1;
-int   freqLED  = 50;    int multLED     = 2; String musicLED = "BASS";
+int   freqLED  = 50;    int multLED     = 1;   // 1 = one reversal per beat (DEFAULT)
 float attackLED = 0.15; float decayLED = 0.01;
 bool  wrapLED = false;  bool invertLED = false;
+// LED VU meter DIRECTION. There is ONE "VU Meter" pattern now: this picks which of
+// the four existing render branches (left, right, centre-out, both-ends) it uses.
+// The row lives in the Special block.
+String vuDirLED = "LEFT";    // LEFT | RIGHT | CENTRE | ENDS
 // LED page colour, 0xRRGGBB. [0] drives every non-VU pattern; [0..3] are the VU
 // meter's four bands, low level first. Defaults reproduce the previous look.
 uint32_t colourLED[4] = { 0xFFFFFF, 0xFFD000, 0xFF7000, 0xFF0000 };
@@ -90,8 +95,10 @@ bool playlistPlaying = false;
 
 // ---- Active audio detector parameters (shared) ----
 int freqThreshold = 50;
-int multiplier = 2;
-String currentMusicMode = "BASS";
+int multiplier = 1;   // Beat Multiplier: 1 = one reversal per beat, 2 = two
+// musicFullMode is the 240V VU METER's level source (BASS / FULL RANGE). It is
+// set ONLY from the 240V section: the LED meter is bass-only by design and its
+// source control has been removed, so an LED tweak must not change this.
 volatile bool musicFullMode = false;   // "FULL RANGE" selected (audio task reads this)
 
 // ---- 240V relay engine state ----
@@ -100,17 +107,18 @@ unsigned long lastBeatTime = 0;
 unsigned long powerLedOffAt = 0;   // IO48 flash-off timestamp (0 = already off)
 int dotPos240 = 0;
 int dotDirection = 1;
-// A beat must be LATCHED per consumer: the 240V display and the strips step at
-// their own rates, so a beat delivered on a single loop pass was usually gone
-// before the next step ran - which is why the direction so rarely changed.
-// Each consumer clears its own latch when it acts on it.
+// A beat must be LATCHED: the 240V display steps at its own rate, so a beat
+// delivered on a single loop pass was usually gone before the next step ran -
+// which is why the direction so rarely changed. It clears its own latch when it
+// acts on it.
+//
+// The STRIPS no longer need a latch: their reversal happens in loop() the instant
+// the onset is detected (doBeat), so beatLatchLED was set, never read, and is gone.
 volatile bool beatLatch240 = false;
-volatile bool beatLatchLED = false;
 
 // ---- WS2811 LED engine state ----
-int ledStep = 0;
-int ledDirection = 1;
-int ledExplosionStep = 0;
+// (The per-port arrays live further down, next to PortCfg. ledStep, ledDirection
+// and ledExplosionStep were superseded by them, were never read, and are gone.)
 
 // ---- Audio analysis (FFT) ----------------------------------------------------
 // A 256-point FFT over ~32 ms of audio (~31 Hz per bin). This replaces the old
@@ -137,6 +145,17 @@ volatile float audioBass   = 0.0f;   // 0..1 band levels, read by the render loo
 volatile float audioMid    = 0.0f;
 volatile float audioTreble = 0.0f;
 volatile float audioLevel  = 0.0f;   // whole-spectrum level
+
+// ---- Graphic EQ: ten band levels --------------------------------------------
+// Filled by audioAnalyse() from the SAME FFT the VU meters use, and normalised the
+// same way (dB above a tracked floor, 24 dB range), so a quiet room gives nothing
+// and music gives movement without a second calibration.
+#define EQ_BANDS 10
+#define EQ_MAX   10                     // bar scale, the same 0..10 as the VU meters
+volatile float audioEqBand[EQ_BANDS];
+float          eqFloor[EQ_BANDS];       // per-band noise floor trackers
+float          eqSmooth[EQ_BANDS];      // ballistics state (advanced once per frame)
+int            eqBar[EQ_BANDS];         // what the renderer draws, 0..EQ_MAX
 volatile float audioFs     = 8000.0f;// measured sample rate of the last window
 volatile float rawBass = 0.0f;   // RAW band magnitudes: logged, and used for the
 volatile float rawMid  = 0.0f;   // calibration-free onset test (no dB mapping)
@@ -148,7 +167,6 @@ volatile float rawAll  = 0.0f;
 // cutoff comes from the Frequency slider, then the peak-to-peak of the filtered
 // signal over the window, with a 120-count threshold. It is fed from the same
 // ADC samples as the FFT, so both run together.
-float    envFiltered = 2048.0f;
 volatile int envP2P  = 0;
 static int envMax = 0, envMin = 4095;
 
@@ -171,6 +189,18 @@ unsigned long          lastDetectMs = 0;  // last time the detector actually fir
 // so the log shows the drift pattern directly instead of it being inferred.
 unsigned long fireInt[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 int           fireIntIdx = 0;
+// The EXTRA (half-way) beats are recorded SEPARATELY from the real ones, so the
+// multiplier's doubling can be measured in the log instead of judged by eye.
+unsigned long fireIntX[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+int           fireIntIdxX = 0;
+
+// Beat tagging counters, reset on every 30 s heartbeat. The audio layer marks BOTH
+// the real beat and the extra half-way beat; each display then chooses which to act
+// on, so these two counts plus the per-display flip counts show what actually
+// happened rather than what was intended.
+volatile uint32_t g_beatReal = 0, g_beatExtra = 0;   // beats delivered, by tag
+volatile uint32_t g_onsetReal = 0;   // DISTINCT onsets acted on (one per render pass)
+volatile uint32_t g_flipLED  = 0, g_flip240   = 0;   // reversals applied, by display
 
 // ---- Beat clock (phase-locked prediction) ----------------------------------
 // The detector cannot be relied on to catch every beat - a soft hit, or one
@@ -189,9 +219,9 @@ unsigned long clockHits     = 0;      // detected beats since the last log line
 // leading edge (which reads as early). The detection time itself is untouched, so
 // the clock, tempo and pairing maths stay accurate - only the display event is
 // offset. Tunable at runtime with /beatoffset?ms=N and persisted.
-unsigned long beatOffsetMs = 50;
-unsigned long fireAtMs     = 0;
-bool          firePending  = false;
+unsigned long beatOffsetMs = 20;
+// (fireAtMs/firePending are gone: the pending fire now lives in each BeatListener,
+// because a beat is per PATTERN - see listeningStep().)
 
 // ---- Tempo by AUTOCORRELATION ----------------------------------------------
 // Individual transients cannot be trusted with this microphone (the logs show
@@ -309,7 +339,9 @@ volatile bool displayActive = false;
 // The display task is the ONLY place that renders, so FastLED is never called
 // from two tasks, and the web server never blocks a frame.
 // ---------------------------------------------------------------------------
-volatile bool beatFlag     = false;  // set by the audio task, consumed by display
+// (beatFlag is gone. The clock's beat value no longer reaches the display: the
+// pattern engine is driven by doBeat, which comes from the real onset, plus
+// antifreeze when Audio Detect is off.)
 volatile bool previewDirty = false;  // a new preview frame is ready to draw
 volatile bool blankReq     = false;  // request: blank all outputs
 volatile bool flashReq     = false;  // request: do the "saved" confirmation blink
@@ -337,8 +369,16 @@ unsigned long themePrevMs   = 0;     // when the theme preview was requested
 // ---------------------------------------------------------------------------
 enum LedPattern : int {
   LP_MOVING_DOT = 0, LP_CHASE_1_10, LP_CHASE_10_1, LP_CENTER_OUT,
-  LP_KNIGHT_RIDER, LP_VU_METER, LP_VU_REV, LP_VU_DUAL, LP_VU_CENTER
+  LP_KNIGHT_RIDER, LP_VU_METER, LP_VU_REV, LP_VU_DUAL, LP_VU_CENTER,
+  LP_EQ
 };
+
+// The four VU render branches are now ONE pattern: "VU Meter", with the direction
+// row in the Special block choosing which branch is used. LP_EQ therefore sits
+// AFTER them, so "is this a VU pattern?" must use this range test and never the
+// old `>= LP_VU_METER` (which would swallow the EQ).
+static inline bool isVuPat(int p) { return p >= (int)LP_VU_METER && p <= (int)LP_VU_CENTER; }
+static inline bool isLevelPat(int p) { return isVuPat(p) || p == (int)LP_EQ; }
 
 struct PortCfg {
   int   pat    = LP_MOVING_DOT;
@@ -347,6 +387,13 @@ struct PortCfg {
   int   size   = 1;
   bool  wrap   = false;
   bool  invert = false;
+  // LISTENING - this pattern's own view of the audio, on the same scale and with the
+  // same formula as the pattern page, so a pattern left alone behaves exactly as the
+  // 15/10 baseline did. A timeline cell overrides them for its port, which is what
+  // lets two ports listen to different bands and different thresholds at once.
+  float beatSens = 0.2f;     // its own sensitivity: thr = (1 - beatSens) * 60
+  int   freqHz   = 50;       // its own band lower edge (20-100 Hz)
+  int   mult     = 1;        // 1 = real beats only, 2 = real + half-way beats
   // Per-port colour, 0xRRGGBB.
   //   colour[0]          - the colour used by every non-VU pattern (dot, chase,
   //                        centre-out, knight rider) and by Invert.
@@ -354,9 +401,46 @@ struct PortCfg {
   // Defaults preserve the previous look exactly: white for the dot patterns,
   // and the classic green -> yellow -> orange -> red VU gradient.
   uint32_t colour[4] = { 0xFFFFFF, 0xFFD000, 0xFF7000, 0xFF0000 };
+  // The REFERENCE each slot was selected as. colour[] above is the RESOLVED
+  // value the renderer draws; colourRef[] is what was STORED, and what a saved
+  // playlist item keeps. See the model below.
+  uint32_t colourRef[4] = { 0xFFFFFF, 0xFFD000, 0xFF7000, 0xFF0000 };
 };
 
 PortCfg portCfg[NUM_PORTS];
+
+// ---------------------------------------------------------------------------
+// COLOUR REFERENCE MODEL
+//
+// A colour slot stores a REFERENCE, not a resolved value. That is what makes a
+// theme change flow through to everything that stored a colour: a playlist item
+// keeps the reference, so re-theming repaints it instead of leaving a resolved
+// value frozen behind.
+//
+//   0xFE000000 | n  (n = 0..7)  theme palette index   "T0".."T7"   LIVE (updates)
+//   0xFEFFFFFF                  rainbow               "RB"        fixed
+//   0x00RRGGBB                  custom colour        "#RRGGBB"    fixed
+//
+// 0xFE is a TAG byte, not part of a colour: an RGB value only ever occupies the
+// low three bytes. Every value stored BEFORE this model existed therefore has a
+// top byte of 0x00, which IS a valid custom colour - so the existing NVS keys
+// (colLED0..3) and every stored uint32 carry over with no conversion at all,
+// and "nothing stored" (0) still behaves exactly as it did.
+//
+// A theme reference is resolved AT DRAW TIME against the live palette, never
+// cached into a stored slot, so a theme edited in the Colours page is picked up
+// on the next frame. A rainbow cannot be resolved to one value at all: it is
+// computed per LED from that LED's position along the strip, so adjacent
+// rainbow zones join into ONE continuous rainbow instead of each restarting.
+// ---------------------------------------------------------------------------
+static const uint32_t REF_TAG            = 0xFE000000UL;
+static const uint32_t COLOUR_REF_RAINBOW = 0xFEFFFFFFUL;
+
+static inline bool     refIsTheme(uint32_t v)    { return (v & 0xFF000000UL) == REF_TAG && (v & 0x00FFFFFFUL) < 8UL; }
+static inline bool     refIsRainbow(uint32_t v)  { return v == COLOUR_REF_RAINBOW; }
+static inline int      refThemeIndex(uint32_t v) { return (int)(v & 0x00000007UL); }
+static inline uint32_t refMakeTheme(int i)       { return REF_TAG | (uint32_t)(i & 7); }
+static inline uint32_t refMakeCustom(uint32_t rgb) { return rgb & 0x00FFFFFFUL; }
 
 static int themeIndexOf(const String& name) {
   for (int i = 0; i < THEME_COUNT; i++)
@@ -374,15 +458,64 @@ static void themeLoadToPreview(int idx) {
 
 // "#rrggbb" (or "rrggbb") -> 0xRRGGBB. Returns `dflt` if unparseable.
 //
-// NOTE: this deliberately sits BELOW the type declarations. The Arduino IDE
+// NOTE: these deliberately sit BELOW the type declarations. The Arduino IDE
 // inserts auto-generated function prototypes just before the sketch's FIRST
 // function, so defining any function above LedPattern/PortCfg moves that block
 // above them and the build fails with "<type> does not name a type".
-uint32_t parseHexColor(const char* s, uint32_t dflt) {
+//
+// (parseHexColor() used to live here. It had no callers left once colours became
+// references, so it has been removed.)
+
+// --- the reference encoders/decoders ---------------------------------------
+// Reference -> the string form the UI and a playlist item carry: "T0".."T7",
+// "RB", "#rrggbb". Reported by /settings so a reload restores the SELECTION,
+// not a resolved colour that a theme change could no longer move.
+static void refToString(uint32_t v, char* out, size_t n) {
+  if (refIsRainbow(v))    snprintf(out, n, "RB");
+  else if (refIsTheme(v)) snprintf(out, n, "T%d", refThemeIndex(v));
+  else                    snprintf(out, n, "#%06lx", (unsigned long)(v & 0x00FFFFFFUL));
+}
+
+// String -> reference. Accepts "T0".."T7", "RB" and "#rrggbb"/"rrggbb".
+// ANYTHING ELSE returns `dflt`, so a malformed or missing field can never blank
+// a slot - the same protection the old parseHexColor() gave.
+static uint32_t parseColourRef(const char* s, uint32_t dflt) {
   if (!s) return dflt;
-  while (*s == ' ' || *s == '#') s++;
-  if (!*s) return dflt;
-  return (uint32_t)strtoul(s, nullptr, 16) & 0xFFFFFFUL;
+  while (*s == ' ') s++;
+  if ((*s == 'T' || *s == 't') && s[1] >= '0' && s[1] <= '7' && s[2] == 0)
+    return refMakeTheme(s[1] - '0');
+  if ((*s == 'R' || *s == 'r') && (s[1] == 'B' || s[1] == 'b') && s[2] == 0)
+    return COLOUR_REF_RAINBOW;
+  const char* h = (*s == '#') ? s + 1 : s;
+  for (int i = 0; i < 6; i++) {                 // exactly six hex digits
+    char c = h[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+      return dflt;
+  }
+  if (h[6] != 0) return dflt;
+  return refMakeCustom((uint32_t)strtoul(h, nullptr, 16));
+}
+
+// Reference -> the colour to draw for a slot that holds a single colour. A theme
+// reference reads the LIVE palette, so a theme edit repaints without touching a
+// single stored slot. A rainbow has no single value: the renderer asks
+// refIsRainbow() and uses rainbowAt() per LED instead - this White is only ever
+// a last-resort fallback.
+static CRGB resolveColourRef(uint32_t ref) {
+  if (refIsTheme(ref))   return previewColors[refThemeIndex(ref)];
+  if (refIsRainbow(ref)) return CRGB(0xFFFFFF);
+  return CRGB(refMakeCustom(ref));
+}
+
+// The rainbow for ONE LED, from its POSITION ALONG THE STRIP. Position - not
+// the zone it belongs to - is what makes the four VU body sections join into one
+// continuous rainbow, and what makes a rainbow dot take its colour from where it
+// currently is.
+static CRGB rainbowAt(int idx, int n) {
+  if (n <= 0) n = NUM_LEDS_PER_STRIP;
+  if (idx < 0) idx = 0;
+  uint8_t hue = (uint8_t)(((uint32_t)idx * 256UL) / (uint32_t)n);
+  return CRGB(CHSV(hue, 255, 255));
 }
 
 int           ledPosArr[NUM_PORTS]  = {0};
@@ -424,8 +557,9 @@ volatile int g_npbShows   = 0;     // Show() calls completed
 // interval can only be as short as a show lasts. With true parallel output all ten
 // strips are clocked in one DMA transfer, so this should be a few milliseconds -
 // not the ~30 ms a serial transmission would need.
-volatile int32_t  g_showUsMax = 0;
-volatile int32_t  g_showUsSum = 0;
+// g_showUsN is the frame counter: the heartbeat divides the copy/tx totals by it.
+// (g_showUsSum and g_showUsMax were accumulated but never read - the heartbeat
+// reports the copy/tx split instead - so they are gone.)
 volatile uint32_t g_showUsN   = 0;
 
 // Split of the show time, so the spike and the per-frame overhead can be seen
@@ -440,13 +574,9 @@ volatile int32_t  g_txUsSum   = 0, g_txUsMax   = 0;
 volatile uint32_t g_stepCount = 0;
 volatile uint32_t g_showSkip  = 0;   // frames skipped because the hardware was busy
 
-// Loop timing, split by stage, so a slow loop can be attributed instead of
-// guessed at. g_loop* is the whole pass; g_client* is the web server's share;
-// g_render* is the pattern engine's share (which includes ledShowAll).
-volatile int32_t  g_loopSumUs = 0,   g_loopMaxUs = 0;
-volatile int32_t  g_clientSumUs = 0, g_clientMaxUs = 0;
-volatile int32_t  g_renderSumUs = 0, g_renderMaxUs = 0;
-volatile uint32_t g_loopN = 0;
+// (The g_loop*/g_client*/g_render* stage-timing counters were removed. This
+// display is stall-free, so nobody read them: they were declared and never once
+// written to or displayed.)
 
 // Per-port "this strip's buffer changed since the last show". Copying all 1000
 // pixels every frame was ~5 ms of the frame time even when nine strips were
@@ -510,10 +640,7 @@ void ledShowAll() {
     g_txUsSum   += xu; if (xu > g_txUsMax)   g_txUsMax   = xu;
   }
   g_npbShows++;
-  int32_t us = (int32_t)(t2 - t0);
-  g_showUsSum += us;
   g_showUsN++;
-  if (us > g_showUsMax) g_showUsMax = us;
 }
 
 // Blank every strip buffer. FastLED.clear() only clears REGISTERED controllers
@@ -536,11 +663,36 @@ struct TlItem {
   bool  wrap   = false;
   bool  invert = false;
   bool  used   = false;
+  // The colour REFERENCES the item was saved with on the pattern parameters page
+  // ("T0".."T7" / "RB" / "#rrggbb"), ADOPTED when this cell plays.
+  //
+  // The timeline has NO colour options of its own: a colour is set on the pattern
+  // page, stored with the pattern in the playlist, and arrives here with the cell.
+  // hasColour is false for a cell saved before this existed, and the strip then
+  // simply keeps the colour it already has.
+  uint32_t colour[4] = { 0xFFFFFF, 0xFFD000, 0xFF7000, 0xFF0000 };
+  bool     hasColour = false;
+  // The Beat Multiplier the item was saved with (1 or 2). 0 means the cell has none,
+  // and then it is NOT adopted. It is a PER-DISPLAY parameter: it is set on the
+  // pattern page, stored with the pattern in the playlist, and adopted here when the
+  // cell plays - exactly like speed, size and colour.
+  int      mult = 0;
+  // The pattern's own LISTENING settings, so a cell can be strict while the next one
+  // on the same port is sensitive. -1 / 0 mean "the cell carries none".
+  float    beatSens = -1.0f;
+  int      freqHz   = 0;
 };
 
 TlItem tlData[TL_ROWS][TL_COLS];
 float tlDelaySec = 20.0f;
 int   tlRow = 0;
+// Which ports are currently OWNED by a timeline cell. Cleared when the timeline is
+// reloaded, so a deleted cell reverts its port to the page settings.
+bool  portCellOwned[NUM_PORTS] = {false};
+// The sequence only ADVANCES while this is true. It starts false, so a saved timeline
+// no longer runs itself at power-on: it is played deliberately with the Play button,
+// which also restarts from row 1.
+volatile bool tlPlaying = false;
 unsigned long tlRowStart = 0;
 bool  tlLoaded = false;
 
@@ -683,9 +835,22 @@ String patternIdFromName(String name) {
   if (n.equalsIgnoreCase("Explosion")       || n.equalsIgnoreCase("center_out_chase")) return "center_out_chase";
   if (n.equalsIgnoreCase("Knight Rider")    || n.equalsIgnoreCase("knight_rider"))     return "knight_rider";
   if (n.equalsIgnoreCase("VU Meter Left")   || n.equalsIgnoreCase("vu_meter"))         return "vu_meter";
+  // ONE VU pattern now: the name in the list is plain "VU Meter". Its DIRECTION is a
+  // row in the Special block, not a separate pattern.
+  //
+  // Nothing used to map "VU Meter" at all (only "VU Meter Left" was mapped), so it
+  // fell through to the id "vu meter" - with a SPACE - matched nothing, and every VU
+  // selection rendered as a MOVING DOT. That is fixed here AND in
+  // patternEnumFromName(), which now normalises the string, so a name can no longer
+  // silently degrade to Moving Dot.
+  if (n.equalsIgnoreCase("VU Meter")        || n.equalsIgnoreCase("vu meter"))         return "vu_meter";
+  // The old Right/Dual/Centre names keep their OWN ids, so a playlist saved before the
+  // change still renders the way it did - with its own direction. (They are no longer
+  // reachable from the pattern list, which is now a single VU Meter entry.)
   if (n.equalsIgnoreCase("VU Meter Right")  || n.equalsIgnoreCase("vu_meter_rev"))     return "vu_meter_rev";
   if (n.equalsIgnoreCase("VU Meter Dual")   || n.equalsIgnoreCase("vu_dual"))          return "vu_dual";
   if (n.equalsIgnoreCase("VU Meter Centre") || n.equalsIgnoreCase("vu_center_out"))    return "vu_center_out";
+  if (n.equalsIgnoreCase("EQ")              || n.equalsIgnoreCase("eq"))               return "eq";
   n.toLowerCase();
   return n;
 }
@@ -698,12 +863,16 @@ CRGB hexToCRGB(String hex) {
 }
 
 // Smooth a 0..1 band level into a 0..10 VU level with attack/decay ballistics.
-// Music Source selects the source: FULL RANGE = whole spectrum, BASS = the low
-// band. The MAX9814 barely responds below ~150 Hz, so a silent low band folds
-// in the mid band rather than leaving the meters dead.
-int computeVuLevel(float &smooth, float attack, float decay) {
+//
+// The SOURCE is chosen by the CALLER now, because that is the agreed model:
+//   LED VU meter -> BASS LEVEL  (fullRange = false)
+//   EQ           -> FULL        (fullRange = true)
+//   the 240V VU  -> its own Music Source control, passed in by its caller
+// The MAX9814 barely responds below ~150 Hz, so a silent low band folds in the
+// mid band rather than leaving the meters dead.
+int computeVuLevel(float &smooth, float attack, float decay, bool fullRange) {
   float src;
-  if (musicFullMode) {
+  if (fullRange) {
     src = audioLevel;
   } else {
     src = (audioBass > audioMid) ? audioBass : audioMid;
@@ -715,6 +884,20 @@ int computeVuLevel(float &smooth, float attack, float decay) {
   else                 smooth += d * (target - smooth);
   if (smooth < 0.3f) smooth = 0;
   return (int)(smooth + 0.5f);
+}
+
+// Advance the EQ bars ONCE PER FRAME. Doing it per port would run the ballistics
+// ten times a frame, making the EQ react ten times faster than the VU meter does.
+void advanceEqBars(float attack, float decay) {
+  float a = constrain(attack, 0.01f, 1.0f);
+  float d = constrain(decay, 0.01f, 1.0f);
+  for (int e = 0; e < EQ_BANDS; e++) {
+    float target = constrain(audioEqBand[e], 0.0f, 1.0f) * (float)EQ_MAX;
+    if (target > eqSmooth[e]) eqSmooth[e] += a * (target - eqSmooth[e]);
+    else                      eqSmooth[e] += d * (target - eqSmooth[e]);
+    if (eqSmooth[e] < 0.3f) eqSmooth[e] = 0;
+    eqBar[e] = (int)(eqSmooth[e] + 0.5f);
+  }
 }
 
 // Drive all 10 relay channels low
@@ -744,8 +927,8 @@ void saveSettings() {
   preferences.putInt("qtyLED", quantityLED);
   preferences.putInt("sizeLED", sizeLED);
   preferences.putInt("freqLED", freqLED);
-  preferences.putInt("multLED", multLED);
-  preferences.putString("musicLED", musicLED);
+  preferences.putInt("multLED2", multLED);   // NEW KEY - see loadSettings()
+  // (musicLED is gone: the LED VU meter is BASS LEVEL only, the EQ is FULL.)
   preferences.putFloat("atkLED", attackLED);
   preferences.putFloat("decLED", decayLED);
   preferences.putInt("brightness", masterBrightness);
@@ -790,8 +973,17 @@ void loadSettings() {
   quantityLED = preferences.getInt("qtyLED", 1);
   sizeLED = preferences.getInt("sizeLED", 1);
   freqLED = preferences.getInt("freqLED", 50);
-  multLED = preferences.getInt("multLED", 2);
-  musicLED = preferences.getString("musicLED", "BASS");
+  // NEW KEY, and the default is 1, deliberately.
+  //
+  // The old key held 2 on every board (it was the initialiser's value) because the
+  // multiplier used to have NO visible effect - it only moved clock counters that
+  // nothing displayed. Now that it means "2 = an extra reversal half way between
+  // beats", reading the old value would DOUBLE the reversal rate on every board
+  // and the display would look over-sensitive. The old key is simply abandoned,
+  // exactly as beatSens2 and beatOff2 were when their meaning changed.
+  multLED = preferences.getInt("multLED2", 1);
+  if (multLED > 1) multLED = 2; else multLED = 1;
+  // (musicLED is gone: the LED VU meter is BASS LEVEL only, the EQ is FULL.)
   attackLED = preferences.getFloat("atkLED", 0.15);
   decayLED = preferences.getFloat("decLED", 0.01);
   masterBrightness = preferences.getInt("brightness", 100);
@@ -839,8 +1031,8 @@ void loadSettings() {
   preferences.end();
 
   freqThreshold = constrain(freqLED, 20, 100);
-  multiplier = constrain(multLED, 1, 9);
-  currentMusicMode = musicLED;
+  multiplier = (multLED > 1) ? 2 : 1;   // the DISPLAY multiplier (LED page checkbox)
+  // (currentMusicMode is gone - it was written and never read.)
 }
 
 // ==========================================
@@ -889,8 +1081,9 @@ void handleGetSettings() {
   doc["dec240"] = decay240V;      doc["decLED"] = decayLED;
   doc["wrap240"] = wrap240V;      doc["wrapLED"] = wrapLED;
   doc["inv240"] = invert240V;     doc["invLED"] = invertLED;
-  doc["music240"] = music240V;    doc["musicLED"] = musicLED;
+  doc["music240"] = music240V;    // (musicLED removed: the LED source is fixed)
   doc["beatSens"] = beatSens;      // global: one detector drives both displays
+  doc["vuDir"] = vuDirLED;         // the single VU pattern's direction row
   // Per-port colour calibration order (0=RGB 1=GRB 2=BRG 3=RBG 4=GBR 5=BGR).
   // Exposed so the UI can SHOW the stored order for the selected port instead of
   // always displaying RGB and disagreeing with what the strip is doing.
@@ -898,13 +1091,27 @@ void handleGetSettings() {
     JsonArray ca = doc["portCal"].to<JsonArray>();
     for (int i = 0; i < NUM_PORTS; i++) ca.add(portColorOrders[i]);
   }
-  // LED colour, so a reload shows the saved colours rather than the HTML defaults.
+  // LED colour: BOTH the reference that was stored AND the value it currently
+  // resolves to.
+  //   colourRefLED - the authoritative model. The UI restores its SELECTION from
+  //                  this, so a reload still shows "T2" selected rather than a
+  //                  resolved colour that a theme change could no longer move.
+  //                  A playlist item stores these same strings.
+  //   colourLED    - the resolved value (a theme reference read against the live
+  //                  palette), kept because it is the quickest read-out of what
+  //                  the strip is actually about to draw. For "RB" it is a
+  //                  placeholder: a rainbow has no single value.
   {
-    JsonArray ca = doc["colourLED"].to<JsonArray>();
+    JsonArray refs = doc["colourRefLED"].to<JsonArray>();
+    JsonArray vals = doc["colourLED"].to<JsonArray>();
     char buf[8];
     for (int i = 0; i < 4; i++) {
-      snprintf(buf, sizeof(buf), "#%06lx", (unsigned long)(colourLED[i] & 0xFFFFFFUL));
-      ca.add(buf);
+      refToString(colourLED[i], buf, sizeof(buf));
+      refs.add(buf);
+      CRGB v = resolveColourRef(colourLED[i]);
+      snprintf(buf, sizeof(buf), "#%06lx",
+               (unsigned long)(((uint32_t)v.r << 16) | ((uint32_t)v.g << 8) | v.b));
+      vals.add(buf);
     }
   }
   // ALL FOUR THEMES x 8 COLOURS.
@@ -1118,6 +1325,11 @@ void handleThemePreview() {
   }
 
   themeLoadToPreview(ti);
+  // A theme edit must RE-RESOLVE every stored reference: a slot holding "T2" has
+  // to move to the new T2, which is the entire point of storing a reference.
+  // Colour only - rebuilding the ports here would also reset pattern/speed/size on
+  // every strip and undo a timeline row that is currently playing.
+  applyColourRefsToPorts();
   themePrevMs = millis();
   previewMode = 2;      // held by the display task, but only for CAL_TEST_MS
   previewDirty = true;
@@ -1180,19 +1392,28 @@ void handleLiveTweak() {
   if (section == "LED") {
     if (id.length()) activePatternLED = id;
     speedLED = spd; quantityLED = constrain(qty, 1, 8); sizeLED = constrain(sz, 1, 10);
-    freqLED = frq; multLED = constrain(bm, 1, 9); musicLED = music;
+    freqLED = frq; multLED = (bm > 1) ? 2 : 1;   // checkbox: 1 or 2
     attackLED = atk; decayLED = dec;
     wrapLED = wrap; invertLED = inv;
-    // Colour: the UI sends an array of "#rrggbb" strings. Index 0 is used by the
-    // dot/chase/centre-out patterns, and 0..3 are the VU meter's four bands.
+    // Colour: the UI sends an array of REFERENCES - "T0".."T7" (theme palette
+    // index, resolved live), "RB" (rainbow) or "#rrggbb" (custom). Index 0 is
+    // used by the dot/chase/centre-out patterns, and 0..3 are the VU meter's
+    // four bands. An unparseable entry leaves its slot alone.
     JsonArray ca = doc["colour"].as<JsonArray>();
     if (!ca.isNull()) {
       int i = 0;
       for (JsonVariant v : ca) {
         if (i >= 4) break;
-        colourLED[i] = parseHexColor(v.as<const char*>(), colourLED[i]);
+        colourLED[i] = parseColourRef(v.as<const char*>(), colourLED[i]);
         i++;
       }
+    }
+    // VU meter DIRECTION, from the Special block's row. The single VU pattern then
+    // renders using whichever of the four branches this selects.
+    if (doc.containsKey("vuDir")) {
+      String d = String((const char*)(doc["vuDir"] | "LEFT"));
+      d.toUpperCase();
+      if (d == "LEFT" || d == "RIGHT" || d == "CENTRE" || d == "ENDS") vuDirLED = d;
     }
     if (id.length()) activePattern240V = id;
     speed240V = spd; quantity240V = constrain(qty, 1, 4); size240V = constrain(sz, 1, 4);
@@ -1204,7 +1425,10 @@ void handleLiveTweak() {
   if (id.length()) displayActive = true;  // a pattern was selected: start displaying
   // Re-base the per-strip config on the LED-page settings, then re-apply the
   // current Timeline row (its columns 1-10 override the individual strips).
-  applyGlobalsToPorts();
+  // ONE place builds the port config: each port is derived from its own source of
+  // truth - its cell in the CURRENT row, or the page as the default. There is no
+  // "stamp the page onto every port" step any more, because that is exactly what used
+  // to overwrite timeline-controlled ports whenever the page was touched.
   applyTimelineRow(tlRow, false);
 
   previewMode = 0;                        // a new selection cancels any held preview/calibration
@@ -1215,9 +1439,14 @@ void handleLiveTweak() {
 
   // The shared detector follows the most recently tweaked section
   freqThreshold = constrain(frq, 20, 100);
-  multiplier = constrain(bm, 1, 9);
-  currentMusicMode = music;
-  musicFullMode = (music == "FULL");
+  // The DISPLAY multiplier belongs to the LED page's checkbox. The 240V slider no
+  // longer writes to it: its value used to move only clock counters that nothing
+  // read, and it must not be able to double the LED display's reversal rate.
+  if (section == "LED") multiplier = multLED;
+  // musicFullMode belongs to the 240V meter ALONE. The LED meter is bass-only by
+  // design and its source control has been removed, so an LED tweak must not be
+  // able to change what the 240V meter shows.
+  if (section == "240V") musicFullMode = (music == "FULL");
 
   // NOTE: settings are only persisted on an explicit Save (/save, /save-flash).
   // Auto-saving on every tweak filled the small NVS partition and stopped the
@@ -1245,6 +1474,62 @@ void handleLoadPlaylist() {
   String content = file.readString();
   file.close();
   server.send(200, "application/json", content);
+}
+
+// READ THE TIMELINE BACK.
+//
+// The UI could only ever WRITE the timeline, so after a page reload its grid looked
+// EMPTY while the board was still running /timeline.json - which is exactly the "it is
+// playing old data that is not shown on the timeline" report. This lets the page show
+// what the board actually holds.
+void handleLoadTimeline() {
+  if (!LittleFS.exists("/timeline.json")) {
+    server.send(404, "text/plain", "No timeline file found");
+    return;
+  }
+  File file = LittleFS.open("/timeline.json", "r");
+  if (!file) { server.send(500, "text/plain", "Failed to open timeline file"); return; }
+  String content = file.readString();
+  file.close();
+  server.send(200, "application/json", content);
+}
+
+// PLAY: always start from the BEGINNING. Row 0 is applied with force, so every strip's
+// motion restarts from a known state instead of continuing from wherever it happened
+// to be.
+void handleTimelinePlay() {
+  if (!tlLoaded) loadTimeline();
+  if (!tlLoaded) { server.send(404, "text/plain", "No timeline saved to play"); return; }
+  tlRow      = 0;
+  tlRowStart = millis();
+  tlPlaying  = true;
+  applyTimelineRow(0, true);
+  displayActive = true;
+  showStatus(1);
+  server.send(200, "text/plain", "Timeline playing from the first slot");
+}
+
+// STOP: the display must go DARK. displayActive = false stops the render loop drawing,
+// and blankReq makes the display task clear and transmit black once - the same path the
+// "All Off" button uses.
+void handleTimelineStop() {
+  tlPlaying     = false;
+  previewMode   = 0;
+  displayActive = false;
+  blankReq      = true;
+  // SYNCHRONISE THE MOTION of every port.
+  //
+  // Each port keeps its OWN position and direction, and a beat flips each port's own
+  // direction. Two strips with identical settings could therefore travel in OPPOSITE
+  // directions while both reversing on the same beats - so they stayed mirrored for
+  // ever and it was impossible to tell which port was being programmed. Programming now
+  // always starts from the same state in every port, which is what makes it
+  // port-agnostic: identical settings render identically.
+  for (int p = 0; p < NUM_PORTS; p++) {
+    ledPosArr[p] = 0; ledDirArr[p] = 1; ledExplArr[p] = 0; ledStepMs[p] = 0;
+  }
+  showStatus(1);
+  server.send(200, "text/plain", "Timeline stopped - outputs dark, motion synchronised");
 }
 
 void handleSaveTimeline() {
@@ -1334,6 +1619,12 @@ void handleDiag() {
   doc["shows"]         = (uint32_t)ledShowCount;
   doc["wifiClients"]   = WiFi.softAPgetStationNum();
   doc["displayActive"] = displayActive ? 1 : 0;
+  // TIMELINE state, so the page can SHOW which slot is live. Without this the fact
+  // that "my cells are in a later slot" is completely invisible - which is exactly
+  // what made "two yellow strips" so puzzling.
+  doc["tlLoaded"]  = tlLoaded  ? 1 : 0;
+  doc["tlPlaying"] = tlPlaying ? 1 : 0;
+  doc["tlRow"]     = tlRow + 1;              // 1-based, as the grid shows it
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
@@ -1800,8 +2091,8 @@ static void fastBeatCheck() {
     fastLastBeatMs  = now;
     lastTrigMs      = now;
     rawBeatFlag     = true;                // IO48: flash on every detection
-    beatLatch240    = true;                // latched so a beat falling between
-    beatLatchLED    = true;                // FFT windows is never lost
+    beatLatch240    = true;                // latched so an onset falling between
+                                           // 240V steps is never lost
     fastBeatFlag    = true;
   }
 }
@@ -1855,21 +2146,265 @@ static void fastBeatCheck() {
 // it. This is the difference between "detects some beats" and "detects the beat".
 #define ODF_LEVEL_A  0.004f
 
-static float odfHp1 = 0, odfHp2 = 0, odfHp1Prev = 0, odfHp2Prev = 0;
-static float odfLp1 = 0, odfLp2 = 0, odfLp3 = 0, odfLp4 = 0;
-static float odfRectPrev = 0, rectAvg = 0, odfNormPrev = 0, odfNovelty = 0, winMax = 0, odfPrevWin = 0;
-static float odfHist[ODF_HIST];
-static int   odfHistIdx = 0, odfHistCount = 0;
-static unsigned long odfLastMs = 0;
-volatile bool odfDisplayBeat = false;   // onset latch for the DOT, consumed in loop()
+// ---------------------------------------------------------------------------
+// LISTENING CHAINS - the audio engine MEASURES, it does not decide.
+//
+// One chain per distinct band in use. CHAIN 0 IS ALWAYS THE BASELINE BAND (the
+// Frequency setting), so the 15/10 response is always available and is produced by
+// exactly the arithmetic that produced it: the same six one-poles, in the same
+// order, with the same coefficients and the same 10 ms frame boundary. Extra chains
+// exist only because some pattern asked for a different band.
+//
+// Each chain PUBLISHES, once per 10 ms frame: its novelty (the frame-to-frame change
+// in band energy) and a sequence number. Who acts on that is decided by the PATTERN,
+// in the render loop, against its own threshold - see the listening step there.
+// ---------------------------------------------------------------------------
+#define ODF_CHAINS 4
+struct OdfChain {
+  bool  used = false;
+  float hpHz = ODF_HP_HZ;      // this chain's band lower edge
+  float aLo  = 0.0f;           // its high-pass coefficient (derived from hpHz)
+  // Filter state: the same six one-poles as the baseline, per chain.
+  float hp1 = 0, hp1Prev = 0, hp2 = 0, hp2Prev = 0;
+  float lp1 = 0, lp2 = 0, lp3 = 0, lp4 = 0;
+  // 10 ms frame accumulation
+  float winMax = 0, prevWin = 0;
+  // Published once per frame.
+  volatile float    novelty = 0.0f;
+  volatile uint32_t seq     = 0;
+};
+OdfChain odfChain[ODF_CHAINS];
+uint16_t odfChainUse = 0;                 // bitmask of chains currently in use
+float    odfAHi = 0.0f;                   // shared low-pass coefficient (250 Hz)
+
+// Chain 0's numbers keep their original names: the heartbeat's "onset nov=… thr=…"
+// line must go on meaning exactly what it always meant.
+// (odfDisplayBeat is gone: a beat is per PATTERN now, so the pending state lives in
+// each BeatListener - see listeningStep().)
 float odfThr = 0.0f;            // logged, so the threshold can be read directly
+float odfNovelty = 0.0f;        // chain 0's last novelty (the logged value)
+
+// The high-pass coefficient for a band edge. THE SAME FORMULA as the baseline used
+// per sample; it is simply hoisted to the 10 ms frame, because audioFs (and therefore
+// the coefficient) only changes once per FFT window anyway.
+float odfBandCoeff(float hpHz) {
+  float dt = 1.0f / (audioFs > 1.0f ? audioFs : 1.0f);
+  float rc = 1.0f / (2.0f * 3.14159265f * hpHz);
+  return rc / (rc + dt);
+}
+
+// ---------------------------------------------------------------------------
+// LISTENERS - the PATTERN decides what is a beat for it.
+//
+// One listener per port, plus one for the 240V controller. Each holds its own band
+// (which chain it reads), its own threshold, and whether it takes the half-way
+// beats. VU and EQ ports are NOT listeners: they are level-driven, so they cost
+// nothing here - which is why the number of chains stays small.
+//
+// This is the step that is "recalculated for each playlist item in real time": when
+// a timeline cell is adopted, rebuildListening() gives its port that cell's band,
+// threshold and multiplier.
+// ---------------------------------------------------------------------------
+struct BeatListener {
+  bool          active   = false;
+  int           chain    = 0;
+  float         thr      = 48.0f;
+  int           mult     = 1;
+  uint32_t      lastSeq  = 0;
+  unsigned long lastReal = 0, prevReal = 0;
+  bool          realPend = false;  unsigned long realAt = 0;
+  bool          subPend  = false;  unsigned long subAt  = 0;
+  unsigned long firePrev = 0, firePrevX = 0;   // interval logging
+  uint32_t      taken    = 0;                  // instrument: beats acted on
+};
+BeatListener beatListen[NUM_PORTS + 1];        // [NUM_PORTS] = the 240V controller
+uint16_t g_chainOverflow = 0;                  // instrument: did the 4-chain cap bind?
+bool     beatFired240 = false;                 // the 240V controller acted this pass
+
+// Find or allocate a chain for a band. Chain 0 IS the baseline band, so a request
+// that matches it SHARES it - the normal case, and why the usual count is one chain.
+int chainForBand(float hz) {
+  hz = constrain(hz, 20.0f, 100.0f);
+  if (fabsf(hz - odfChain[0].hpHz) < 0.5f) return 0;
+  for (int c = 1; c < ODF_CHAINS; c++)
+    if (odfChain[c].used && fabsf(hz - odfChain[c].hpHz) < 0.5f) return c;
+  for (int c = 1; c < ODF_CHAINS; c++) {
+    if (!odfChain[c].used) {
+      // Coefficient and state FIRST, `used` LAST: the audio core must never see a
+      // chain marked live before its coefficient is valid.
+      odfChain[c].hpHz = hz;
+      odfChain[c].aLo  = odfBandCoeff(hz);
+      odfChain[c].hp1 = odfChain[c].hp1Prev = odfChain[c].hp2 = odfChain[c].hp2Prev = 0;
+      odfChain[c].lp1 = odfChain[c].lp2 = odfChain[c].lp3 = odfChain[c].lp4 = 0;
+      odfChain[c].winMax = odfChain[c].prevWin = 0;
+      odfChain[c].used = true;
+      return c;
+    }
+  }
+  g_chainOverflow++;      // the cap bound - reported in the heartbeat if it ever does
+  return 0;               // fall back to the baseline band rather than fail
+}
+
+// (Re)configure the chain set from the bands actually in use. CHAIN 0 IS ALWAYS the
+// baseline band - the Frequency setting - which is what the 240V and any unchanged
+// pattern listens to, so the 15/10 response is never unavailable.
+void odfConfigureChains() {
+  odfChain[0].used = true;
+  odfChain[0].hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
+  odfChain[0].aLo  = odfBandCoeff(odfChain[0].hpHz);
+  for (int c = 1; c < ODF_CHAINS; c++) {
+    if (odfChain[c].used) continue;        // an in-use extra chain keeps its band
+    odfChain[c].hpHz = 0.0f;
+    odfChain[c].aLo  = 0.0f;
+  }
+  odfChainUse = 1;                         // chain 0 is always live
+  for (int c = 1; c < ODF_CHAINS; c++) if (odfChain[c].used) odfChainUse |= (1u << c);
+  odfAHi = 0.0f;                           // recomputed at the next frame boundary
+}
+
+// Give every listener its band, threshold and multiplier FROM ITS OWN PATTERN.
+void rebuildListening() {
+  for (int c = 1; c < ODF_CHAINS; c++) odfChain[c].used = false;
+  odfConfigureChains();
+
+  for (int p = 0; p < NUM_PORTS; p++) {
+    BeatListener &L = beatListen[p];
+    LedPattern pat = (LedPattern)portCfg[p].pat;
+    // Only patterns that ACT on a beat are listeners at all.
+    L.active = (pat == LP_MOVING_DOT || pat == LP_KNIGHT_RIDER || pat == LP_CENTER_OUT);
+    if (!L.active) continue;
+    L.chain = chainForBand((float)portCfg[p].freqHz);
+    L.thr   = (1.0f - constrain(portCfg[p].beatSens, 0.01f, 1.0f)) * 60.0f;
+    L.mult  = (portCfg[p].mult > 1) ? 2 : 1;
+    L.lastSeq = odfChain[L.chain].seq;      // never act on a STALE frame
+  }
+
+  // The 240V controller: ALWAYS a listener, on the baseline band, with the global
+  // sensitivity - so it behaves exactly as it does today. Its own sensitivity and
+  // frequency arrive when we repeat this work on the 240V page.
+  BeatListener &R = beatListen[NUM_PORTS];
+  R.active = true;
+  R.chain  = 0;
+  R.thr    = (1.0f - constrain(beatSens, 0.01f, 1.0f)) * 60.0f;
+  R.mult   = (mult240V > 1) ? 2 : 1;
+  R.lastSeq = odfChain[0].seq;
+}
+
+// The per-pattern ACTION - the only place a beat moves anything.
+static void actForListener(int i) {
+  if (i < NUM_PORTS) {
+    if (portCfg[i].pat == LP_MOVING_DOT || portCfg[i].pat == LP_KNIGHT_RIDER)
+      ledDirArr[i] = -ledDirArr[i];
+    else if (portCfg[i].pat == LP_CENTER_OUT)
+      ledExplArr[i] = 0;
+    g_flipLED++;
+  } else {
+    if (activePattern240V == "moving_dot" || activePattern240V == "knight_rider")
+      dotDirection = -dotDirection;
+    beatFired240 = true;
+    g_flip240++;
+  }
+}
+
+// THE LISTENING STEP, once per render pass. Each listener compares its OWN chain's
+// published novelty against its OWN threshold, with its own minimum gap, and then
+// acts on its own pattern after the display offset.
+static void listeningStep() {
+  unsigned long now = millis();
+  beatFired240 = false;
+  bool anyReal = false;        // did ANY listener take a real beat this pass?
+
+  // Antifreeze applies ONLY when Audio Detect is off: every `antifreeze` seconds the
+  // pattern changes direction as if a beat had been heard. With Audio Detect ON it
+  // must have no effect at all.
+  static unsigned long lastAnti = 0;
+  bool antiFire = false;
+  if (!audioEnabled) {
+    if (now - lastAnti >= (unsigned long)(antifreeze * 1000)) { lastAnti = now; antiFire = true; }
+  } else {
+    lastAnti = now;
+  }
+
+  for (int i = 0; i <= NUM_PORTS; i++) {
+    BeatListener &L = beatListen[i];
+    if (!L.active) continue;
+
+    OdfChain &ch = odfChain[L.chain];
+    if (ch.seq != L.lastSeq) {                 // one evaluation per 10 ms frame
+      L.lastSeq = ch.seq;
+      if (ch.novelty > L.thr && (now - L.lastReal) >= ODF_MIN_GAP) {
+        anyReal = true;
+        L.prevReal = L.lastReal;
+        L.lastReal = now;
+        g_beatReal++;
+        rawBeatFlag = true;                    // IO48: one flash per detection
+        lastTrigMs  = now;
+        // The 240V's own pattern uses the beat AT THE INSTANT it is heard, exactly as
+        // it always has; every direction change still waits for the display offset.
+        if (i == NUM_PORTS) beatLatch240 = true;
+        if (!L.realPend) { L.realAt = now + beatOffsetMs; L.realPend = true; }
+        // The half-way beat is armed only when THIS pattern takes it.
+        L.subPend = false;
+        if (L.mult > 1 && L.prevReal > 0) {
+          unsigned long gap = now - L.prevReal;
+          if (gap >= 240 && gap <= 1200) { L.subAt = now + beatOffsetMs + (gap / 2); L.subPend = true; }
+        }
+      }
+    }
+
+    bool real = false, sub = false;
+    if (L.realPend && (long)(now - L.realAt) >= 0) { L.realPend = false; real = true; }
+    if (L.subPend  && (long)(now - L.subAt)  >= 0) { L.subPend  = false; sub  = true; }
+
+    if (real) {
+      if (L.firePrev) { fireInt[fireIntIdx] = now - L.firePrev; fireIntIdx = (fireIntIdx + 1) & 7; }
+      L.firePrev = now;
+      actForListener(i);
+      L.taken++;
+    } else if (sub) {
+      g_beatExtra++;
+      if (L.firePrevX) { fireIntX[fireIntIdxX] = now - L.firePrevX; fireIntIdxX = (fireIntIdxX + 1) & 7; }
+      L.firePrevX = now;
+      actForListener(i);
+      L.taken++;
+    } else if (antiFire) {
+      actForListener(i);
+      L.taken++;
+    }
+  }
+
+  if (anyReal) g_onsetReal++;
+}
 
 // Peak-picking, every 10 ms. A LOCAL mean (not a global one) adapts to how dense
 // the music is, and the delta stops a quiet passage triggering on its own noise.
+// Publication, once per 10 ms frame, plus - TEMPORARILY - the old decision so the
+// display keeps working while the refactor is proved in stages. The decision moves
+// out to the pattern in the next step.
 static void odfEvaluate() {
-  odfHist[odfHistIdx] = odfNovelty;
-  odfHistIdx = (odfHistIdx + 1) % ODF_HIST;
-  if (odfHistCount < ODF_HIST) odfHistCount++;
+  // Coefficients refreshed once per frame: audioFs only changes once per FFT window,
+  // so this is the same value the per-sample form would have produced.
+  odfAHi          = (1.0f / (audioFs > 1.0f ? audioFs : 1.0f)) /
+                    ((1.0f / (2.0f * 3.14159265f * ODF_LP_HZ)) + (1.0f / (audioFs > 1.0f ? audioFs : 1.0f)));
+  odfChain[0].hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
+  odfChain[0].aLo  = odfBandCoeff(odfChain[0].hpHz);
+
+  // Every chain publishes its novelty and bumps its sequence number. Chain 0's value
+  // keeps the original global name so the log is directly comparable with the
+  // baseline's.
+  envP2P = beatMax - beatMin;
+  beatMax = 0;
+  beatMin = 4095;
+  for (int c = 0; c < ODF_CHAINS; c++) {
+    if (!(odfChainUse & (1u << c))) continue;
+    OdfChain &ch = odfChain[c];
+    float flux = ch.winMax - ch.prevWin;
+    ch.prevWin = ch.winMax;
+    ch.winMax  = 0.0f;
+    ch.novelty = (flux > 0.0f) ? flux : 0.0f;
+    ch.seq++;
+    if (c == 0) odfNovelty = ch.novelty;
+  }
 
   // ABSOLUTE threshold scaled by the sensitivity slider. No local mean.
   //
@@ -1887,89 +2422,54 @@ static void odfEvaluate() {
   //   beatSens 0.0 -> thr 60   (least sensitive)
   odfThr = (1.0f - beatSens) * 60.0f;
 
-  unsigned long now = millis();
-  if (odfNovelty > odfThr && (now - odfLastMs) >= ODF_MIN_GAP) {
-    odfLastMs       = now;
-    lastTrigMs      = now;
-    rawBeatFlag     = true;                // IO48: one flash per onset
-    odfDisplayBeat  = true;                // THE DOT: direction change on this onset
-    beatLatch240    = true;                // latched so an onset falling between
-    beatLatchLED    = true;                // FFT windows is never lost
-    fastBeatFlag    = true;
-  }
+  // NOTHING IS DECIDED HERE ANY MORE. This function MEASURES and PUBLISHES; the
+  // PATTERN decides, in listeningStep() on the render core. That is the whole point
+  // of the change: one measurement, ten independent listeners.
 }
 
 // Per-sample processing, shared by both acquisition paths so they cannot drift.
 static inline void audioProcessSample(float s, int &onsetSub, int stride) {
-  // Original envelope detection. alpha = dt/(rc+dt) makes the filter rate
-  // independent, so it behaves the same at any sample rate.
-  // ---- ONSET DETECTION FUNCTION (header comment is above odfEvaluate) --------
-  float dt = 1.0f / audioFs;
+  // ---- ONE PASS PER LISTENING CHAIN ----------------------------------------
+  // Chain 0 is the baseline band and runs the IDENTICAL arithmetic the single chain
+  // used to run: the same six one-poles, in the same order, with the same
+  // coefficients. An extra chain differs only in its band edge (its own aLo) and in
+  // having its own filter state - which is what lets two patterns listen to
+  // different bands at the same time without either one moving.
+  for (int c = 0; c < ODF_CHAINS; c++) {
+    if (!(odfChainUse & (1u << c))) continue;
+    OdfChain &ch = odfChain[c];
 
-  // The Frequency slider sets the band's LOWER edge (20-100 Hz), so it still does
-  // something real: raise it to reject bass-guitar rumble and tighten onto the
-  // kick, lower it to let the deep end in. The upper edge is fixed at 250 Hz.
-  float hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
+    // 2-pole high-pass at this chain's band edge: removes rumble and DC. Two
+    // cascaded one-poles - cheap, stable, and steep enough to reject the room.
+    ch.hp1 = ch.aLo * (ch.hp1 + s - ch.hp1Prev);       ch.hp1Prev = s;
+    ch.hp2 = ch.aLo * (ch.hp2 + ch.hp1 - ch.hp2Prev);  ch.hp2Prev = ch.hp1;
 
-  // 2-pole high-pass at hpHz: removes rumble and DC. Two cascaded one-poles,
-  // which is cheap, stable and steep enough to reject the room.
-  float rcLo = 1.0f / (2.0f * 3.14159265f * hpHz);
-  float aLo  = rcLo / (rcLo + dt);
-  odfHp1 = aLo * (odfHp1 + s - odfHp1Prev);       odfHp1Prev = s;
-  odfHp2 = aLo * (odfHp2 + odfHp1 - odfHp2Prev);  odfHp2Prev = odfHp1;
+    // 4-pole low-pass at 250 Hz: keeps the kick, rejects snare, hats and vocals.
+    // Two poles were not enough - at 12 dB/octave they leaked through and swamped
+    // the onset function whenever the mix got busy.
+    ch.lp1 += odfAHi * (ch.hp2 - ch.lp1);
+    ch.lp2 += odfAHi * (ch.lp1 - ch.lp2);
+    ch.lp3 += odfAHi * (ch.lp2 - ch.lp3);
+    ch.lp4 += odfAHi * (ch.lp3 - ch.lp4);
 
-  // 2-pole low-pass at 250 Hz: keeps the kick, rejects snare, hats and vocals.
-  float rcHi = 1.0f / (2.0f * 3.14159265f * ODF_LP_HZ);
-  float aHi  = dt / (rcHi + dt);
-  odfLp1 += aHi * (odfHp2 - odfLp1);
-  odfLp2 += aHi * (odfLp1 - odfLp2);
-  // Two more poles: 24 dB/octave above 250 Hz. This is what keeps vocals, snare
-  // and guitars out - at 12 dB/octave they leaked through and swamped the onset
-  // function whenever the mix got busy.
-  odfLp3 += aHi * (odfLp2 - odfLp3);
-  odfLp4 += aHi * (odfLp3 - odfLp4);
+    float bpRect = fabsf(ch.lp4);
+    if (bpRect > ch.winMax) ch.winMax = bpRect;   // peak within this 10 ms window
 
-  float bpRect = fabsf(odfLp4);
+    // Chain 0 ALSO feeds the shared level readings, so the heartbeat's numbers stay
+    // directly comparable with the baseline's.
+    if (c == 0) {
+      float v = bpRect;
+      if (v > envMax) envMax = v;
+      if (v < envMin) envMin = v;
+      if (v > (float)beatMax) beatMax = (int)v;
+      if (v < (float)beatMin) beatMin = (int)v;
+    }
+  }
 
-  // NORMALISE by the running level BEFORE differencing. This is the step that
-  // makes the detector immune to volume: the ratio sits around 1.0 whatever the
-  // music is doing, so a kick stands out equally in a quiet or a loud passage.
-  // The envelope follower could not do this, which is why it could not tell
-  // music from a quiet room.
-  rectAvg += 0.0f * (bpRect - rectAvg); // unused   // level follower, ~15 ms
-  if (bpRect > winMax) winMax = bpRect;     // peak within this 10 ms window
-
-  // Plain level readings, kept only for the log.
-  float v = bpRect;
-  if (v > envMax) envMax = v;
-  if (v < envMin) envMin = v;
-
-  // ---- evaluate the ODF every 10 ms ----------------------------------------
-  if (v > (float)beatMax) beatMax = (int)v;
-  if (v < (float)beatMin) beatMin = (int)v;
+  // ---- frame boundary, every 10 ms, exactly where the baseline had it --------
   if (++beatCount >= beatStride) {
     beatCount = 0;
-    envP2P = beatMax - beatMin;
-    beatMax = 0;
-    beatMin = 4095;
-
-    // ABSOLUTE frame-to-frame change in band energy. NO normalisation.
-    //
-    // It used to be normalised by a running average, and THAT was why dense mixes
-    // went wild: as instruments and vocals arrived the average rose, so the
-    // normaliser compressed the signal - which amplifies any proportional
-    // fluctuation. The detector became hypersensitive exactly when the mix got
-    // busy. An absolute change cannot behave that way, and the original firmware's
-    // fixed threshold worked on drums for precisely this reason.
-    //
-    // Combined with the 4-pole low-pass above, vocals now contribute neither
-    // leakage nor compression.
-    float flux = (float)winMax - odfPrevWin;
-    odfPrevWin = (float)winMax;
-    odfNovelty = (flux > 0.0f) ? flux : 0.0f;
-    winMax = 0.0f;
-
-    odfEvaluate();
+    odfEvaluate();     // publishes each chain's novelty + sequence number
   }
 
   // Sample-level envelope, kept only to feed the autocorrelation's onset history.
@@ -2097,6 +2597,11 @@ static void audioAnalyse() {
   bassBandLo = bassBottom;               // logged, so the band in use is visible
   bassBandHi = bassTop;
   float bass = 0, mid = 0, treb = 0, all = 0;
+  // Ten LOG-spaced EQ bands. Equal widths in Hz would put nine bars in the bass and
+  // one across everything else, which is not what a spectrum looks like. This table
+  // is each band's UPPER edge in Hz (40 Hz to 5 kHz).
+  static const float eqEdge[EQ_BANDS] = { 60, 90, 140, 210, 320, 480, 750, 1200, 2200, 5000 };
+  float eqSum[EQ_BANDS] = {0};
   for (int b = 1; b < FFT_SAMPLES / 2; b++) {
     float hz = (float)b * binHz;
     float m  = fftReal[b];
@@ -2104,6 +2609,9 @@ static void audioAnalyse() {
     if (hz >= bassBottom && hz <= bassTop)      bass += m;
     else if (hz > bassTop && hz <= FFT_MID_MAX) mid  += m;
     else if (hz > FFT_MID_MAX)                  treb += m;
+    for (int e = 0; e < EQ_BANDS; e++) {
+      if (hz <= eqEdge[e]) { eqSum[e] += m; break; }
+    }
   }
   rawBass = bass; rawMid = mid; rawTreb = treb; rawAll = all;
 
@@ -2116,6 +2624,12 @@ static void audioAnalyse() {
   audioBass   = constrain((dbBass - trackFloor(bandFloorBass,   dbBass)) / 24.0f, 0.0f, 1.0f);
   audioMid    = constrain((dbMid  - trackFloor(bandFloorMid,    dbMid )) / 24.0f, 0.0f, 1.0f);
   audioTreble = constrain((dbTreb - trackFloor(bandFloorTreble, dbTreb)) / 24.0f, 0.0f, 1.0f);
+
+  // The ten EQ bands: same dB + tracked-floor normalisation as the bands above.
+  for (int e = 0; e < EQ_BANDS; e++) {
+    float dbEq = 20.0f * log10f(eqSum[e] + 1e-6f);
+    audioEqBand[e] = constrain((dbEq - trackFloor(eqFloor[e], dbEq)) / 24.0f, 0.0f, 1.0f);
+  }
 
   // Bass-band onset metrics for the beat detector in checkAudioBeat(). The rise
   // between consecutive windows is the onset strength; dbBass - floor is how far
@@ -2520,7 +3034,9 @@ void executePatternStep(bool beatHeard) {
     if (dotPos240 > 5) dotPos240 = 0;
   }
   else if (activePattern240V.startsWith("vu_")) {
-    int level = constrain(computeVuLevel(vuSmooth240V, attack240V, decay240V), 0, 10);
+    // 240V VU: its own Music Source control (BASS / FULL RANGE) still selects the
+    // source, so this behaviour is deliberately unchanged.
+    int level = constrain(computeVuLevel(vuSmooth240V, attack240V, decay240V, musicFullMode), 0, 10);
     if (activePattern240V == "vu_meter") {
       if (level > vuPeakLevel240V) { vuPeakLevel240V = level; lastVuPeakFall240V = millis(); }
       else if (millis() - lastVuPeakFall240V > 150) { if (vuPeakLevel240V > 0) vuPeakLevel240V--; lastVuPeakFall240V = millis(); }
@@ -2600,16 +3116,40 @@ void run240VDisplayPattern(bool beat) {
 // (Types, portCfg[] and the per-strip state arrays are declared near the top.)
 // ==========================================
 
-LedPattern patternEnumFromName(const String& name) {
+LedPattern patternEnumFromName(const String& nameIn) {
+  // NORMALISED, so a display name can never silently degrade to Moving Dot. A space
+  // where an underscore is expected was all it took: "VU Meter" resolved to nothing
+  // and every VU selection rendered as a moving dot. Trim, lowercase and treat
+  // spaces as underscores, then match.
+  String name = nameIn;
+  name.trim();
+  name.toLowerCase();
+  name.replace(' ', '_');
+
   if (name == "chase_1_10")       return LP_CHASE_1_10;
   if (name == "chase_10_1")       return LP_CHASE_10_1;
-  if (name == "center_out_chase") return LP_CENTER_OUT;
+  if (name == "center_out_chase" || name == "explosion") return LP_CENTER_OUT;
   if (name == "knight_rider")     return LP_KNIGHT_RIDER;
-  if (name == "vu_meter")         return LP_VU_METER;
-  if (name == "vu_meter_rev")     return LP_VU_REV;
-  if (name == "vu_dual")          return LP_VU_DUAL;
-  if (name == "vu_center_out")    return LP_VU_CENTER;
+  if (name == "vu_meter" || name == "vu_left")           return LP_VU_METER;
+  if (name == "vu_meter_rev" || name == "vu_right")      return LP_VU_REV;
+  if (name == "vu_dual" || name == "vu_ends")            return LP_VU_DUAL;
+  if (name == "vu_center_out" || name == "vu_centre")    return LP_VU_CENTER;
+  if (name == "eq" || name == "graphic_eq")              return LP_EQ;
   return LP_MOVING_DOT;
+}
+
+// Pattern id + the VU direction row -> the render branch actually used.
+//
+// BOTH the pattern page and the timeline go through this, so a timeline cell that
+// holds a VU item behaves the same as selecting it on the page.
+LedPattern renderBranchFor(String id) {
+  LedPattern pat = patternEnumFromName(id);
+  if (pat == LP_VU_METER) {
+    if (vuDirLED == "RIGHT")       return LP_VU_REV;
+    if (vuDirLED == "CENTRE")      return LP_VU_CENTER;
+    if (vuDirLED == "ENDS")        return LP_VU_DUAL;
+  }
+  return pat;
 }
 
 // Fill an entire strip with one (calibrated) colour
@@ -2626,33 +3166,53 @@ void setLed(int port, int idx, CRGB color) {
   leds[port][idx] = applyCalibrationOrder(color, portColorOrders[port]);
 }
 
-// LED-page settings become the defaults for every strip
-void applyGlobalsToPorts() {
-  LedPattern pat = patternEnumFromName(activePatternLED);
+// Resolve each port's OWN stored colour REFERENCES against the LIVE palette, keeping
+// the reference alongside the value.
+//
+// Per PORT, deliberately: a timeline cell can hold its own references, so a theme
+// edit must repaint those too - and must NOT reset them to the page's colours.
+void applyColourRefsToPorts() {
   for (int p = 0; p < NUM_PORTS; p++) {
-    portCfg[p].pat    = pat;
-    portCfg[p].speed  = speedLED;
-    portCfg[p].qty    = constrain(quantityLED, 1, 8);
-    portCfg[p].size   = constrain(sizeLED, 1, 10);
-    portCfg[p].wrap   = wrapLED;
-    portCfg[p].invert = invertLED;
-    for (int i = 0; i < 4; i++) portCfg[p].colour[i] = colourLED[i];
+    for (int i = 0; i < 4; i++) {
+      CRGB v = resolveColourRef(portCfg[p].colourRef[i]);
+      portCfg[p].colour[i] = ((uint32_t)v.r << 16) | ((uint32_t)v.g << 8) | v.b;
+    }
   }
 }
 
-// Colour for a VU meter LED at absolute index `idx`, from a 4-entry palette.
-// The four bands are FIXED along the strip (the top quarter is always the peak
-// colour), which is the classic VU bar look - a red LED means "near full scale",
-// regardless of how much is lit.
+// (applyGlobalsToPorts() USED TO LIVE HERE, and stamped the LED page's settings onto
+// all ten ports. That was the fault behind "changing a parameter disrupts the
+// timeline": it overwrote EVERY port, and only the ports with a cell in the CURRENT
+// row were put back afterwards. Every port is now derived from its own source of
+// truth by applyTimelineRow(), which is the single place a port's config is built.)
+
+// The colour for ONE LED in one colour slot: the slot's fixed colour, or - if the
+// slot holds a rainbow - the rainbow at THAT LED's position along the strip.
 //
-// Takes the palette array rather than a PortCfg reference on purpose: the Arduino
-// IDE inserts auto-generated prototypes ABOVE the type declarations, so a
-// signature mentioning PortCfg cannot be parsed there and fails the whole build.
-CRGB vuBandColor(const uint32_t *pal, int idx) {
+// Taking the POSITION rather than the zone is what makes four rainbow body
+// sections render as ONE continuous rainbow instead of four restarts, and what
+// gives a rainbow dot its colour from where it currently is.
+//
+// Takes plain arrays rather than a PortCfg reference on purpose: the Arduino IDE
+// inserts auto-generated prototypes ABOVE the type declarations, so a signature
+// mentioning PortCfg cannot be parsed there and fails the whole build.
+CRGB slotColourAt(const uint32_t *ref, const uint32_t *val, int slot, int idx) {
+  if (slot < 0) slot = 0;
+  if (slot > 3) slot = 3;
+  if (refIsRainbow(ref[slot])) return rainbowAt(idx, NUM_LEDS_PER_STRIP);
+  if (refIsTheme(ref[slot]))   return previewColors[refThemeIndex(ref[slot])];  // live
+  return CRGB(val[slot] & 0x00FFFFFFUL);
+}
+
+// Colour for a VU meter LED at absolute index `idx`, from a 4-entry palette of
+// REFERENCES. The four bands are FIXED along the strip (the top quarter is
+// always the peak colour), which is the classic VU bar look - a red LED means
+// "near full scale", regardless of how much is lit.
+CRGB vuBandColor(const uint32_t *ref, const uint32_t *val, int idx) {
   if (idx < 0 || idx >= NUM_LEDS_PER_STRIP) return CRGB::Black;
   int band = (idx * 4) / NUM_LEDS_PER_STRIP;
   if (band > 3) band = 3;
-  return CRGB(pal[band]);
+  return slotColourAt(ref, val, band, idx);
 }
 
 // Draw the current frame of ONE strip using its own pattern + parameters
@@ -2662,7 +3222,9 @@ void drawPortPattern(int port) {
   const int lc = (N / 2) - 1;
   const int rc = N / 2;
   const PortCfg &c = portCfg[port];
-  const CRGB mainCol(c.colour[0]);
+  // NOTE: there is deliberately no single `mainCol` here any more. Slot 0 is
+  // usually one fixed colour, but it can also be a rainbow, which has no single
+  // value - so every pixel asks slotColourAt() with its OWN index instead.
 
   for (int i = 0; i < N; i++) leds[port][i] = CRGB::Black;
 
@@ -2672,44 +3234,65 @@ void drawPortPattern(int port) {
   if (c.pat == LP_CENTER_OUT) {
     int off = ledExplArr[port];
     for (int s = 0; s < dotLen; s++) {
-      setLed(port, lc - off - s, mainCol);
-      setLed(port, rc + off + s, mainCol);
+      int l = lc - off - s, r = rc + off + s;
+      setLed(port, l, slotColourAt(c.colourRef, c.colour, 0, l));
+      setLed(port, r, slotColourAt(c.colourRef, c.colour, 0, r));
     }
   }
-  else if (c.pat >= LP_VU_METER) {
-    int level = constrain(computeVuLevel(vuSmoothLED, attackLED, decayLED), 0, 10);
+  else if (isVuPat(c.pat)) {
+    int level = constrain(computeVuLevel(vuSmoothLED, attackLED, decayLED, false), 0, 10);
     int lit = level * (N / 10);
     if (c.pat == LP_VU_METER) {                       // left -> right
-      for (int i = 0; i < lit; i++) setLed(port, i, vuBandColor(c.colour, i));
+      for (int i = 0; i < lit; i++) setLed(port, i, vuBandColor(c.colourRef, c.colour, i));
     } else if (c.pat == LP_VU_REV) {                  // right -> left
-      for (int i = 0; i < lit; i++) setLed(port, N - 1 - i, vuBandColor(c.colour, N - 1 - i));
+      for (int i = 0; i < lit; i++) setLed(port, N - 1 - i, vuBandColor(c.colourRef, c.colour, N - 1 - i));
     } else if (c.pat == LP_VU_DUAL) {                 // both ends inward
       for (int i = 0; i < lit / 2; i++) {
-        setLed(port, i, vuBandColor(c.colour, i));
-        setLed(port, N - 1 - i, vuBandColor(c.colour, N - 1 - i));
+        setLed(port, i, vuBandColor(c.colourRef, c.colour, i));
+        setLed(port, N - 1 - i, vuBandColor(c.colourRef, c.colour, N - 1 - i));
       }
     } else {                                          // centre -> outward
       int half = lit / 2;
       for (int i = 0; i < half; i++) {
-        setLed(port, lc - i, vuBandColor(c.colour, lc - i));
-        setLed(port, rc + i, vuBandColor(c.colour, rc + i));
+        setLed(port, lc - i, vuBandColor(c.colourRef, c.colour, lc - i));
+        setLed(port, rc + i, vuBandColor(c.colourRef, c.colour, rc + i));
       }
     }
+  }
+  else if (c.pat == LP_EQ) {
+    // Graphic EQ: TEN bands, ONE PER STRIP. In the STAR layout the ten strips are
+    // ten equal rays, so each ray carries one band and the ten together are the
+    // spectrum; the bar simply grows along the strip.
+    //
+    // FIRST CUT, deliberately: the bar is drawn in the pattern's colour. Colour by
+    // height, the smooth<->stepped blend and the 100-band horizontal variant are
+    // still to be designed, as is the Max Peak marker (its rows are present and
+    // stored, but nothing reads them yet).
+    int band = port;                       // strip index = band index
+    if (band >= EQ_BANDS) band = EQ_BANDS - 1;
+    int lit = eqBar[band] * (N / EQ_MAX);
+    if (lit > N) lit = N;
+    for (int i = 0; i < lit; i++)
+      setLed(port, i, slotColourAt(c.colourRef, c.colour, 0, i));
   }
   else {
     // moving_dot / chase_1_10 / chase_10_1 / knight_rider
     int pos = ledPosArr[port];
     for (int q = 0; q < effQty; q++) {
       int base = (pos + (q * N) / effQty) % N;
-      for (int s = 0; s < dotLen; s++) setLed(port, (base + s) % N, mainCol);
+      for (int s = 0; s < dotLen; s++) {
+        int idx = (base + s) % N;
+        setLed(port, idx, slotColourAt(c.colourRef, c.colour, 0, idx));
+      }
     }
     if (c.pat == LP_KNIGHT_RIDER) {
       // Tail is a dimmed version of the port's own colour, so the trail always
-      // matches the dot rather than being hardcoded red.
-      CRGB tail = mainCol;
-      tail.nscale8(50);
+      // matches the dot rather than being hardcoded red - and a rainbow dot now
+      // leaves a rainbow trail, dimmed in place.
       for (int t = 1; t <= 6; t++) {
         int idx = (pos - ledDirArr[port] * t + N) % N;
+        CRGB tail = slotColourAt(c.colourRef, c.colour, 0, idx);
+        tail.nscale8(50);
         setLed(port, idx, tail);
       }
     }
@@ -2719,7 +3302,7 @@ void drawPortPattern(int port) {
     for (int i = 0; i < N; i++) {
       CRGB col = leds[port][i];
       if (col.r == 0 && col.g == 0 && col.b == 0)
-        leds[port][i] = applyCalibrationOrder(mainCol, portColorOrders[port]);
+        leds[port][i] = applyCalibrationOrder(slotColourAt(c.colourRef, c.colour, 0, i), portColorOrders[port]);
       else
         leds[port][i] = CRGB::Black;
     }
@@ -2736,7 +3319,7 @@ void advancePort(int port) {
     if (ledExplArr[port] >= N / 2) ledExplArr[port] = 0;
     return;
   }
-  if (c.pat >= LP_VU_METER) return;   // level-driven
+  if (isLevelPat(c.pat)) return;   // level-driven (the VU meters and the EQ)
 
   int dotLen = constrain(c.size, 1, 10);
   if (ledDirArr[port] == 0) ledDirArr[port] = 1;   // never allow a zero direction
@@ -2760,10 +3343,15 @@ void runLEDPattern() {
   unsigned long now = millis();
   bool drew = false;
 
+  // The EQ bars advance ONCE per frame, never once per port.
+  for (int p = 0; p < NUM_PORTS; p++) {
+    if (portCfg[p].pat == LP_EQ) { advanceEqBars(attackLED, decayLED); break; }
+  }
+
   bool anyDrew = false;
   for (int p = 0; p < NUM_PORTS; p++) {
     const PortCfg &c = portCfg[p];
-    bool isVu = (c.pat >= LP_VU_METER);
+    bool isVu = isLevelPat(c.pat);   // VU meters and the EQ are all level-driven
     unsigned long interval = isVu ? 25UL : (unsigned long)(constrain(c.speed, 0.002f, 5.0f) * 1000.0);
     // Floor the step at the frame rate (5 ms), NOT 20 ms. The 20 ms floor here was
     // a hard 50 steps/second ceiling that no slider setting could beat - it is the
@@ -2797,7 +3385,6 @@ void runLEDPattern() {
   // now fixed. If CanShow() starts skipping frames, this is past the hardware limit
   // and should go back up toward 7 ms.
   const unsigned long frameMs = 2;
-  if (anyDrew && !beatLatchLED) {}          // (keep the beat latch semantics)
   if (anyDrew && (now - lastShowMs >= frameMs)) {
     lastShowMs = now;
     dbgStage = 8;
@@ -2810,7 +3397,8 @@ void runLEDPattern() {
     }
     dbgStage = 7;
   }
-  if (anyDrew) beatLatchLED = false;        // every stepping strip has now seen it
+  // (Nothing to clear here any more: the strips' reversal is applied in loop() the
+  // instant the onset is detected, rather than latched for the next step.)
 
 }
 
@@ -2821,7 +3409,6 @@ void runLEDPattern() {
 // ==========================================
 void applyMasterBrightness() {
   uint8_t s = (uint8_t)map((int)masterBrightness, 0, 100, 0, 255);
-  ledBrightnessScale = s;          // master brightness as 0..255
   FastLED.setBrightness(s);        // used only by the FastLED fallback path
 }
 
@@ -2829,6 +3416,9 @@ void loadTimeline() {
   for (int r = 0; r < TL_ROWS; r++)
     for (int c = 0; c < TL_COLS; c++) tlData[r][c].used = false;
   tlLoaded = false;
+  // Fresh load = fresh ownership: a port whose cell was deleted must go back to the
+  // page settings rather than keep the deleted item playing for ever.
+  for (int p = 0; p < NUM_PORTS; p++) portCellOwned[p] = false;
 
   if (!LittleFS.exists("/timeline.json")) return;
   File f = LittleFS.open("/timeline.json", "r");
@@ -2859,6 +3449,26 @@ void loadTimeline() {
     tlData[r][c].size   = jsonNumI(it["size"],     1);
     tlData[r][c].wrap   = it["wrap"] | false;
     tlData[r][c].invert = it["invert"] | false;
+    // Colour references travel WITH the pattern, so the timeline ADOPTS them rather
+    // than offering colour controls of its own. A cell that has none (saved before
+    // this existed) leaves whatever colour the strip already has.
+    JsonArray ca = it["colour"].as<JsonArray>();
+    if (!ca.isNull()) {
+      int ci = 0;
+      for (JsonVariant cv : ca) {
+        if (ci >= 4) break;
+        tlData[r][c].colour[ci] = parseColourRef(cv.as<const char*>(), tlData[r][c].colour[ci]);
+        ci++;
+      }
+      tlData[r][c].hasColour = true;
+    }
+    // Beat Multiplier: it travels with the pattern like everything else. 1 or 2; 0
+    // means the cell carries none, and then the page's value stays in force.
+    int bm = jsonNumI(it["beatMult"], 0);
+    tlData[r][c].mult = (bm > 1) ? 2 : ((bm == 1) ? 1 : 0);
+    // Its LISTENING settings travel with it too.
+    tlData[r][c].freqHz   = jsonNumI(it["frequency"], 0);
+    tlData[r][c].beatSens = jsonNumF(it["beatSens"], -1.0f);
     tlData[r][c].used   = true;
   }
   tlLoaded = true;
@@ -2872,40 +3482,100 @@ void loadTimeline() {
 // Empty cells leave that channel playing what it already has.
 // Column 11 controls the 240V display; columns 1-10 control the strips.
 void applyTimelineRow(int row, bool force) {
-  if (row < 0 || row >= TL_ROWS || !tlLoaded) return;
+  if (row < 0 || row >= TL_ROWS) row = 0;
+  // NOTE: there is deliberately NO `!tlLoaded` early return any more. With no timeline
+  // every port simply takes the page's settings - which is exactly what the
+  // derivation below does when it finds no cell for that port.
 
-  for (int c = 1; c <= 10; c++) {
-    if (!tlData[row][c].used) continue;
-    int p = c - 1;
-    TlItem &it = tlData[row][c];
-    LedPattern newPat = patternEnumFromName(String(it.id));
-    int newQty  = constrain(it.qty, 1, 8);
-    int newSize = constrain(it.size, 1, 10);
+  // ===========================================================================
+  // EVERY port is derived from its SOURCE OF TRUTH:
+  //   the CURRENT row has a cell for this port -> THAT CELL OWNS THE PORT
+  //   no cell                                   -> the LED page is its default
+  //
+  // This replaced "stamp the page onto all ten ports, then put back the cells that
+  // happen to be in this row". THAT pair was the fault: a page tweak knocked EVERY
+  // port without a cell in the CURRENT row onto the page settings, so touching a
+  // colour or a slider wrecked a running timeline until the row came round again
+  // (up to 8 x 20 s) - and a port with no cell could never hold anything else.
+  // ===========================================================================
+  LedPattern pagePat = renderBranchFor(activePatternLED);
 
-    bool changed = force ||
-                   portCfg[p].pat != (int)newPat ||
-                   fabsf(portCfg[p].speed - it.speed) > 0.0001f ||
-                   portCfg[p].qty != newQty ||
-                   portCfg[p].size != newSize ||
-                   portCfg[p].wrap != it.wrap ||
-                   portCfg[p].invert != it.invert;
-    if (!changed) continue;            // identical -> continuous run
+  // A timeline cell only OWNS its port WHILE THE TIMELINE IS PLAYING. Stopped, the LED
+  // page owns every port, so a pattern can be built and WATCHED on the strips without
+  // deleting cells or fighting the timeline - which was impossible after pressing Stop:
+  // touching the page re-derived the ports from the timeline's slot (so it looked like
+  // the show had restarted) and a colour change could not reach the strips at all.
+  bool cellsOwn = tlPlaying;
+  if (!cellsOwn) for (int p = 0; p < NUM_PORTS; p++) portCellOwned[p] = false;
 
-    portCfg[p].pat    = (int)newPat;
-    portCfg[p].speed  = it.speed;
-    portCfg[p].qty    = newQty;
-    portCfg[p].size   = newSize;
-    portCfg[p].wrap   = it.wrap;
-    portCfg[p].invert = it.invert;
-    // restart this strip's motion only because its item actually changed
-    ledPosArr[p] = 0; ledDirArr[p] = 1; ledExplArr[p] = 0; ledStepMs[p] = 0;
+  for (int p = 0; p < NUM_PORTS; p++) {
+    TlItem *cell = (cellsOwn && tlData[row][p + 1].used) ? &tlData[row][p + 1] : nullptr;
+
+    // OWNERSHIP. While playing, a cell that appears for this port takes it over, and an
+    // EMPTY cell in a later row leaves the port playing what it has - it must not fall
+    // back to the page in the middle of a sequence. Ownership is cleared when the
+    // timeline is (re)loaded, so DELETING a cell and saving reverts the port to the page.
+    if (cell) portCellOwned[p] = true;
+    if (!cell && portCellOwned[p]) continue;
+
+    // ---- what this port SHOULD be ----
+    LedPattern wantPat = cell ? renderBranchFor(String(cell->id)) : pagePat;
+    float wantSpeed    = cell ? cell->speed : speedLED;
+    int   wantQty      = cell ? constrain(cell->qty, 1, 8)   : constrain(quantityLED, 1, 8);
+    int   wantSize     = cell ? constrain(cell->size, 1, 10) : constrain(sizeLED, 1, 10);
+    bool  wantWrap     = cell ? cell->wrap   : wrapLED;
+    bool  wantInv      = cell ? cell->invert : invertLED;
+    int   wantMult     = (cell && cell->mult > 0) ? ((cell->mult > 1) ? 2 : 1)
+                                                  : ((multLED > 1) ? 2 : 1);
+    int   wantFreq     = (cell && cell->freqHz > 0) ? constrain(cell->freqHz, 20, 100) : freqLED;
+    float wantSens     = (cell && cell->beatSens >= 0.0f)
+                           ? constrain(cell->beatSens, 0.01f, 1.0f) : beatSens;
+    const uint32_t *wantRef = (cell && cell->hasColour) ? cell->colour : colourLED;
+
+    // MOTION is compared SEPARATELY from the rest: changing a colour, a sensitivity or
+    // the multiplier must NOT restart the pattern, or the dot visibly jumps every time
+    // you touch the page.
+    bool motionDiff = portCfg[p].pat != (int)wantPat ||
+                      fabsf(portCfg[p].speed - wantSpeed) > 0.0001f ||
+                      portCfg[p].qty  != wantQty ||
+                      portCfg[p].size != wantSize ||
+                      portCfg[p].wrap != wantWrap;
+
+    bool valueDiff = motionDiff ||
+                     portCfg[p].invert   != wantInv ||
+                     portCfg[p].mult     != wantMult ||
+                     portCfg[p].freqHz   != wantFreq ||
+                     fabsf(portCfg[p].beatSens - wantSens) > 0.001f ||
+                     portCfg[p].colourRef[0] != wantRef[0] ||
+                     portCfg[p].colourRef[1] != wantRef[1] ||
+                     portCfg[p].colourRef[2] != wantRef[2] ||
+                     portCfg[p].colourRef[3] != wantRef[3];
+    if (!valueDiff) continue;                 // identical -> continuous run
+
+    portCfg[p].pat      = (int)wantPat;
+    portCfg[p].speed    = wantSpeed;
+    portCfg[p].qty      = wantQty;
+    portCfg[p].size     = wantSize;
+    portCfg[p].wrap     = wantWrap;
+    portCfg[p].invert   = wantInv;
+    portCfg[p].mult     = wantMult;
+    portCfg[p].freqHz   = wantFreq;
+    portCfg[p].beatSens = wantSens;
+    for (int i = 0; i < 4; i++) {
+      portCfg[p].colourRef[i] = wantRef[i];
+      CRGB v = resolveColourRef(wantRef[i]);      // a theme reference resolves LIVE
+      portCfg[p].colour[i] = ((uint32_t)v.r << 16) | ((uint32_t)v.g << 8) | v.b;
+    }
+    if (force || motionDiff) {                    // restart only if the MOTION changed
+      ledPosArr[p] = 0; ledDirArr[p] = 1; ledExplArr[p] = 0; ledStepMs[p] = 0;
+    }
   }
 
-  // ---- PER-PORT INVERT IS FORCED OFF ---------------------------------------
-  // It was ON for every port except port 1, and its only effect on
-  // drawPortPattern() is to invert the frame - a single dot becomes a fully lit
-  // strip. Forced off so the display is correct; the feature is otherwise unbranded.
-  for (int p = 0; p < NUM_PORTS; p++) portCfg[p].invert = false;
+  // ---- PER-PORT INVERT IS NO LONGER FORCED OFF ------------------------------
+  // It used to be cleared here for every port. Invert is an ordinary per-item
+  // setting: it is set on the pattern page, stored with the pattern in the
+  // playlist item and adopted by the timeline cell, and it must not affect any
+  // other pattern or timeline entity. Tested on Moving Dot and working.
 
   if (tlData[row][11].used) {                    // column 11 = 240V display
     TlItem &it = tlData[row][11];
@@ -2928,12 +3598,21 @@ void applyTimelineRow(int row, bool force) {
       dotPos240 = 0; dotDirection = 1;
     }
   }
+
+  // The LISTENED bands, sensitivities and multipliers follow the cells that were just
+  // adopted - so each playlist item on the timeline is listened to in its own terms,
+  // recalculated as the timeline advances.
+  rebuildListening();
 }
 
 // Time-division sequencer: advance one slot every "delay" seconds. The delay
 // value only sets how long each timeline cell is displayed.
 void runTimelineSequencer() {
   if (!tlLoaded) return;
+  // The sequence only runs while PLAYING. A saved timeline used to run itself for ever
+  // from power-on, which is why the strips could appear to be "playing old data" with
+  // nothing in the UI.
+  if (!tlPlaying) return;
   unsigned long now = millis();
   if (now - tlRowStart >= (unsigned long)(tlDelaySec * 1000.0f)) {
     tlRowStart = now;
@@ -3058,7 +3737,10 @@ void audioTask(void *param) {
       saveSettings();
     }
     if (audioEnabled) {
-      if (checkAudioBeat()) beatFlag = true;
+      // The return value is deliberately UNUSED: it reports CLOCK beats, and the
+      // display follows real onsets (doBeat) plus antifreeze instead. The call is
+      // kept because it runs the tempo tracking and the diagnostics.
+      checkAudioBeat();
       // Yield between analysis windows. This task previously spun with no delay at
       // all, saturating core 0 and contending for the bus the LCD DMA reads its
       // buffer from - which showed up as the transmit occasionally taking 42 ms
@@ -3212,6 +3894,9 @@ void setup() {
   // the Arduino core also holds this pin - audioAdcRead() falls back to
   // analogRead() permanently and the heartbeat reports which path is live.
   audioAdcInit();
+  // Configure the listening chains BEFORE the audio task starts: chain 0 is the
+  // baseline band and must be live, or nothing would be measured at all.
+  odfConfigureChains();
 
   for (int i = 0; i < 10; i++) {
     pinMode(channelPins[i], OUTPUT);
@@ -3250,7 +3935,6 @@ void setup() {
   // Apply the saved maximum brightness and the saved Timeline (per-strip patterns)
   applyMasterBrightness();
   loadTimeline();
-  applyGlobalsToPorts();
   applyTimelineRow(0, false);
   tlRowStart = millis();
 
@@ -3285,6 +3969,9 @@ void setup() {
   server.on("/save-playlist", HTTP_POST, handleSavePlaylist);
   server.on("/load-playlist", HTTP_GET, handleLoadPlaylist);
   server.on("/save-timeline", HTTP_POST, handleSaveTimeline);
+  server.on("/load-timeline", HTTP_GET,  handleLoadTimeline);
+  server.on("/timeline-play", HTTP_GET,  handleTimelinePlay);
+  server.on("/timeline-stop", HTTP_GET,  handleTimelineStop);
   server.on("/save-flash", HTTP_POST, handleSaveFlash);
   server.on("/init-off", HTTP_POST, handleInitOff);
   server.on("/brightness", HTTP_GET, handleBrightness);
@@ -3396,22 +4083,8 @@ void loop() {
       previewMode = 0;                    // one-shot: release at once
     }
   } else if (displayActive) {
-    bool beat = beatFlag;
-    if (beat) beatFlag = false;
-
-    // ANTIFREEZE applies ONLY when Audio Detect is off: the display waits
-    // `antifreeze` seconds and then changes direction. With Audio Detect ON, a
-    // quiet passage or a gap between tracks must NOT flip the direction - the
-    // display keeps chasing one way until it hears the next beat.
-    static unsigned long lastAnti = 0;
-    if (!audioEnabled) {
-      if (millis() - lastAnti >= (unsigned long)(antifreeze * 1000)) {
-        lastAnti = millis();
-        beat = true;
-      }
-    } else {
-      lastAnti = millis();
-    }
+    // ANTIFREEZE is handled inside listeningStep() now: it fires every active
+    // listener when Audio Detect is OFF, and does nothing at all when it is ON.
     // The DOT follows ONLY real onsets (set in odfEvaluate from the onset
     // detection function). It is deliberately NOT latched from the clock here.
     //
@@ -3446,50 +4119,17 @@ void loop() {
     // Removing beatLatchLED earlier did nothing, because this is what actually
     // moves the dot - `doBeat` below. That is why silence still stepped 2-3 times
     // a second. The clock still runs the 240V display, whose behaviour is fine.
-    if (odfDisplayBeat) {
-      odfDisplayBeat = false;
-      beatLatch240 = true;
-      // A pending fire must be allowed to COMPLETE before a new one is armed.
-      //
-      // Without this guard, an onset arriving faster than beatOffsetMs (200 ms)
-      // reset fireAtMs before it ever elapsed, so doBeat never became true and
-      // there were NO direction changes at all - the opposite of what loosening
-      // the threshold was supposed to achieve. Sparse onsets completed the delay;
-      // dense ones starved it.
-      if (!firePending) {
-        fireAtMs = millis() + beatOffsetMs;
-        firePending = true;
-      }
-    }
-    bool doBeat = false;
-    if (firePending && (long)(millis() - fireAtMs) >= 0) { firePending = false; doBeat = true; }
-
-    // Apply the direction change the INSTANT the beat is detected, to every strip
-    // and the 240V display, instead of waiting for each pattern's next step. A
-    // deferred flip landed late by up to one step interval (50-500 ms), which is
-    // exactly the "close but not on time" complaint. The patterns keep moving at
-    // their own speed; only the reversal is immediate.
-    if (doBeat) {
-      // Record the interval between FIRED beats: this is the timing the user
-      // actually sees on IO48, so drift shows up here directly.
-      static unsigned long lastFire = 0;
-      unsigned long nowFire = millis();
-      if (lastFire) { fireInt[fireIntIdx] = nowFire - lastFire; fireIntIdx = (fireIntIdx + 1) & 7; }
-      lastFire = nowFire;
-
-      for (int p = 0; p < NUM_PORTS; p++) {
-        if (portCfg[p].pat == LP_MOVING_DOT || portCfg[p].pat == LP_KNIGHT_RIDER)
-          ledDirArr[p] = -ledDirArr[p];
-        else if (portCfg[p].pat == LP_CENTER_OUT)
-          ledExplArr[p] = 0;
-      }
-      if (activePattern240V == "moving_dot" || activePattern240V == "knight_rider")
-        dotDirection = -dotDirection;
-    }
+    // ---- THE LISTENING STEP ------------------------------------------------
+    // The audio core has published each chain's novelty; HERE is where a beat
+    // becomes a beat, and it becomes one per PATTERN: each listener compares its own
+    // chain against its own threshold, with its own minimum gap, and acts on its own
+    // port after the display offset. A VU or EQ port is not a listener at all.
+    listeningStep();
+    bool doBeat240 = beatFired240;
 
     runTimelineSequencer();
     dbgStage = 6;
-    run240VDisplayPattern(doBeat);
+    run240VDisplayPattern(doBeat240);
     dbgStage = 7;
     runLEDPattern();
   }
@@ -3618,6 +4258,92 @@ void loop() {
     logAppend("fires %lu %lu %lu %lu %lu %lu %lu %lu",
               fireInt[0], fireInt[1], fireInt[2], fireInt[3],
               fireInt[4], fireInt[5], fireInt[6], fireInt[7]);
+
+    // The EXTRA-beat intervals, so the doubling is visible in the intervals too and
+    // not only in the counts below.
+    logAppend("firesx %lu %lu %lu %lu %lu %lu %lu %lu",
+              fireIntX[0], fireIntX[1], fireIntX[2], fireIntX[3],
+              fireIntX[4], fireIntX[5], fireIntX[6], fireIntX[7]);
+
+    // BEAT TAGGING + PATTERN REPORT. One line, because it settles two questions at
+    // once:
+    //   real/extra - the tagged beats the audio layer delivered this period.
+    //   flips      - reversals actually APPLIED, per display. LED multiplier OFF
+    //                should track real; ON should be about real+extra. That is the
+    //                doubling, measured rather than felt.
+    //   pat/tl     - which pattern each section was ASKED for, which render branch
+    //                each port ACTUALLY has (one digit per port, 0 = moving dot, so
+    //                a column of 4s = explosion), and whether a TIMELINE is
+    //                overriding them. This is the "every pattern looks like a moving
+    //                dot" question, answered from the board itself.
+    char pats[NUM_PORTS + 1];
+    for (int p = 0; p < NUM_PORTS; p++) pats[p] = (char)('0' + (int)portCfg[p].pat);
+    pats[NUM_PORTS] = 0;
+    logAppend("beats onsets=%lu | acts real=%lu extra=%lu | flips led=%lu 240=%lu | pat led=%s 240=%s tl=%d ports=%s",
+              (unsigned long)g_onsetReal, (unsigned long)g_beatReal, (unsigned long)g_beatExtra,
+              (unsigned long)g_flipLED, (unsigned long)g_flip240,
+              activePatternLED.c_str(), activePattern240V.c_str(),
+              tlLoaded ? 1 : 0, pats);
+    g_beatReal = g_beatExtra = g_flipLED = g_flip240 = g_onsetReal = 0;
+
+    // LISTENERS. 'portchain' is the CHAIN each port listens on - 9 means "not a
+    // listener" (a VU or EQ port, or a pattern that does not act on beats) - and
+    // 'taken' is how many beats each port actually acted on. Two ports listening to
+    // different bands or with different sensitivities show up here as different
+    // chains and different counts, from ONE log read.
+    char pch[NUM_PORTS + 1];
+    for (int p = 0; p < NUM_PORTS; p++)
+      pch[p] = (char)('0' + (beatListen[p].active ? beatListen[p].chain : 9));
+    pch[NUM_PORTS] = 0;
+    logAppend("listen chains=%d cap=%u | portchain=%s | taken %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu",
+              (int)__builtin_popcount((unsigned)odfChainUse), (unsigned)g_chainOverflow, pch,
+              (unsigned long)beatListen[0].taken, (unsigned long)beatListen[1].taken,
+              (unsigned long)beatListen[2].taken, (unsigned long)beatListen[3].taken,
+              (unsigned long)beatListen[4].taken, (unsigned long)beatListen[5].taken,
+              (unsigned long)beatListen[6].taken, (unsigned long)beatListen[7].taken,
+              (unsigned long)beatListen[8].taken, (unsigned long)beatListen[9].taken);
+    for (int p = 0; p <= NUM_PORTS; p++) beatListen[p].taken = 0;
+    g_chainOverflow = 0;
+
+    // PER-PORT COLOUR AND WHERE IT CAME FROM. Two strips showing the same colour is
+    // otherwise unexplainable from the log:
+    //   'C' = a timeline cell owns this port and supplied its colour
+    //   'P' = the port fell back to the LED page
+    // So: both 'P' means the CELLS carry no colour at all; both 'C' with the same value
+    // means the same item was placed in both cells; different 'C' values with matching
+    // strips would point at the render/strip side instead.
+    char cols[NUM_PORTS * 9 + 1];
+    int  cn = 0;
+    for (int p = 0; p < NUM_PORTS && cn < (int)sizeof(cols); p++)
+      cn += snprintf(cols + cn, sizeof(cols) - cn, "%06lx%c ",
+                     (unsigned long)(portCfg[p].colour[0] & 0xFFFFFFUL),
+                     portCellOwned[p] ? 'C' : 'P');
+    logAppend("colours 1st=%s", cols);
+
+    // And what the CELLS themselves hold for the CURRENT row, so "this cell has no
+    // colour stored" is distinguishable from "this cell holds the same as its neighbour".
+    // 'y' = the cell carries a colour, 'n' = it carries none, '--------' = empty cell.
+    char cels[NUM_PORTS * 9 + 1];
+    int  en = 0;
+    for (int c = 1; c <= NUM_PORTS && en < (int)sizeof(cels); c++) {
+      if (tlData[tlRow][c].used)
+        en += snprintf(cels + en, sizeof(cels) - en, "%06lx%c ",
+                       (unsigned long)(tlData[tlRow][c].colour[0] & 0xFFFFFFUL),
+                       tlData[tlRow][c].hasColour ? 'y' : 'n');
+      else
+        en += snprintf(cels + en, sizeof(cels) - en, "-------- ");
+    }
+    logAppend("cells row%d=%s", tlRow + 1, cels);
+
+    // MOTION: each port's position and direction. Two ports with identical settings
+    // must read the SAME here - that is what makes programming port-agnostic, and it is
+    // how "the two strips are in mirror image" is proved rather than guessed at.
+    char mot[NUM_PORTS * 7 + 1];
+    int  mn = 0;
+    for (int p = 0; p < NUM_PORTS && mn < (int)sizeof(mot); p++)
+      mn += snprintf(mot + mn, sizeof(mot) - mn, "%d%c ",
+                     ledPosArr[p], ledDirArr[p] > 0 ? '>' : '<');
+    logAppend("motion play=%d pos=%s", tlPlaying ? 1 : 0, mot);
 
   }
 

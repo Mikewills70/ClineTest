@@ -271,6 +271,75 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         .slot-box input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
         .slot-box input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
 
+        /* --- LED page: the TEN colour-reference boxes -------------------------
+           Boxes 1-8 are the current theme's eight colours IN THEME ORDER, 9 is
+           rainbow and 10 is custom. They fill the row the single large colour box
+           used to occupy.
+           The border is deliberately LIGHT (#b8b8b8), not var(--border-color):
+           a theme colour can legitimately be black, and it has to stay visible
+           against the dark UI. */
+        .led-colour-row {
+            display: flex;
+            gap: 3px;
+            width: 100%;
+        }
+        .led-colour-row .led-swatch {
+            flex: 1 1 0;
+            min-width: 0;
+            height: 34px;
+            box-sizing: border-box;
+            border: 1px solid #b8b8b8;
+            border-radius: 4px;
+            padding: 2px;
+            cursor: pointer;
+            background: var(--surface-color);
+        }
+        .led-colour-row .led-swatch.sel {
+            outline: 2px solid var(--secondary-color);
+            outline-offset: 1px;
+            border-color: #ffffff;
+        }
+        .led-rainbow {
+            background: linear-gradient(90deg,#ff0000,#ffff00,#00ff00,#00ffff,#0000ff,#ff00ff,#ff0000);
+        }
+        /* The gradient ABOVE must win over the swatch's own background. Written as
+           two scoped selectors on purpose: `.led-colour-row .led-swatch` is more
+           specific than a bare `.led-rainbow`, so an unscoped rule silently lost
+           and the rainbow box rendered as the dark surface colour. */
+        .led-colour-row .led-swatch.led-rainbow,
+        .led-target-row .led-target.led-rainbow {
+            background: linear-gradient(90deg,#ff0000,#ffff00,#00ff00,#00ffff,#0000ff,#ff00ff,#ff0000);
+        }
+
+        /* VU patterns only: which of the four sections (three body + peak) the
+           same ten options act on. */
+        .led-target-row {
+            display: flex;
+            gap: 4px;
+            width: 100%;
+            margin-bottom: 4px;
+        }
+        .led-target-row .led-target {
+            flex: 1 1 0;
+            min-width: 0;
+            height: 22px;
+            box-sizing: border-box;
+            border: 1px solid #b8b8b8;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .led-target-row .led-target.active {
+            outline: 2px solid var(--secondary-color);
+            outline-offset: 1px;
+        }
+
+        /* A parameter row the selected pattern does not USE. It stays in place -
+           the page must never re-flow - but it is unusable and shows NO value;
+           applyParamVisibility() blanks its readout. The whole block is only
+           hidden when the pattern uses none of its rows. */
+        tr.param-greyed td { opacity: 0.35; }
+        tr.param-greyed input, tr.param-greyed select { cursor: not-allowed; }
+
         /* Pattern List & Parameter Table Styles */
         .pattern-grid {
             display: grid;
@@ -442,6 +511,53 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         .timeline-cell:hover { background-color: #2a2a2a; }
         .timeline-cell.highlight-valid { background-color: rgba(3, 218, 198, 0.2); border-color: var(--secondary-color); }
         .timeline-cell.highlight-invalid { background-color: rgba(207, 102, 121, 0.2); border-color: var(--error-color); }
+
+        /* The playlist name WRAPS onto two lines in a smaller font. A single-line input
+           was too short on a phone to read a pattern's definition. */
+        .playlist-name {
+            flex: 1 1 auto;
+            min-width: 0;
+            padding: 5px 6px;
+            font-size: 0.78rem;
+            font-weight: bold;
+            line-height: 1.25;
+            color: var(--secondary-color);
+            background-color: #222;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            resize: none;
+            overflow: hidden;
+            font-family: inherit;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .playlist-section {
+            flex-shrink: 0;
+            font-size: 0.68rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        /* LANDSCAPE. The timeline is a 12-column grid - time + 10 strips + 240V - and in
+           portrait there is simply not enough width: it scrolls sideways and the last
+           channels cannot be seen at all. Held sideways there IS enough width for every
+           channel at once, PROVIDED the columns are allowed to shrink, so the fixed
+           minimum widths are relaxed and the labels and cells tightened. The height
+           limit keeps the desktop look untouched - a phone on its side is 360-450px
+           tall, a desktop window is not. Rotating the phone re-applies this on its own;
+           no reload is needed. */
+        @media (orientation: landscape) and (max-height: 620px) {
+            .timeline-grid {
+                grid-template-columns: 32px repeat(11, minmax(0, 1fr));
+                min-width: 0;
+            }
+            .timeline-header-cell, .timeline-row-label { font-size: 0.6rem; padding: 4px 1px; }
+            .timeline-cell { min-height: 38px; padding: 1px; }
+            .timeline-block-title { font-size: 0.58rem; }
+            .timeline-block-delete { width: 14px; height: 14px; font-size: 0.6rem; line-height: 1; }
+            .timeline-block-sub { display: none; }   /* the header already names the column */
+        }
         
         .timeline-block {
             background-color: #2c3e50;
@@ -600,10 +716,12 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             <button class="pattern-item" onclick="choosePattern('Chase 10 - 1', this)">Chase 10 - 1</button>
             <button class="pattern-item" onclick="choosePattern('Explosion', this)">Explosion</button>
             <button class="pattern-item" onclick="choosePattern('Knight Rider', this)">Knight Rider</button>
-            <button data-vu="1" class="pattern-item" onclick="choosePattern('VU Meter Left', this)">VU Meter Left</button>
-            <button data-vu="1" class="pattern-item" onclick="choosePattern('VU Meter Right', this)">VU Meter Right</button>
-            <button data-vu="1" class="pattern-item" onclick="choosePattern('VU Meter Dual', this)">VU Meter Dual</button>
-            <button data-vu="1" class="pattern-item" onclick="choosePattern('VU Meter Centre', this)">VU Meter Centre</button>
+            <!-- ONE VU pattern. Left / Right / Centre / Ends are ROWS in the Special
+                 block now, not separate entries in this list. -->
+            <button data-vu="1" class="pattern-item" onclick="choosePattern('VU Meter', this)">VU Meter</button>
+            <!-- EQ is driven by the same audio analyser, so it greys out with Audio
+                 Detect off, exactly like the VU patterns do. -->
+            <button data-vu="1" class="pattern-item" onclick="choosePattern('EQ', this)">EQ</button>
         </div>
     </div>
 
@@ -718,103 +836,178 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             <thead>
                 <tr><th>Parameter</th><th>Setting</th></tr>
             </thead>
-            <tbody>
-                <tr>
-                    <td class="name-col">Beat Sensitivity</td>
-                    <td>
-                        <!-- Beat sensitivity: LEFT = fewer, only strong kicks.
-                             RIGHT = more beats, catches quieter/denser music.
-                             Global: one detector drives BOTH the strips and the 240V. -->
-                        <input type="range" id="paramBeatSens" min="0.01" max="1.00" step="0.01" value="0.20" oninput="liveParamChanged('LED')">
-                        <span id="beatSensVal" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.20</span>
-                    </td>
-                </tr>
-                <tr>
+            <!-- =============================================================
+                 PARAMETER BLOCKS (from parameters.xlsx). Every row belongs to a
+                 BLOCK, and each block is its own <tbody>, so a block can be shown
+                 or hidden in one operation with no change to row order or look.
+
+                   block with no rows ticked   -> the whole block is HIDDEN
+                   row not ticked, block shown -> the row is GREYED: unusable,
+                                                  and showing NO value
+
+                 Colour is at the top; Visual, Audio and Special follow below.
+                 ============================================================= -->
+
+            <!-- BLOCK: COLOUR -->
+            <tbody data-block="colour">
+                <tr id="prowLED-colour">
                     <td class="name-col">Colour</td>
                     <td>
-                        <!-- One box for the dot/chase patterns; four for the VU meters.
-                             The four share the same total width as the single box (they
-                             are flex siblings, so the row length never changes). -->
-                        <div id="colourBoxesLED" style="display:flex; gap:4px; width:100%;">
-                            <input type="color" id="paramColourLED0" value="#ffffff" oninput="liveParamChanged('LED')" style="flex:1 1 0; min-width:0; width:100%; height:34px; padding:2px; border:1px solid var(--border-color); border-radius:4px; background:var(--surface-color); cursor:pointer;">
-                            <input type="color" id="paramColourLED1" value="#ffd000" oninput="liveParamChanged('LED')" style="flex:1 1 0; min-width:0; width:100%; height:34px; padding:2px; border:1px solid var(--border-color); border-radius:4px; background:var(--surface-color); cursor:pointer; display:none;">
-                            <input type="color" id="paramColourLED2" value="#ff7000" oninput="liveParamChanged('LED')" style="flex:1 1 0; min-width:0; width:100%; height:34px; padding:2px; border:1px solid var(--border-color); border-radius:4px; background:var(--surface-color); cursor:pointer; display:none;">
-                            <input type="color" id="paramColourLED3" value="#ff0000" oninput="liveParamChanged('LED')" style="flex:1 1 0; min-width:0; width:100%; height:34px; padding:2px; border:1px solid var(--border-color); border-radius:4px; background:var(--surface-color); cursor:pointer; display:none;">
-                        </div>
-                        <span id="colourHintLED" style="font-size:0.75rem; display:block; color:var(--text-secondary); margin-top:2px;"></span>
+                        <!-- COLOUR IS STORED AS A REFERENCE, NOT A RESOLVED VALUE.
+                             The ten boxes fill the row the single large box used to
+                             occupy: 1-8 are the current theme's eight colours IN
+                             THEME ORDER (they repaint when the theme changes, and a
+                             slot set to one keeps following the theme), 9 is rainbow,
+                             10 is custom.
+                             A VU pattern shows four TARGET boxes above them - three
+                             body sections plus the max peak - and tapping one points
+                             the same ten options at that section.
+                             No hint text sits under the row: a colour that a theme
+                             change can no longer move raises a dialog instead.
+                             Built by buildLedTargetRow()/buildLedColourRow(). -->
+                        <div id="colourTargetsLED" class="led-target-row" style="display:none;"></div>
+                        <div id="colourBoxesLED" class="led-colour-row"></div>
                     </td>
                 </tr>
-                <tr>
+            </tbody>
+
+            <!-- BLOCK: VISUAL - how the pattern moves -->
+            <tbody data-block="visual">
+                <tr style="background-color: #1a1a1a;">
+                    <td colspan="2" style="text-align: center; font-weight: bold; color: var(--secondary-color); padding: 8px; border-top: 2px solid var(--secondary-color);">Visual</td>
+                </tr>
+                <tr id="prowLED-speed">
                     <td class="name-col">Speed</td>
                     <td>
                         <input type="range" id="paramSpeedLED" min="0.002" max="0.50" step="0.001" value="0.005" oninput="liveParamChanged('LED')">
-                        <span id="speedValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.005s</span>
+                        <span id="speedValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.005s</span>
                     </td>
                 </tr>
-                <tr>
+                <tr id="prowLED-quantity">
                     <td class="name-col">Quantity</td>
                     <td>
                         <input type="range" id="paramQuantityLED" min="1" max="8" step="1" value="4" oninput="liveParamChanged('LED')">
-                        <span id="qtyValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">4</span>
+                        <span id="qtyValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">4</span>
                     </td>
                 </tr>
-                <tr>
+                <tr id="prowLED-size">
                     <td class="name-col">Size</td>
                     <td>
                         <input type="range" id="paramSizeLED" min="1" max="10" step="1" value="5" oninput="liveParamChanged('LED')">
-                        <span id="sizeValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">5</span>
+                        <span id="sizeValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">5</span>
                     </td>
                 </tr>
-                <tr>
+                <tr id="prowLED-wrap">
                     <td class="name-col">Wrap</td>
                     <td><input type="checkbox" id="paramWrapLED" onchange="liveParamChanged('LED')"></td>
                 </tr>
-                <tr>
+                <tr id="prowLED-invert">
                     <td class="name-col">Invert</td>
                     <td><input type="checkbox" id="paramInvertLED" onchange="liveParamChanged('LED')"></td>
                 </tr>
+            </tbody>
+            <!-- BLOCK: AUDIO - beat detection. These three tune ONE shared detector,
+                 so they are engine-level rather than per-pattern behaviour.
+                 Music Source is GONE: the source is fixed per pattern (the five
+                 basic patterns use the BASS onset response, the VU meter uses the
+                 BASS LEVEL, the EQ uses FULL). -->
+            <tbody data-block="audio">
                 <tr style="background-color: #1a1a1a;">
-                    <td colspan="2" style="text-align: center; font-weight: bold; color: var(--secondary-color); padding: 8px; border-top: 2px solid var(--secondary-color);">VU Meter Parameters</td>
+                    <td colspan="2" style="text-align: center; font-weight: bold; color: var(--secondary-color); padding: 8px; border-top: 2px solid var(--secondary-color);">Audio</td>
                 </tr>
-                <tr>
+                <tr id="prowLED-frequency">
+                    <td class="name-col">Frequency</td>
+                    <td>
+                        <!-- Lower edge of the band the beat detector listens to
+                             (upper edge fixed at 250 Hz): raise it to reject
+                             rumble and tighten onto the kick. -->
+                        <input type="range" id="paramFrequencyLED" min="20" max="100" step="1" value="60" oninput="liveParamChanged('LED')">
+                        <span id="freqValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">60Hz</span>
+                    </td>
+                </tr>
+                <tr id="prowLED-beatMult">
+                    <td class="name-col">Beat Multiplier</td>
+                    <td>
+                        <!-- Checkbox. OFF = 1: one direction change per detected
+                             beat. ON = 2: an extra change half way between beats,
+                             so the pattern reverses twice as often. -->
+                        <input type="checkbox" id="paramBeatMultLED" onchange="liveParamChanged('LED')">
+                    </td>
+                </tr>
+                <tr id="prowLED-beatSens">
+                    <td class="name-col">Beat Sensitivity</td>
+                    <td>
+                        <!-- LEFT = fewer, only strong kicks. RIGHT = more beats,
+                             catches quieter/denser music. GLOBAL: one detector
+                             drives both the strips and the 240V display. -->
+                        <input type="range" id="paramBeatSens" min="0.01" max="1.00" step="0.01" value="0.20" oninput="liveParamChanged('LED')">
+                        <span id="beatSensVal" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.20</span>
+                    </td>
+                </tr>
+            </tbody>
+
+            <!-- BLOCK: SPECIAL - the VU meter and the EQ. VU Meter and EQ use the
+                 SAME rows; only the pattern decides which of them appear.
+                 The ranges below are PLACEHOLDERS until the VU meter and EQ
+                 displays are designed. -->
+            <tbody data-block="special">
+                <tr style="background-color: #1a1a1a;">
+                    <td colspan="2" style="text-align: center; font-weight: bold; color: var(--secondary-color); padding: 8px; border-top: 2px solid var(--secondary-color);">Special</td>
+                </tr>
+                <tr id="prowLED-attack">
                     <td class="name-col">Attack LED</td>
                     <td>
                         <input type="range" id="paramAttackLed_LED" min="0.01" max="1.0" step="0.01" value="0.10" oninput="liveParamChanged('LED')">
-                        <span id="attLedValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.10s</span>
+                        <span id="attLedValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.10s</span>
                     </td>
                 </tr>
-                <tr>
+                <tr id="prowLED-decay">
                     <td class="name-col">Decay LED</td>
                     <td>
                         <input type="range" id="paramDecayLed_LED" min="0.01" max="1.0" step="0.01" value="0.30" oninput="liveParamChanged('LED')">
-                        <span id="decLedValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.30s</span>
+                        <span id="decLedValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.30s</span>
                     </td>
                 </tr>
-                <tr style="background-color: #1a1a1a;">
-                    <td colspan="2" style="text-align: center; font-weight: bold; color: var(--secondary-color); padding: 8px; border-top: 2px solid var(--secondary-color);">Audio Parameters</td>
-                </tr>
-                <tr>
-                    <td class="name-col">Music Source</td>
+                <tr id="prowLED-peakDelay">
+                    <td class="name-col">Max Peak Delay</td>
                     <td>
-                        <select id="paramMusicSourceLED" style="width: 100%;" onchange="liveParamChanged('LED')">
-                            <option value="BASS">Bass</option>
-                            <option value="FULL RANGE">Full Range</option>
+                        <input type="range" id="paramPeakDelayLED" min="0" max="5" step="0.1" value="0.5" oninput="liveParamChanged('LED')">
+                        <span id="peakDelayValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.5s</span>
+                    </td>
+                </tr>
+                <tr id="prowLED-peakSpeed">
+                    <td class="name-col">Max Peak Speed</td>
+                    <td>
+                        <input type="range" id="paramPeakSpeedLED" min="0.1" max="5" step="0.1" value="1.0" oninput="liveParamChanged('LED')">
+                        <span id="peakSpeedValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">1.0</span>
+                    </td>
+                </tr>
+                <tr id="prowLED-peakDir">
+                    <td class="name-col">Max Peak Direction</td>
+                    <td>
+                        <!-- Which way the peak marker moves: away from the body, or
+                             back towards it. -->
+                        <select id="paramPeakDirLED" style="width: 100%;" onchange="liveParamChanged('LED')">
+                            <option value="AWAY">Away from body</option>
+                            <option value="TOWARDS">Towards body</option>
                         </select>
                     </td>
                 </tr>
-                <tr>
-                    <td class="name-col">Frequency</td>
-                    <td>
-                        <input type="range" id="paramFrequencyLED" min="20" max="100" step="1" value="60" oninput="liveParamChanged('LED')">
-                        <span id="freqValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">60Hz</span>
-                    </td>
+                <tr id="prowLED-vuLeft">
+                    <td class="name-col">Left</td>
+                    <td><label style="font-size:0.85rem;"><input type="radio" name="vuDirLED" id="paramVuLeftLED" value="LEFT" onchange="liveParamChanged('LED')"> Bar grows left &rarr; right</label></td>
                 </tr>
-                <tr>
-                    <td class="name-col">Beat Multiplier</td>
-                    <td>
-                        <input type="range" id="paramBeatMultLED" min="1" max="4" step="1" value="1" oninput="liveParamChanged('LED')">
-                        <span id="beatValLED" style="font-size:0.85rem; display:block; color:var(--primary-color);">1x</span>
-                    </td>
+                <tr id="prowLED-vuRight">
+                    <td class="name-col">Right</td>
+                    <td><label style="font-size:0.85rem;"><input type="radio" name="vuDirLED" id="paramVuRightLED" value="RIGHT" onchange="liveParamChanged('LED')"> Bar grows right &rarr; left</label></td>
+                </tr>
+                <tr id="prowLED-vuCentre">
+                    <td class="name-col">Centre</td>
+                    <td><label style="font-size:0.85rem;"><input type="radio" name="vuDirLED" id="paramVuCentreLED" value="CENTRE" onchange="liveParamChanged('LED')"> Grows out from the centre</label></td>
+                </tr>
+                <tr id="prowLED-vuEnds">
+                    <td class="name-col">Ends</td>
+                    <td><label style="font-size:0.85rem;"><input type="radio" name="vuDirLED" id="paramVuEndsLED" value="ENDS" onchange="liveParamChanged('LED')"> Grows in from both ends</label></td>
                 </tr>
             </tbody>
         </table>
@@ -833,25 +1026,65 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     <!-- TIMELINE TAB -->
     <div id="tab-timeline" class="card">
         <h3>Show Timeline Sequencer</h3>
+
+        <!-- TRANSPORT at the TOP, as asked. SAVE lives here now; the button that used
+             to sit at the bottom of this tab has been removed.
+             PLAY always restarts from the first slot. STOP makes the outputs DARK. -->
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+            <button class="btn" style="flex:1; background-color: var(--primary-color); color:#000;" onclick="playTimeline()">&#9654; PLAY</button>
+            <button class="btn" style="flex:1;" onclick="stopTimeline()">&#9632; STOP</button>
+            <button class="btn" style="flex:1;" onclick="saveTimelineData()">SAVE</button>
+        </div>
+        <div id="timelineStatus" style="font-size:0.8rem; color:var(--text-secondary); margin-bottom:10px;"></div>
+
+        <!-- Shown only while an item is armed for placement, with a way OUT of it - the
+             floating pill follows the pointer and cannot be tapped on a touch screen. -->
+        <div id="timelineArmed" style="display:none; font-size:0.85rem; margin-bottom:8px; align-items:center; gap:8px;">
+            <span style="color:var(--secondary-color);">Placing: <span id="timelineArmedName"></span></span>
+            <button class="btn" style="padding:2px 10px;" onclick="cancelArmedItem()">Cancel</button>
+        </div>
+
         <div class="control-group">
             <label>Time Division Delay (Seconds: <span id="timelineDelayVal" style="color:var(--primary-color);">20</span>s)</label>
             <input type="range" id="timelineDelaySlider" min="10" max="60" step="1" value="20" oninput="updateTimelineDelayText()">
         </div>
-        <p style="font-size: 0.85rem; color: var(--text-secondary);">Columns 1–10 represent LED strips. Column 11 represents the 240V channel. Tap or drag items onto empty slots.</p>
+        <p style="font-size: 0.85rem; color: var(--text-secondary);">Columns 1–10 represent LED strips. Column 11 represents the 240V channel. Arm an item from the Playlist tab, then tap a cell to place it; use ✕ to clear a cell.</p>
         
         <div class="timeline-wrapper">
             <div id="timelineGridContainer" class="timeline-grid">
                 <!-- Dynamically generated via JS -->
             </div>
         </div>
-        <button class="btn" style="margin-top: 15px;" onclick="saveTimelineData()">Save Timeline Sequencer</button>
     </div>
 
     <!-- Floating element for active pickup/drag representation -->
     <div id="floatingItem"></div>
 
+    <!-- WARNING DIALOG - ONE OK BUTTON, nothing to choose.
+         Raised when a slot is set to rainbow or to a custom colour, because those
+         are VALUES: they stop following the theme, unlike a theme reference.
+         Deliberately NOT a native alert(): that can be suppressed with "prevent
+         this page from creating additional dialogs", which would lose a warning
+         that actually matters. -->
+    <div id="colourWarnModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.65); z-index:3000; align-items:center; justify-content:center;">
+        <div style="background:var(--surface-color); border:1px solid var(--border-color); border-radius:6px; padding:18px; width:86%; max-width:420px; box-shadow:0 8px 30px rgba(0,0,0,0.6);">
+            <div id="colourWarnTitle" style="font-weight:bold; color:var(--secondary-color); margin-bottom:8px; font-size:1.05rem;">Colour Warning</div>
+            <div id="colourWarnBody" style="font-size:0.95rem; line-height:1.35; margin-bottom:16px; color:var(--text-color);">Rainbow and Custom Colours are NOT controlled by the Theme.</div>
+            <button id="colourWarnOk" class="btn" style="width:100%;" onclick="closeColourWarning()">OK</button>
+        </div>
+    </div>
+
 <script>
     function switchTab(tabId) {
+        // Leaving the PATTERNS tab returns the outputs to DARK. Choosing a pattern there
+        // lights every port so it can be programmed, and that preview must not persist
+        // once you have moved on. Suppressed while the TIMELINE is playing, so moving
+        // around the UI can never kill a running show.
+        if (prevTab === 'patterns' && tabId !== 'patterns' && !timelineIsPlaying) {
+            fetch('/init-off', { method: 'POST' }).catch(() => {});
+        }
+        prevTab = tabId;
+
         document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         document.getElementById('tab-' + tabId).classList.add('active');
@@ -1062,6 +1295,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
         loadThemeColorsToUI();
         buildColorBoxes();
+        // Boxes 1-8 of the LED page's colour row ARE the theme's eight colours, so
+        // they have to repaint the moment the theme changes.
+        refreshLedColourSwatches();
         if (themePreviewEnabled) sendThemePreview();
     }
 
@@ -1171,24 +1407,40 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     }
 
     // Read-out labels only - no request to the ESP32.
+    // Every write is GUARDED: a row the current pattern does not use may have had
+    // its readout blanked by applyParamVisibility(), and the 240V page does not
+    // have every element the LED page has.
     function updateParamLabels(section) {
         let suffix = (section === '240V') ? '240' : 'LED';
-        document.getElementById('speedVal' + suffix).innerText = parseFloat(document.getElementById('paramSpeed' + suffix).value).toFixed(3) + 's';
+        const val = (id) => { let e = document.getElementById(id); return e ? e.value : null; };
+        const lbl = (id, text) => { let e = document.getElementById(id); if (e) e.innerText = text; };
+
+        let sp = val('paramSpeed' + suffix);
+        if (sp !== null) lbl('speedVal' + suffix, parseFloat(sp).toFixed(3) + 's');
+        let q = val('paramQuantity' + suffix);
+        if (q !== null) lbl('qtyVal' + suffix, q);
+        let sz = val('paramSize' + suffix);
+        if (sz !== null) lbl('sizeVal' + suffix, sz);
+        let fq = val('paramFrequency' + suffix);
+        if (fq !== null) lbl('freqVal' + suffix, fq + 'Hz');
+        // Beat Multiplier is a CHECKBOX on the LED page (off = 1, on = 2) and still a
+        // slider on the 240V page, so only the 240V readout exists to write.
+        if (section === '240V') {
+            let bm = val('paramBeatMult240');
+            if (bm !== null) lbl('beatVal240', bm + 'x');
+        }
         // Beat sensitivity is global (no section suffix).
         let bsEl = document.getElementById('paramBeatSens');
-        let bsLbl = document.getElementById('beatSensVal');
-        if (bsEl && bsLbl) bsLbl.innerText = parseFloat(bsEl.value).toFixed(2);
-        document.getElementById('qtyVal' + suffix).innerText = document.getElementById('paramQuantity' + suffix).value;
-        document.getElementById('sizeVal' + suffix).innerText = document.getElementById('paramSize' + suffix).value;
-        document.getElementById('freqVal' + suffix).innerText = document.getElementById('paramFrequency' + suffix).value + 'Hz';
-        document.getElementById('beatVal' + suffix).innerText = document.getElementById('paramBeatMult' + suffix).value + 'x';
+        if (bsEl) lbl('beatSensVal', parseFloat(bsEl.value).toFixed(2));
 
         if (section === '240V') {
-            document.getElementById('att240Val240').innerText = parseFloat(document.getElementById('paramAttack240_240').value).toFixed(2) + 's';
-            document.getElementById('dec240Val240').innerText = parseFloat(document.getElementById('paramDecay240_240').value).toFixed(2) + 's';
+            let a = val('paramAttack240_240'); if (a !== null) lbl('att240Val240', parseFloat(a).toFixed(2) + 's');
+            let d = val('paramDecay240_240');  if (d !== null) lbl('dec240Val240', parseFloat(d).toFixed(2) + 's');
         } else {
-            document.getElementById('attLedValLED').innerText = parseFloat(document.getElementById('paramAttackLed_LED').value).toFixed(2) + 's';
-            document.getElementById('decLedValLED').innerText = parseFloat(document.getElementById('paramDecayLed_LED').value).toFixed(2) + 's';
+            let a = val('paramAttackLed_LED'); if (a !== null) lbl('attLedValLED', parseFloat(a).toFixed(2) + 's');
+            let d = val('paramDecayLed_LED');  if (d !== null) lbl('decLedValLED', parseFloat(d).toFixed(2) + 's');
+            let pd = val('paramPeakDelayLED'); if (pd !== null) lbl('peakDelayValLED', parseFloat(pd).toFixed(1) + 's');
+            let ps = val('paramPeakSpeedLED'); if (ps !== null) lbl('peakSpeedValLED', parseFloat(ps).toFixed(1));
         }
     }
 
@@ -1201,14 +1453,23 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
         set('paramSpeed240', cfg.speed240);   set('paramSpeedLED', cfg.speedLED);
         set('paramBeatSens', cfg.beatSens);   // global
-        // Restore the saved LED colours. Guarded: an older saved config has no
-        // colourLED array, and we must not blank the inputs in that case.
-        if (cfg.colourLED && cfg.colourLED.length) {
+        // Restore the saved LED colours. These are REFERENCES ("T0".."T7", "RB",
+        // "#rrggbb"), so the SELECTION comes back rather than a resolved colour
+        // that a theme change could no longer move. Guarded twice: an older saved
+        // config has no reference array at all (fall back to its resolved hex),
+        // and an unparseable entry must not blank a slot.
+        if (Array.isArray(cfg.colourRefLED) && cfg.colourRefLED.length) {
+            for (let i = 0; i < 4 && i < cfg.colourRefLED.length; i++) {
+                if (/^(#[0-9a-f]{6}|T[0-7]|RB)$/i.test(cfg.colourRefLED[i])) colourRefLED[i] = cfg.colourRefLED[i];
+            }
+        } else if (Array.isArray(cfg.colourLED) && cfg.colourLED.length) {
             for (let i = 0; i < 4 && i < cfg.colourLED.length; i++) {
-                let el = document.getElementById('paramColourLED' + i);
-                if (el && /^#[0-9a-f]{6}$/i.test(cfg.colourLED[i])) el.value = cfg.colourLED[i];
+                if (/^#[0-9a-f]{6}$/i.test(cfg.colourLED[i])) colourRefLED[i] = cfg.colourLED[i];
             }
         }
+        // Whatever the device restored IS the committed state, so simply loading
+        // the page never raises the warning dialog.
+        lastCommittedRef = colourRefLED.slice();
         updateColourBoxes('LED');
         set('paramQuantity240', cfg.qty240);  set('paramQuantityLED', cfg.qtyLED);
         set('paramSize240', cfg.size240);     set('paramSizeLED', cfg.sizeLED);
@@ -1216,9 +1477,20 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         chk('paramInvert240', cfg.inv240);    chk('paramInvertLED', cfg.invLED);
         set('paramAttack240_240', cfg.atk240); set('paramAttackLed_LED', cfg.atkLED);
         set('paramDecay240_240', cfg.dec240);  set('paramDecayLed_LED', cfg.decLED);
-        set('paramMusicSource240', cfg.music240); set('paramMusicSourceLED', cfg.musicLED);
+        // Music Source is GONE from the LED page, so only the 240V control is
+        // restored. The LED source is fixed: BASS for the beat response, BASS LEVEL
+        // for the VU meter, FULL for the EQ.
+        set('paramMusicSource240', cfg.music240);
         set('paramFrequency240', cfg.freq240); set('paramFrequencyLED', cfg.freqLED);
-        set('paramBeatMult240', cfg.mult240);  set('paramBeatMultLED', cfg.multLED);
+        // Beat Multiplier: a CHECKBOX on the LED page (off = 1, on = 2), still a
+        // slider on the 240V page.
+        set('paramBeatMult240', cfg.mult240);  chk('paramBeatMultLED', parseInt(cfg.multLED, 10) > 1);
+        // The single VU pattern's DIRECTION is a radio group. Guarded: an older
+        // saved config has no vuDir, and the group must be left alone if missing.
+        if (cfg.vuDir) {
+            let r = document.querySelector('input[name="vuDirLED"][value="' + String(cfg.vuDir).toUpperCase() + '"]');
+            if (r) r.checked = true;
+        }
 
         set('antifreeze', cfg.antifreeze);
 
@@ -1257,22 +1529,36 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             invert: document.getElementById('paramInvert' + suffix).checked,
             attack: (section === '240V') ? document.getElementById('paramAttack240_240').value : document.getElementById('paramAttackLed_LED').value,
             decay: (section === '240V') ? document.getElementById('paramDecay240_240').value : document.getElementById('paramDecayLed_LED').value,
-            musicSource: document.getElementById('paramMusicSource' + suffix).value,
+            // Music Source only exists on the 240V page now. The LED source is fixed
+            // (BASS / BASS LEVEL / FULL) and its dropdown has been removed, so
+            // nothing is sent for the LED section - JSON.stringify DROPS undefined,
+            // so the backend simply keeps the source it has.
+            musicSource: (section === '240V') ? document.getElementById('paramMusicSource240').value : undefined,
             frequency: document.getElementById('paramFrequency' + suffix).value,
-            beatMult: document.getElementById('paramBeatMult' + suffix).value,
+            // Beat Multiplier is a CHECKBOX on the LED page: off = 1, on = 2.
+            beatMult: (section === '240V')
+                        ? document.getElementById('paramBeatMult240').value
+                        : (document.getElementById('paramBeatMultLED').checked ? '2' : '1'),
+            // Special-block parameters. The firmware does not use these YET - the VU
+            // meter and EQ displays are still to be designed - but they travel with
+            // the pattern, so a playlist item saved now already carries them.
+            peakDelay: (section === '240V') ? undefined : document.getElementById('paramPeakDelayLED').value,
+            peakSpeed: (section === '240V') ? undefined : document.getElementById('paramPeakSpeedLED').value,
+            peakDir:   (section === '240V') ? undefined : document.getElementById('paramPeakDirLED').value,
+            vuDir:     (section === '240V') ? undefined
+                        : ((document.querySelector('input[name="vuDirLED"]:checked') || {}).value),
             // Global beat-detection sensitivity (one detector, both displays), so
             // it is sent with either section.
             beatSens: document.getElementById('paramBeatSens').value,
             // Only the LED section has colour. Omitted (undefined) for 240V, which
             // JSON.stringify drops, so the backend array parse never sees it.
-            colour: (section === '240V') ? undefined
-                    : [0, 1, 2, 3].map(i => document.getElementById('paramColourLED' + i).value)
+            // REFERENCES, not resolved values: what gets stored is the SELECTION,
+            // so a saved playlist item keeps following the theme.
+            colour: (section === '240V') ? undefined : colourRefLED.slice()
         };
     }
 
-    // A VU pattern uses four colour boxes; every other LED pattern uses one.
-    // The boxes are flex siblings in a fixed-width row, so four boxes share
-    // exactly the space the single box occupies - the row length never changes.
+    // A VU pattern has four colour slots; every other LED pattern uses slot 0 only.
     function isVuPattern() {
         let sel = document.getElementById('patternLayoutSelectLED');
         if (!sel) return false;
@@ -1281,15 +1567,363 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         return /vu/i.test(txt) || /vu/i.test(selectedPatternNameLED || '');
     }
 
+    // =====================================================================
+    // LED COLOUR SELECTION - stored as REFERENCES, not resolved values
+    //
+    //   "T0".."T7"  a theme palette index. Resolved LIVE on the device, so
+    //               re-theming repaints every slot that holds one.
+    //   "RB"        rainbow - a VALUE, so it takes no notice of the theme.
+    //   "#rrggbb"   custom  - likewise a value.
+    //
+    // Storing the REFERENCE is what lets a theme change flow through to saved
+    // playlist items and timeline cells. Slot 0 drives every non-VU pattern (and
+    // Invert); slots 0-3 are the VU meter's three body sections plus the peak.
+    // =====================================================================
+    let colourRefLED = ['#ffffff', '#ffd000', '#ff7000', '#ff0000'];
+    let activeColourTarget = 0;    // which slot the ten options act on (VU only)
+    let ledColourRowVu = null;     // null = row not built yet, else VU yes/no
+    // What each slot was last COMMITTED as - the reference after a FINISHED
+    // selection gesture, including whatever the device restored on page load. The
+    // warning is raised on a change of kind, so this is what makes re-picking a
+    // custom colour, re-tapping rainbow, or reloading the page silent.
+    let lastCommittedRef = ['#ffffff', '#ffd000', '#ff7000', '#ff0000'];
+
+    // What a reference draws as RIGHT NOW. A rainbow has no single colour, so it
+    // returns null and the caller falls back to the rainbow styling.
+    function resolveRefLED(ref) {
+        let up = String(ref || '').toUpperCase();
+        if (/^T[0-7]$/.test(up)) {
+            let preset = themePresets[currentTheme] && themePresets[currentTheme].colors;
+            let c = preset && preset[parseInt(up[1], 10)];
+            return c || '#000000';
+        }
+        if (up === 'RB') return null;
+        return /^#[0-9A-F]{6}$/.test(up) ? up : '#000000';
+    }
+
+    // The TEN options, filling the row the single large box used to occupy:
+    // 1-8 = the current theme's eight colours IN THEME ORDER, 9 = rainbow,
+    // 10 = the custom colour picker.
+    function buildLedColourRow() {
+        let row = document.getElementById('colourBoxesLED');
+        if (!row) return;
+        row.innerHTML = '';
+        let preset = (themePresets[currentTheme] && themePresets[currentTheme].colors) || [];
+
+        for (let i = 0; i < 8; i++) {
+            let b = document.createElement('div');
+            b.className = 'led-swatch';
+            b.id = 'ledSwatch' + i;
+            b.style.background = preset[i] || '#000000';
+            b.title = 'Theme colour ' + (i + 1) + ' (T' + i + ') - follows the theme';
+            b.onclick = () => setLedColourRef('T' + i);
+            row.appendChild(b);
+        }
+
+        let rb = document.createElement('div');
+        rb.className = 'led-swatch led-rainbow';
+        rb.id = 'ledSwatchRB';
+        rb.title = 'Rainbow';
+        rb.onclick = () => setLedColourRef('RB');
+        row.appendChild(rb);
+
+        let cu = document.createElement('input');
+        cu.type = 'color';
+        cu.id = 'paramColourLEDcustom';
+        cu.className = 'led-swatch';
+        cu.title = 'Custom colour';
+        let r = resolveRefLED(colourRefLED[activeColourTarget]);
+        cu.value = r || '#ffffff';
+        cu.oninput = () => {
+            // Live while the picker is dragged, so the strip follows the colour.
+            // NOT committed and NOT warned here: `input` fires continuously, so
+            // warning on it would fire dozens of times in one drag.
+            colourRefLED[activeColourTarget] = cu.value;
+            updateLedSelectionClasses();
+            liveParamChanged('LED');
+        };
+        cu.onchange = () => {
+            // The picker was dismissed with a choice: commit it and warn ONCE.
+            commitLedColourRef(cu.value);
+        };
+        row.appendChild(cu);
+    }
+
+    // VU patterns: FOUR boxes - the three body sections plus the max peak.
+    // Tapping one points the SAME ten options at that section.
+    function buildLedTargetRow() {
+        let row = document.getElementById('colourTargetsLED');
+        if (!row) return;
+        row.innerHTML = '';
+        let names = ['Low', 'Mid', 'High', 'Peak'];
+        for (let i = 0; i < 4; i++) {
+            let b = document.createElement('div');
+            b.className = 'led-target' + (i === activeColourTarget ? ' active' : '');
+            b.id = 'ledTarget' + i;
+            let r = resolveRefLED(colourRefLED[i]);
+            if (r) b.style.background = r;
+            else b.classList.add('led-rainbow');
+            b.title = names[i] + ': ' + colourRefLED[i];
+            b.onclick = () => {
+                // Choosing WHICH section the ten options act on is not a colour
+                // choice, so it never warns.
+                activeColourTarget = i;
+                buildLedTargetRow();
+                updateLedSelectionClasses();
+            };
+            row.appendChild(b);
+        }
+    }
+
+    // Highlight whichever of the ten boxes matches the active slot. Done IN PLACE,
+    // never by rebuilding - a rebuild would close the custom picker mid-drag.
+    function updateLedSelectionClasses() {
+        let cur = String(colourRefLED[activeColourTarget] || '').toUpperCase();
+        for (let i = 0; i < 8; i++) {
+            let el = document.getElementById('ledSwatch' + i);
+            if (el) el.classList.toggle('sel', cur === ('T' + i));
+        }
+        let rb = document.getElementById('ledSwatchRB');
+        if (rb) rb.classList.toggle('sel', cur === 'RB');
+        let picker = document.getElementById('paramColourLEDcustom');
+        if (picker) {
+            let isCustom = /^#[0-9A-F]{6}$/.test(cur);
+            picker.classList.toggle('sel', isCustom);
+            if (!isCustom) {
+                let r = resolveRefLED(cur);
+                if (r) picker.value = r;   // start the picker from the current colour
+            }
+        }
+    }
+
+    // ONE DIALOG, used by every warning and confirmation. It has a single OK button -
+    // nothing to choose, only something to acknowledge (a slot set to rainbow or to a
+    // custom colour, because those are VALUES that stop following the theme) - and that
+    // button optionally RUNS an action, so a warning can also be the thing that saves.
+    let dialogOkAction = null;
+
+    function showDialog(title, body, okLabel, onOk) {
+        let modal = document.getElementById('colourWarnModal');
+        if (!modal) return;
+        let t = document.getElementById('colourWarnTitle');
+        let b = document.getElementById('colourWarnBody');
+        let btn = document.getElementById('colourWarnOk');
+        if (t) t.innerText = title;
+        if (b) b.innerText = body;
+        if (btn) btn.innerText = okLabel || 'OK';
+        dialogOkAction = onOk || null;
+        modal.style.display = 'flex';
+    }
+
+    function showColourWarning(what) {
+        showDialog(what + ' selected',
+                   'Rainbow and Custom Colours are NOT controlled by the Theme.',
+                   'OK', null);
+    }
+
+    // The modal's OK button. Clearing the dialog FIRST means a failure raised by the
+    // action cannot be hidden behind it.
+    function closeColourWarning() {
+        let modal = document.getElementById('colourWarnModal');
+        if (modal) modal.style.display = 'none';
+        let act = dialogOkAction;
+        dialogOkAction = null;
+        if (act) act();
+    }
+
+    // A selection gesture FINISHED: store the reference, warn if the theme can no
+    // longer move it, and tell the device.
+    //
+    // The warning is raised on a CHANGE OF KIND - theme -> rainbow, or anything ->
+    // custom. Re-picking a second custom colour, re-tapping rainbow, or the page
+    // restoring its saved selection therefore stays silent.
+    function commitLedColourRef(ref) {
+        let slot = activeColourTarget;
+        let prev = String(lastCommittedRef[slot] || '');
+        colourRefLED[slot] = ref;
+        lastCommittedRef[slot] = ref;
+        buildLedTargetRow();
+        updateLedSelectionClasses();
+        if (/^RB$/i.test(ref)) {
+            if (!/^RB$/i.test(prev)) showColourWarning('Rainbow');
+        } else if (/^#[0-9a-f]{6}$/i.test(ref)) {
+            if (!/^#[0-9a-f]{6}$/i.test(prev)) showColourWarning('Custom colour');
+        }
+        liveParamChanged('LED');
+    }
+
+    // A theme box or the rainbow box was tapped.
+    function setLedColourRef(ref) {
+        commitLedColourRef(ref);
+    }
+
+    // The THEME changed: boxes 1-8 must show the new palette, and a slot holding a
+    // theme reference now resolves to a different colour.
+    function refreshLedColourSwatches() {
+        buildLedColourRow();
+        buildLedTargetRow();
+        updateLedSelectionClasses();
+    }
+
+    // =====================================================================
+    // PARAMETER BLOCKS - which rows each pattern uses (from parameters.xlsx)
+    //
+    //   block with NO rows ticked     -> the whole block is HIDDEN
+    //   row not ticked, block shown   -> the row is GREYED: unusable, and it
+    //                                    shows NO value
+    //   no entry for the pattern      -> everything stays visible (safe default,
+    //                                    e.g. before a pattern is chosen)
+    //
+    // Ranges are PER PATTERN: Moving Dot's Speed is 0.002-0.1 and the VU meter's
+    // Quantity is 1-4. Limits for the other patterns are not defined yet, so they
+    // keep the ranges in the HTML until you set them here.
+    //
+    // NOTE: switching patterns applies that pattern's range, so a value outside it
+    // is clamped to the limit (Speed 0.4 set on Knight Rider becomes 0.1 on Moving
+    // Dot). That is inherent to having per-pattern ranges.
+    // =====================================================================
+    const PARAM_BLOCKS = ['colour', 'visual', 'audio', 'special'];
+
+    const PATTERN_PARAMS = {
+        'Moving Dot':   { colour: ['colour'],
+                          visual: ['speed', 'quantity', 'size', 'invert'],
+                          audio:  ['frequency', 'beatMult', 'beatSens'],
+                          range:  { speed: { min: 0.002, max: 0.1, step: 0.001 } } },
+        'Chase 1 - 10': { colour: ['colour'],
+                          visual: ['speed', 'quantity', 'size', 'wrap', 'invert'],
+                          audio:  ['frequency', 'beatMult', 'beatSens'] },
+        'Chase 10 - 1': { colour: ['colour'],
+                          visual: ['speed', 'quantity', 'size', 'wrap', 'invert'],
+                          audio:  ['frequency', 'beatMult', 'beatSens'] },
+        'Explosion':    { colour: ['colour'],
+                          visual: ['speed', 'quantity', 'size', 'invert'],
+                          audio:  ['frequency', 'beatMult', 'beatSens'] },
+        'Knight Rider': { colour: ['colour'],
+                          visual: ['speed', 'quantity', 'size', 'invert'],
+                          audio:  ['frequency', 'beatMult', 'beatSens'] },
+        // ONE entry covers the VU pattern names while several still exist in the
+        // list; they all show the same LED rows.
+        'VU Meter':     { colour: ['colour'],
+                          visual: ['quantity'],
+                          audio:  ['frequency'],
+                          special: ['attack', 'decay', 'peakDelay', 'peakSpeed', 'peakDir',
+                                    'vuLeft', 'vuRight', 'vuCentre', 'vuEnds'],
+                          range:  { quantity: { min: 1, max: 4, step: 1 } } },
+        // The EQ pattern is not in the pattern list yet; this is its agreed shape,
+        // ready for when it is added.
+        'EQ':           { colour: ['colour'],
+                          special: ['attack', 'decay', 'peakDelay', 'peakSpeed', 'peakDir'] }
+    };
+
+    // The VU pattern names all resolve to the one VU Meter spec.
+    function paramSpecForPattern(name) {
+        let n = String(name || '');
+        if (/^vu/i.test(n)) n = 'VU Meter';
+        return PATTERN_PARAMS[n] || null;
+    }
+
+    // The control (and value readout) behind each row key.
+    const PARAM_ROW_IDS = {
+        speed:     { ctl: 'paramSpeedLED',      val: 'speedValLED' },
+        quantity:  { ctl: 'paramQuantityLED',   val: 'qtyValLED' },
+        size:      { ctl: 'paramSizeLED',       val: 'sizeValLED' },
+        wrap:      { ctl: 'paramWrapLED' },
+        invert:    { ctl: 'paramInvertLED' },
+        frequency: { ctl: 'paramFrequencyLED',  val: 'freqValLED' },
+        beatMult:  { ctl: 'paramBeatMultLED' },
+        beatSens:  { ctl: 'paramBeatSens',      val: 'beatSensVal' },
+        attack:    { ctl: 'paramAttackLed_LED', val: 'attLedValLED' },
+        decay:     { ctl: 'paramDecayLed_LED',  val: 'decLedValLED' },
+        peakDelay: { ctl: 'paramPeakDelayLED',  val: 'peakDelayValLED' },
+        peakSpeed: { ctl: 'paramPeakSpeedLED',  val: 'peakSpeedValLED' },
+        peakDir:   { ctl: 'paramPeakDirLED' },
+        vuLeft:    { ctl: 'paramVuLeftLED' },
+        vuRight:   { ctl: 'paramVuRightLED' },
+        vuCentre:  { ctl: 'paramVuCentreLED' },
+        vuEnds:    { ctl: 'paramVuEndsLED' }
+        // 'colour' has no single control: its ten boxes are always in use.
+    };
+
+    // Per-pattern limits, applied to the controls. Anything a pattern does not
+    // define is left exactly as the HTML has it.
+    function applyParamRanges(spec) {
+        let ranges = spec.range || {};
+        for (let key in ranges) {
+            let ids = PARAM_ROW_IDS[key];
+            if (!ids || !ids.ctl) continue;
+            let ctl = document.getElementById(ids.ctl);
+            if (!ctl) continue;
+            let r = ranges[key];
+            if (r.min  !== undefined) ctl.min  = r.min;
+            if (r.max  !== undefined) ctl.max  = r.max;
+            if (r.step !== undefined) ctl.step = r.step;
+        }
+    }
+
+    // Apply the blocks for the selected LED pattern: HIDE a block the pattern
+    // cannot use, and GREY (disable, show no value) the rows it does not use inside
+    // a block it can.
+    //
+    // Called from updateColourBoxes(), which runs on every LED parameter change and
+    // on page load, so the page always matches the selected pattern.
+    function applyParamVisibility(section) {
+        if (section !== 'LED') return;          // the 240V page is separate
+        let spec = paramSpecForPattern(selectedPatternNameLED);
+        if (!spec) return;                      // no pattern chosen yet: leave as is
+
+        // Every row this pattern uses, across all of its blocks.
+        let usedRows = {};
+        for (let b in spec) {
+            if (b === 'range') continue;
+            (spec[b] || []).forEach(r => { usedRows[r] = true; });
+        }
+
+        // A block is shown only if the pattern uses at least one of its rows.
+        PARAM_BLOCKS.forEach(function (block) {
+            let tb = document.querySelector('tbody[data-block="' + block + '"]');
+            if (!tb) return;
+            let list = spec[block] || [];
+            tb.style.display = (list.length > 0) ? '' : 'none';
+        });
+
+        // Rows: usable only if the pattern uses them; otherwise greyed, with the
+        // value readout BLANKED - a greyed row must show no value.
+        for (let key in PARAM_ROW_IDS) {
+            let row = document.getElementById('prowLED-' + key);
+            if (!row) continue;
+            let on = !!usedRows[key];
+            row.classList.toggle('param-greyed', !on);
+            let ids = PARAM_ROW_IDS[key];
+            let ctl = document.getElementById(ids.ctl);
+            if (ctl) ctl.disabled = !on;
+            if (ids.val && !on) {
+                let v = document.getElementById(ids.val);
+                if (v) v.innerText = '';
+            }
+        }
+
+        applyParamRanges(spec);
+    }
+
+    // Called on every parameter change. The row is REBUILT only when its SHAPE
+    // changes (VU vs not), because a rebuild replaces the custom colour picker and
+    // would close it while it is being dragged.
     function updateColourBoxes(section) {
         if (section === '240V') return;
-        let four = isVuPattern();
-        for (let i = 0; i < 4; i++) {
-            let el = document.getElementById('paramColourLED' + i);
-            if (el) el.style.display = (i === 0 || four) ? '' : 'none';
+        if (activeColourTarget < 0 || activeColourTarget > 3) activeColourTarget = 0;
+        let vu = isVuPattern();
+        if (ledColourRowVu !== vu) {
+            ledColourRowVu = vu;
+            let trow = document.getElementById('colourTargetsLED');
+            if (trow) trow.style.display = vu ? 'flex' : 'none';
+            buildLedTargetRow();
+            buildLedColourRow();
         }
-        let hint = document.getElementById('colourHintLED');
-        if (hint) hint.innerText = four ? '4 bands: low \u2192 peak' : '';
+        updateLedSelectionClasses();
+        // Blocks/greying follow the selected pattern. Runs from here because this
+        // is the one place every LED parameter change and the page load both pass
+        // through.
+        applyParamVisibility(section);
     }
 
     function getLayoutSvgIcon(layout) {
@@ -1425,11 +2059,23 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             iconContainer.appendChild(getLayoutSvgIcon(item.layout || 'STAR'));
             div.appendChild(iconContainer);
 
-            let nameInput = document.createElement('input');
-            nameInput.type = 'text';
-            nameInput.value = `${item.name} [${item.section || '240V'}]`;
-            nameInput.oninput = (e) => { item.name = e.target.value; };
-            div.appendChild(nameInput);
+            // The name is a WRAPPING box now, not a single-line input. One line was far
+            // too short on a phone to read a pattern's definition - and the input also
+            // carried the " [LED]" suffix INSIDE its value, so editing the name would
+            // have written that suffix into the stored name. The section is shown beside
+            // it instead, and only the real name is editable.
+            let nameBox = document.createElement('textarea');
+            nameBox.className = 'playlist-name';
+            nameBox.rows = 2;
+            nameBox.value = item.name;
+            nameBox.title = `${item.name} [${item.section || '240V'}]`;
+            nameBox.oninput = (e) => { item.name = e.target.value; };
+            div.appendChild(nameBox);
+
+            let secSpan = document.createElement('span');
+            secSpan.className = 'playlist-section';
+            secSpan.innerText = item.section || '240V';
+            div.appendChild(secSpan);
 
             let actionsDiv = document.createElement('div');
             actionsDiv.className = 'playlist-actions';
@@ -1491,22 +2137,25 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 if (data && data.items) {
                     playlistItems = data.items;
                     renderPlaylist();
+                    savedPlaylistJson = playlistDraftJson();   // what the board holds now
                 }
             })
             .catch(err => console.log('No saved playlist found'));
     }
 
-    function savePlaylistData() {
+    function savePlaylistData(quiet) {
+        let payloadJson = playlistDraftJson();   // see saveTimelineData
         fetch('/save-playlist', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ items: playlistItems })
+            body: payloadJson
         })
         .then(() => {
             triggerSaveFlash();
-            alert('Playlist saved successfully to LittleFS!');
+            savedPlaylistJson = payloadJson;
+            if (!quiet) alert('Playlist saved successfully to LittleFS!');
         })
-        .catch(err => alert('Error saving playlist: ' + err));
+        .catch(err => { if (!quiet) alert('Error saving playlist: ' + err); });
     }
 
     // --- TIMELINE BUILDER LOGIC ---
@@ -1543,6 +2192,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         for (let r = 0; r < timelineRowsCount; r++) {
             let timeLabel = document.createElement('div');
             timeLabel.className = 'timeline-row-label';
+            timeLabel.dataset.row = r;
             let startT = r * delaySec;
             let endT = (r + 1) * delaySec;
             timeLabel.innerText = `${startT}-${endT}s`;
@@ -1566,6 +2216,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                     block.appendChild(title);
 
                     let sub = document.createElement('div');
+                    sub.className = 'timeline-block-sub';
                     sub.style.fontSize = '0.65rem';
                     sub.style.color = 'var(--secondary-color)';
                     sub.innerText = c === 11 ? '240V' : `Strip ${c}`;
@@ -1581,13 +2232,14 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                     };
                     block.appendChild(delBtn);
 
-                    // Allow picking up existing item to move/reposition via tap or drag
-                    block.onpointerdown = (e) => {
+                    // TAPPING A CELL NO LONGER PICKS IT UP. It used to delete the cell and
+                    // arm the item for re-placement, so every tap looked like "put it
+                    // somewhere else" and the cell could never simply be changed. The ✕ is
+                    // the way to clear a cell; a new item is armed from the Playlist tab.
+                    block.onclick = (e) => {
                         e.stopPropagation();
-                        activeArmedItem = item;
-                        delete timelineData[cellKey];
-                        showFloatingItem(activeArmedItem.name);
-                        renderTimelineGrid();
+                        timelineStatus('Cell ' + cellKey + ': ' + item.name +
+                                       '  (use ✕ to clear it, or place a new item from the Playlist)');
                     };
 
                     cell.appendChild(block);
@@ -1609,17 +2261,132 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 container.appendChild(cell);
             }
         }
+
+        // Re-apply the live-slot highlight: this rebuilds the DOM.
+        highlightTimelineRow(tlLiveRow, tlIsPlaying);
     }
 
     function showFloatingItem(text) {
         let fi = document.getElementById('floatingItem');
         fi.innerText = `Placing: ${text}`;
         fi.style.display = 'block';
+        // The pill follows the pointer, so on a touch screen it can never be tapped:
+        // the armed row under the transport buttons is a real way out of a placement.
+        let an = document.getElementById('timelineArmedName');
+        if (an) an.innerText = text;
+        let ar = document.getElementById('timelineArmed');
+        if (ar) ar.style.display = 'flex';
     }
 
     function hideFloatingItem() {
         let fi = document.getElementById('floatingItem');
         fi.style.display = 'none';
+        let ar = document.getElementById('timelineArmed');
+        if (ar) ar.style.display = 'none';
+    }
+
+    // Abandon a placement in progress.
+    function cancelArmedItem() {
+        activeArmedItem = null;
+        hideFloatingItem();
+        timelineStatus('Placement cancelled.');
+    }
+
+    // ---- TIMELINE TRANSPORT ----------------------------------------------------
+    // The UI remembers whether IT started the timeline, so a tab change cannot blank a
+    // running show (see switchTab).
+    let timelineIsPlaying = false;
+    let prevTab = '';
+    // Which slot the BOARD says is live (1-based; 0 = unknown) and whether it is
+    // playing, so the grid can show it. Kept here because renderTimelineGrid()
+    // rebuilds the DOM and has to re-apply the highlight.
+    let tlLiveRow = 0;
+    let tlIsPlaying = false;
+
+    // Outline the slot that is actually playing. Applied inline so no CSS rule has to
+    // know about it.
+    function highlightTimelineRow(liveRow1, playing) {
+        document.querySelectorAll('.timeline-row-label').forEach(l => {
+            let on = playing && (parseInt(l.dataset.row, 10) === liveRow1 - 1);
+            l.style.backgroundColor = on ? 'var(--secondary-color)' : '';
+            l.style.color           = on ? '#000' : '';
+            l.style.fontWeight      = on ? 'bold' : '';
+        });
+    }
+
+    function timelineStatus(msg) {
+        let e = document.getElementById('timelineStatus');
+        if (e) e.innerText = msg;
+    }
+
+    // ---- UNSAVED-CHANGE DETECTION -------------------------------------------------
+    // The BOARD plays what is STORED on it; the page's grid is only a draft until it is
+    // saved. These snapshots are what the board last confirmed, so PLAY can tell whether
+    // the draft would be lost (and therefore cannot play).
+    let savedTimelineJson = '';
+    let savedPlaylistJson = '';
+
+    function timelineDraftJson() {
+        let d = document.getElementById('timelineDelaySlider');
+        return JSON.stringify({ delay: (d ? d.value : '20'), items: timelineData });
+    }
+    function playlistDraftJson() { return JSON.stringify({ items: playlistItems }); }
+
+    // PLAY. The board plays what is SAVED, so an unsaved draft cannot start: warn, save
+    // BOTH the timeline and the playlist automatically, and let the NEXT press start -
+    // which is what the user asked for. Without this, pressing PLAY on a draft did
+    // nothing at all and the reason was invisible.
+    function playTimeline() {
+        let dirtyTl = (timelineDraftJson() !== savedTimelineJson);
+        let dirtyPl = (playlistDraftJson()  !== savedPlaylistJson);
+        if (dirtyTl || dirtyPl) {
+            showDialog('Timeline will be saved',
+                       'The board plays what is SAVED on it, so this draft cannot start yet.'
+                       + (dirtyPl ? ' The playlist will be saved too.' : '')
+                       + ' Press PLAY again to start the show.',
+                       'OK',
+                       function () {
+                           saveTimelineData(true);
+                           if (dirtyPl) savePlaylistData(true);
+                           timelineStatus('Saved - press PLAY again to start.');
+                       });
+            return;
+        }
+        fetch('/timeline-play', { cache: 'no-store' })
+            .then(r => r.text())
+            .then(t => { timelineIsPlaying = true; timelineStatus(t); note('timeline-play OK'); })
+            .catch(e => timelineStatus('PLAY failed -> ' + e.message));
+    }
+
+    // STOP makes the outputs DARK: the firmware stops rendering and blanks them.
+    function stopTimeline() {
+        fetch('/timeline-stop', { cache: 'no-store' })
+            .then(r => r.text())
+            .then(t => { timelineIsPlaying = false; timelineStatus(t); note('timeline-stop OK'); })
+            .catch(e => timelineStatus('STOP failed -> ' + e.message));
+    }
+
+    // READ THE TIMELINE BACK FROM THE BOARD.
+    //
+    // The page could only ever WRITE the timeline, so after a reload its grid looked
+    // EMPTY while the strips were still running the saved one - which is exactly the
+    // "it is playing old data that is not shown on the timeline" report.
+    function loadTimelineFromServer() {
+        fetch('/load-timeline', { cache: 'no-store' })
+            .then(r => { if (!r.ok) throw new Error('none'); return r.json(); })
+            .then(d => {
+                if (d && d.items) {
+                    timelineData = d.items;
+                    if (d.delay) {
+                        let s = document.getElementById('timelineDelaySlider');
+                        if (s) { s.value = d.delay; updateTimelineDelayText(); }
+                    }
+                    renderTimelineGrid();
+                    savedTimelineJson = timelineDraftJson();   // what the board holds now
+                    timelineStatus('Timeline loaded from the board.');
+                }
+            })
+            .catch(() => timelineStatus('No timeline saved on the board - use SAVE to store one.'));
     }
 
     window.addEventListener('pointermove', (e) => {
@@ -1651,18 +2418,23 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         });
     });
 
-    function saveTimelineData() {
-        let delaySec = document.getElementById('timelineDelaySlider').value;
+    function saveTimelineData(quiet) {
+        // The draft is serialised ONCE and that same string is what marks the board as
+        // up to date. Re-reading the UI after the round-trip could record an edit the
+        // user made while the request was in flight as "already saved".
+        let payloadJson = timelineDraftJson();
         fetch('/save-timeline', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ delay: delaySec, items: timelineData })
+            body: payloadJson
         })
         .then(() => {
             triggerSaveFlash();
-            alert('Timeline saved successfully!');
+            savedTimelineJson = payloadJson;
+            timelineStatus('Timeline saved to the board (' + Object.keys(timelineData).length + ' cells).');
+            if (!quiet) alert('Timeline saved successfully!');
         })
-        .catch(err => alert('Error saving timeline: ' + err));
+        .catch(err => { timelineStatus('SAVE failed -> ' + err); if (!quiet) alert('Error saving timeline: ' + err); });
     }
 
     function triggerSaveFlash() {
@@ -1904,6 +2676,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             .finally(() => {
                 buildColorBoxes();
                 loadPlaylistFromServer();
+                // Show what the BOARD holds. Without this the timeline grid stayed empty
+                // while the board went on playing the saved sequence.
+                loadTimelineFromServer();
                 resizeCanvas();
                 // NOTE: do NOT auto-send /init-off here. It used to run on EVERY
                 // page load, so any reload (Safari prefetch / tab eviction /
@@ -1974,6 +2749,19 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 let e = document.getElementById('diagInfo');
                 if (e) e.innerText = msg;
                 note(msg);
+
+                // TIMELINE SLOT, straight from the board. This is what makes "my cells
+                // are in a different slot" visible instead of mysterious.
+                if (j.tlRow !== undefined) {
+                    tlLiveRow   = parseInt(j.tlRow, 10) || 1;
+                    tlIsPlaying = (parseInt(j.tlPlaying, 10) === 1);
+                    highlightTimelineRow(tlLiveRow, tlIsPlaying);
+                    timelineStatus(tlIsPlaying
+                        ? ('PLAYING - slot ' + tlLiveRow + ' of 8 highlighted')
+                        : (parseInt(j.tlLoaded, 10) === 1
+                             ? 'Timeline loaded, STOPPED.'
+                             : 'No timeline stored on the board.'));
+                }
             })
             .catch(e => note('diag FAILED -> ' + e.message));
     }
