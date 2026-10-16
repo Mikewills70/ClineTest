@@ -1853,6 +1853,20 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             .then(r => r.json())
             .then(cfg => {
                 let savedTheme = (cfg.theme && themePresets[cfg.theme]) ? cfg.theme : 'Disco';
+                // ALL FOUR THEMES adopt the device's stored colours. The device is the
+                // master on startup, so every theme must be loaded from it - otherwise
+                // the three it does not report keep stale browser values which are then
+                // written back on the next save.
+                if (Array.isArray(cfg.themeColorsAll)) {
+                    const themeOrder = ['Disco', 'Christmas', 'Halloween', 'Animations'];
+                    for (let t = 0; t < cfg.themeColorsAll.length && t < themeOrder.length; t++) {
+                        let tn = themeOrder[t];
+                        if (!themePresets[tn] || !Array.isArray(cfg.themeColorsAll[t])) continue;
+                        for (let i = 0; i < 8 && i < cfg.themeColorsAll[t].length; i++) {
+                            if (cfg.themeColorsAll[t][i]) themePresets[tn].colors[i] = cfg.themeColorsAll[t][i];
+                        }
+                    }
+                }
                 if (Array.isArray(cfg.themeColors) && cfg.themeColors.length > 0) {
                     for (let i = 0; i < 8; i++) {
                         themePresets[savedTheme].colors[i] = cfg.themeColors[i] || '#000000';

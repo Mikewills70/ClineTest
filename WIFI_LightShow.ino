@@ -502,9 +502,7 @@ void ledShowAll() {
     lastTxLog = millis();
     int present = 0;
     for (int p = 0; p < NUM_PORTS; p++) if (g_strip[p]) present++;
-    logAppend("TX strips=%d/10 shows=%lu skip=%lu copy=%ldus tx=%ldus (was 4700us on X8)",
-              present, (unsigned long)g_npbShows, (unsigned long)g_showSkip,
-              (long)(t1 - t0), (long)(t2 - t1));
+    
   }
   {
     int32_t cu = (int32_t)(t1 - t0), xu = (int32_t)(t2 - t1);
@@ -909,6 +907,28 @@ void handleGetSettings() {
       ca.add(buf);
     }
   }
+  // ALL FOUR THEMES x 8 COLOURS.
+  //
+  // This used to report only the CURRENT theme's eight, so the UI could only make
+  // one theme master - the other three kept whatever the browser already had, and
+  // the corrupted values then got recirculated on the next save. The device holds
+  // all 32 in themeStore[][] already; this reports them so the UI can adopt the
+  // device as master for every theme, which is the agreed model:
+  //   startup        -> stored values are master
+  //   edit, no save  -> your changes, for this power cycle only
+  //   edit and save  -> stored values updated, become the new master
+  {
+    JsonArray all = doc["themeColorsAll"].to<JsonArray>();
+    for (int t = 0; t < THEME_COUNT; t++) {
+      JsonArray row = all.add<JsonArray>();
+      for (int i = 0; i < 8; i++) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "#%02X%02X%02X",
+                 themeStore[t][i].r, themeStore[t][i].g, themeStore[t][i].b);
+        row.add(buf);
+      }
+    }
+  }
   doc["brightness"] = masterBrightness;
   doc["theme"] = themeName;
   doc["themeCount"] = previewColorCount;
@@ -951,8 +971,7 @@ void handleCalibrateShow() {
   previewMode = 1;
   calTestMs = millis();
   previewDirty = true;
-  logAppend("CALSHOW port=%d storedOrder=%d (0=RGB 1=GRB 2=BRG 3=RBG 4=GBR 5=BGR)",
-            port, calOrder);
+  
   server.send(200, "text/plain", "Showing stored order " + String(calOrder) +
                                   " for port " + String(port + 1));
 }
@@ -977,8 +996,7 @@ void handleCalibrateTest() {
     //   CALSAVE is what was stored
     //   CALIB (at boot) is what was loaded back
     // A mismatch between those three IS the fault.
-    logAppend("CALTEST port=%d order=%d (0=RGB 1=GRB 2=BRG 3=RBG 4=GBR 5=BGR)",
-              calPort, calOrder);
+    
     previewMode = 1;      // held by the display task, but only for CAL_TEST_MS
     calTestMs = millis();
     previewDirty = true;
@@ -1006,7 +1024,7 @@ void handleCalibrateSaveCurrent() {
   preferences.begin("lightshow", false);
   preferences.putInt(("port_ord_" + String(port)).c_str(), order);
   preferences.end();
-  logAppend("CALSAVECUR port=%d order=%d STORED (what was on the strip)", port, order);
+  
   // Acknowledge on the strip: off -> on -> off.
   calPort = port;
   calOrder = order;
@@ -1019,9 +1037,7 @@ void handleCalibrateSave() {
   // Logged BEFORE the argument check, so we can tell "the request never arrived"
   // apart from "the arguments were rejected". Without this the absence of a
   // CALSAVE line is ambiguous - and it was, for a whole round.
-  logAppend("CALSAVE-REQ received port=%s order=%s",
-            server.hasArg("port") ? server.arg("port").c_str() : "(none)",
-            server.hasArg("order") ? server.arg("order").c_str() : "(none)");
+  
   if (server.hasArg("port") && server.hasArg("order")) {
     int port = server.arg("port").toInt();
     int order = server.arg("order").toInt();
@@ -1033,7 +1049,7 @@ void handleCalibrateSave() {
       preferences.end();
       // Log what was ACCEPTED and stored, so it can be compared with the CALTEST
       // on the same press and with the CALIB line after a power cycle.
-      logAppend("CALSAVE port=%d order=%d STORED", port, order);
+      
       // Acknowledge on the strip: off -> on -> off.
       calPort = port;
       calOrder = order;
@@ -1514,9 +1530,7 @@ void handleLeakTest() {
     dp.putInt("lk2", pass2);
     dp.end();
   }
-  logAppend("LEAKTEST %s n=%d pass1=%dB pass2=%dB (%.2f/call) heap=%u min=%u",
-            what.c_str(), n, (int)pass1, (int)pass2, (float)pass2 / (float)n,
-            (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+  
 
   JsonDocument doc;
   doc["what"]        = what;
@@ -3223,10 +3237,7 @@ void setup() {
   // "powers up showing the wrong order" report to be reasoned about.
   // ALL TEN PORTS. It only reported 1-4, so ports 5-8 could not be verified from
   // the log - and that is exactly what needed checking.
-  logAppendNow("CALIB 1..10: %d %d %d %d %d %d %d %d %d %d  (0=RGB 1=GRB 2=BRG 3=RBG 4=GBR 5=BGR)",
-               portColorOrders[0], portColorOrders[1], portColorOrders[2], portColorOrders[3],
-               portColorOrders[4], portColorOrders[5], portColorOrders[6], portColorOrders[7],
-               portColorOrders[8], portColorOrders[9]);
+  
 
   logTrimAtBoot();
   logAppendNow("BOOT #%u reason=%d(%s) prevUp=%us prevStage=%u prevHeap=%u nvsFree=%u erased=%u out=%s",
