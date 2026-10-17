@@ -479,7 +479,12 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         }
         .timeline-grid {
             display: grid;
-            grid-template-columns: 50px repeat(11, minmax(65px, 1fr));
+            /* The playback line is positioned inside this box, so the grid is the reference
+               its top edge is measured from. */
+            position: relative;
+            /* 64px, not 50: at the 60-second maximum the row label reads "420-480s",
+               which needs ~62px at 0.8rem - the old 50px clipped or spilled it. */
+            grid-template-columns: 64px repeat(11, minmax(65px, 1fr));
             min-width: 800px;
         }
         .timeline-header-cell, .timeline-row-label {
@@ -546,17 +551,35 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
            minimum widths are relaxed and the labels and cells tightened. The height
            limit keeps the desktop look untouched - a phone on its side is 360-450px
            tall, a desktop window is not. Rotating the phone re-applies this on its own;
-           no reload is needed. */
+           no reload is needed.
+
+           FILLING THE SCREEN (iPhone 11 Pro Max, 896 x 414pt). TWO CAPS wasted the screen
+           and both are lifted for the TIMELINE ONLY: (1) WIDTH - .card/.nav-tabs are
+           capped at 600px, so a THIRD of the screen was dead margin and the columns were
+           squeezed into the rest, which is why the type had been shrunk to 0.58rem;
+           uncapped they get ~74px and the type grows back to 0.72rem. The time column
+           needs 52px because a row label reads "420-480s" at the 60s maximum.
+           (2) HEIGHT - rows are NOT made taller: the grid is nine rows deep and the page
+           already scrolls, so taller rows would take rows AWAY; the card's own heading
+           and margins give the space instead. */
         @media (orientation: landscape) and (max-height: 620px) {
+            /* 1. the whole screen width, for the timeline only */
+            body { padding: 6px; }
+            .nav-tabs { max-width: 100%; margin-bottom: 8px; }
+            #tab-timeline { max-width: 100%; padding: 8px; }
+
+            /* 2. the card's vertical chrome, handed to the grid */
+            #tab-timeline h3 { font-size: 1rem; margin: 0 0 8px; }
+
+            /* 3. the grid: wider columns, so bigger, readable type */
             .timeline-grid {
-                grid-template-columns: 32px repeat(11, minmax(0, 1fr));
+                grid-template-columns: 52px repeat(11, minmax(0, 1fr));
                 min-width: 0;
             }
-            .timeline-header-cell, .timeline-row-label { font-size: 0.6rem; padding: 4px 1px; }
-            .timeline-cell { min-height: 38px; padding: 1px; }
-            .timeline-block-title { font-size: 0.58rem; }
-            .timeline-block-delete { width: 14px; height: 14px; font-size: 0.6rem; line-height: 1; }
-            .timeline-block-sub { display: none; }   /* the header already names the column */
+            .timeline-header-cell, .timeline-row-label { font-size: 0.72rem; padding: 6px 2px; }
+            .timeline-cell { min-height: 44px; padding: 2px; }
+            .timeline-block { min-height: 40px; padding: 3px; }
+            .timeline-block-title { font-size: 0.72rem; }
         }
         
         .timeline-block {
@@ -572,27 +595,44 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             font-size: 0.75rem;
             display: flex;
             flex-direction: column;
-            justify-content: space-between;
+            /* The block is the name ALONE now - the "Strip n" line and the ✕ are gone -
+               so the name is centred in whatever height the row gives it. */
+            justify-content: center;
             cursor: grab;
             position: relative;
         }
         .timeline-block:active { cursor: grabbing; }
-        .timeline-block-title { font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .timeline-block-delete {
-            position: absolute;
-            top: 2px;
-            right: 2px;
-            background: rgba(0,0,0,0.6);
-            color: var(--error-color);
-            border: none;
-            border-radius: 50%;
-            width: 16px;
-            height: 16px;
-            font-size: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
+        /* END OF DISPLAY is an ordinary item in the grid, but it is a boundary - the show
+           restarts where it is - so it is coloured to be unmistakable. */
+        .timeline-block.endof { background-color: #4a2020; border-color: var(--error-color); }
+        /* THE NAME. It is the only thing in a block, and it SCROLLS when it does not fit
+           rather than being cut with an ellipsis. Only blocks that actually overflow get
+           .tl-scroll (measured in JS), with a per-block distance and duration, so a short
+           name never moves. transform-only: no layout while it runs. */
+        .timeline-block-title {
+            font-weight: bold;
+            white-space: nowrap;
+            overflow: hidden;
+            width: 100%;
+            text-align: center;
+        }
+        .timeline-block-title > span { display: inline-block; white-space: nowrap; }
+        .timeline-block-title.tl-scroll > span {
+            animation: tlMarquee var(--tl-dur, 4s) linear infinite;
+        }
+        /* ONE DIRECTION ONLY: left, the direction English is read in. The name starts
+           visible, slides left until its END is clear of the edge, holds there long enough
+           to read it, then snaps back and holds again. It never travels right, because on
+           the way back the text reads BACKWARDS - which is what an alternating (ping-pong)
+           marquee does, and it was wrong. */
+        @keyframes tlMarquee {
+            0%        { transform: translateX(0); }
+            14%, 22%  { transform: translateX(0); }                     /* hold: read the start */
+            64%       { transform: translateX(var(--tl-shift, 0px)); }   /* slide left, once */
+            96%, 100% { transform: translateX(var(--tl-shift, 0px)); }   /* hold: read the end */
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .timeline-block-title.tl-scroll > span { animation: none; }
         }
 
         /* Floating cursor element during placement/move */
@@ -635,10 +675,6 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 <option value="true">Enabled</option>
                 <option value="false">Disabled (Clock Timer Only)</option>
             </select>
-        </div>
-        <div class="control-group">
-            <label>Fallback Clock Speed (Seconds)</label>
-            <input type="number" id="clockDelay" step="0.1" min="0.1" max="5.0">
         </div>
         <div class="control-group">
             <label>Antifreeze Timeout (Seconds)</label>
@@ -694,7 +730,8 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             <button class="theme-btn active" onclick="themePreviewEnabled = true; setTheme('Disco')">Disco</button>
             <button class="theme-btn" onclick="themePreviewEnabled = true; setTheme('Christmas')">Christmas</button>
             <button class="theme-btn" onclick="themePreviewEnabled = true; setTheme('Halloween')">Halloween</button>
-            <button class="theme-btn" onclick="themePreviewEnabled = true; setTheme('Animations')">Animations</button>
+            <!-- "Animations" is GONE. It held the EFFECT colours; effects are defined per
+                 pattern now (the Chase's tail being the first), not by a theme of its own. -->
         </div>
 
         <!-- The "Number of Colors" selector was REMOVED. All themes now have eight
@@ -712,10 +749,13 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         <p>Choose a pattern to unlock configuration tabs:</p>
         <div class="pattern-grid">
             <button class="pattern-item" onclick="choosePattern('Moving Dot', this)">Moving Dot</button>
-            <button class="pattern-item" onclick="choosePattern('Chase 1 - 10', this)">Chase 1 - 10</button>
-            <button class="pattern-item" onclick="choosePattern('Chase 10 - 1', this)">Chase 10 - 1</button>
+            <!-- ONE Chase. It runs TWO ways, chosen by Wrap:
+                 wrap OFF - the movement follows the selected audio band, capped by Speed;
+                 wrap ON  - the metronome: one traverse per beat, reversing each time.
+                 "Chase 10 - 1" is gone (an old item naming it resolves to this one) and
+                 "Knight Rider" is gone too - wrap ON is that bounce. -->
+            <button class="pattern-item" onclick="choosePattern('Chase', this)">Chase</button>
             <button class="pattern-item" onclick="choosePattern('Explosion', this)">Explosion</button>
-            <button class="pattern-item" onclick="choosePattern('Knight Rider', this)">Knight Rider</button>
             <!-- ONE VU pattern. Left / Right / Centre / Ends are ROWS in the Special
                  block now, not separate entries in this list. -->
             <button data-vu="1" class="pattern-item" onclick="choosePattern('VU Meter', this)">VU Meter</button>
@@ -899,7 +939,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 </tr>
                 <tr id="prowLED-wrap">
                     <td class="name-col">Wrap</td>
-                    <td><input type="checkbox" id="paramWrapLED" onchange="liveParamChanged('LED')"></td>
+                    <td><input type="checkbox" id="paramWrapLED" onchange="liveParamChanged('LED'); updateChaseGreying();"></td>
                 </tr>
                 <tr id="prowLED-invert">
                     <td class="name-col">Invert</td>
@@ -1035,20 +1075,26 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             <button class="btn" style="flex:1;" onclick="stopTimeline()">&#9632; STOP</button>
             <button class="btn" style="flex:1;" onclick="saveTimelineData()">SAVE</button>
         </div>
-        <div id="timelineStatus" style="font-size:0.8rem; color:var(--text-secondary); margin-bottom:10px;"></div>
+        <!-- END OF DISPLAY: arms a marker that fills a WHOLE ROW when it is placed. Reaching
+             that row restarts the show at slot 1, and it loops until STOP. -->
+        <button class="btn" style="width:100%; margin-bottom:8px; border-color:var(--error-color); color:var(--error-color);"
+                onclick="armEndOfDisplay()">&#9632; END OF DISPLAY (fills a whole row)</button>
+        <!-- NO STATUS TEXT AREA HERE BY REQUEST: the timeline page carries no reports. The
+             status messages still exist in the code - timelineStatus() now sends only
+             FAILURES to the floating toast - but nothing is printed in this panel. -->
 
         <!-- Shown only while an item is armed for placement, with a way OUT of it - the
              floating pill follows the pointer and cannot be tapped on a touch screen. -->
         <div id="timelineArmed" style="display:none; font-size:0.85rem; margin-bottom:8px; align-items:center; gap:8px;">
-            <span style="color:var(--secondary-color);">Placing: <span id="timelineArmedName"></span></span>
+            <span style="color:var(--secondary-color);"><span id="timelineArmedVerb">Placing</span>: <span id="timelineArmedName"></span></span>
             <button class="btn" style="padding:2px 10px;" onclick="cancelArmedItem()">Cancel</button>
         </div>
 
         <div class="control-group">
-            <label>Time Division Delay (Seconds: <span id="timelineDelayVal" style="color:var(--primary-color);">20</span>s)</label>
-            <input type="range" id="timelineDelaySlider" min="10" max="60" step="1" value="20" oninput="updateTimelineDelayText()">
+            <label>Time Division Delay (Seconds: <span id="timelineDelayVal" style="color:var(--primary-color);">20s</span>)</label>
+            <input type="range" id="timelineDelaySlider" min="1" max="60" step="1" value="20" oninput="updateTimelineDelayText()">
         </div>
-        <p style="font-size: 0.85rem; color: var(--text-secondary);">Columns 1–10 represent LED strips. Column 11 represents the 240V channel. Arm an item from the Playlist tab, then tap a cell to place it; use ✕ to clear a cell.</p>
+        <!-- (The "Columns 1-10 represent LED strips..." description is removed by request.) -->
         
         <div class="timeline-wrapper">
             <div id="timelineGridContainer" class="timeline-grid">
@@ -1070,7 +1116,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         <div style="background:var(--surface-color); border:1px solid var(--border-color); border-radius:6px; padding:18px; width:86%; max-width:420px; box-shadow:0 8px 30px rgba(0,0,0,0.6);">
             <div id="colourWarnTitle" style="font-weight:bold; color:var(--secondary-color); margin-bottom:8px; font-size:1.05rem;">Colour Warning</div>
             <div id="colourWarnBody" style="font-size:0.95rem; line-height:1.35; margin-bottom:16px; color:var(--text-color);">Rainbow and Custom Colours are NOT controlled by the Theme.</div>
-            <button id="colourWarnOk" class="btn" style="width:100%;" onclick="closeColourWarning()">OK</button>
+            <!-- The buttons are BUILT from a list by showDialogActions(), so the same
+                 modal is the one-button warning and the three-way cell menu. -->
+            <div id="dialogActions" style="display:flex; gap:8px;"></div>
         </div>
     </div>
 
@@ -1098,6 +1146,14 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             // tested order every time the page was opened.
             fetch('/calibrate-stop').catch(() => {});
         }
+
+        // ENTERING THE TIMELINE: rebuild the grid. It is normally built at load, when this
+        // tab is NOT the visible one - and a hidden element has no width, so the
+        // measurement that decides which names are long enough to need scrolling would
+        // have measured zero and NOTHING would ever move. Rebuilding on entry also
+        // re-applies the live-slot highlight, so the playing slot is marked the moment the
+        // tab appears rather than up to 3 seconds later.
+        if (tabId === 'timeline') renderTimelineGrid();
         if (tabId === 'ws2811') {
             setTimeout(resizeCanvas, 50);
         }
@@ -1269,18 +1325,15 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     // were removed with it.
     const activeColorCount = 8;
 
-    // ORIGINAL theme colours, restored exactly as they were before I changed them.
-    //
-    // Christmas, Halloween and Animations each have FOUR colours plus four blacks,
-    // which is how they have always been. All eight slots are stored and persisted
-    // INDIVIDUALLY, so you can duplicate or extend them yourself - the theme does
-    // not decide that for you. The black slots need the white ring to be visible,
-    // which is why the swatch row borders them.
+    // THE "Animations" THEME IS GONE. It existed to hold the EFFECT colours, and effects
+    // are now defined per pattern rather than by a theme of their own. Its stored colours
+    // are swept at boot. (All eight slots are still stored and persisted INDIVIDUALLY, so
+    // you can duplicate or extend them yourself - the theme does not decide that for you.
+    // The black slots need the swatch border to be visible, which is why the row has one.)
     const themePresets = {
         'Disco':      { max: 8, colors: ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#800080', '#00FFFF', '#FFFFFF', '#FFA500'] },
         'Christmas':  { max: 8, colors: ['#FF0000', '#228B22', '#87CEFA', '#FFD700', '#000000', '#000000', '#000000', '#000000'] },
-        'Halloween':  { max: 8, colors: ['#FF0000', '#00FF00', '#4B0082', '#FFA500', '#000000', '#000000', '#000000', '#000000'] },
-        'Animations': { max: 8, colors: ['#FF4500', '#00CED1', '#FF1493', '#ADFF2F', '#000000', '#000000', '#000000', '#000000'] }
+        'Halloween':  { max: 8, colors: ['#FF0000', '#00FF00', '#4B0082', '#FFA500', '#000000', '#000000', '#000000', '#000000'] }
     };
 
     // Suppress the theme preview while the page is first loading so the
@@ -1376,6 +1429,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
     // Timeline Data Structures
     let timelineRowsCount = 8;
+    // Blocks whose name is too long to fit, collected while the grid is built and
+    // measured in ONE pass afterwards (see renderTimelineGrid).
+    let tlNameScrollers = [];
     let timelineData = {}; // key: "row_col", value: playlistItemObj
     let activeArmedItem = null; // Holds item being placed or moved
 
@@ -1696,23 +1752,43 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         }
     }
 
-    // ONE DIALOG, used by every warning and confirmation. It has a single OK button -
-    // nothing to choose, only something to acknowledge (a slot set to rainbow or to a
-    // custom colour, because those are VALUES that stop following the theme) - and that
-    // button optionally RUNS an action, so a warning can also be the thing that saves.
-    let dialogOkAction = null;
-
-    function showDialog(title, body, okLabel, onOk) {
+    // ONE DIALOG, used by every warning, prompt and choice. The buttons are BUILT FROM A
+    // LIST, so the same modal covers the one-button warnings - a slot set to rainbow or to
+    // a custom colour, where there is nothing to choose, only something to acknowledge -
+    // and the three-way timeline cell menu (Move / Cancel / Delete).
+    //
+    // Each button CLEARS the modal before running its action, so a failure raised by that
+    // action cannot hide behind a dialog that is still on screen.
+    function showDialogActions(title, body, actions) {
         let modal = document.getElementById('colourWarnModal');
         if (!modal) return;
         let t = document.getElementById('colourWarnTitle');
         let b = document.getElementById('colourWarnBody');
-        let btn = document.getElementById('colourWarnOk');
+        let bar = document.getElementById('dialogActions');
         if (t) t.innerText = title;
         if (b) b.innerText = body;
-        if (btn) btn.innerText = okLabel || 'OK';
-        dialogOkAction = onOk || null;
+        if (bar) {
+            bar.innerHTML = '';
+            (actions || []).forEach(a => {
+                let btn = document.createElement('button');
+                btn.className = 'btn';
+                btn.style.cssText = 'flex:1 1 0; min-width:0;' +
+                                    (a.colour ? 'background-color:' + a.colour + '; color:#000;' : '');
+                btn.innerText = a.label;
+                btn.onclick = () => {
+                    let act = a.act;
+                    closeColourWarning();
+                    if (act) act();
+                };
+                bar.appendChild(btn);
+            });
+        }
         modal.style.display = 'flex';
+    }
+
+    // The one-button form, kept so every existing caller reads exactly as before.
+    function showDialog(title, body, okLabel, onOk) {
+        showDialogActions(title, body, [{ label: okLabel || 'OK', act: onOk }]);
     }
 
     function showColourWarning(what) {
@@ -1721,14 +1797,11 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                    'OK', null);
     }
 
-    // The modal's OK button. Clearing the dialog FIRST means a failure raised by the
-    // action cannot be hidden behind it.
+    // Hide the modal. The actions run from the button that was pressed (above), so there
+    // is no single "OK action" to hold any more.
     function closeColourWarning() {
         let modal = document.getElementById('colourWarnModal');
         if (modal) modal.style.display = 'none';
-        let act = dialogOkAction;
-        dialogOkAction = null;
-        if (act) act();
     }
 
     // A selection gesture FINISHED: store the reference, warn if the theme can no
@@ -1789,9 +1862,13 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                           visual: ['speed', 'quantity', 'size', 'invert'],
                           audio:  ['frequency', 'beatMult', 'beatSens'],
                           range:  { speed: { min: 0.002, max: 0.1, step: 0.001 } } },
-        'Chase 1 - 10': { colour: ['colour'],
+        // ONE CHASE. Speed for it is LEDs per second (1-50), NOT seconds per step like the
+        // dot patterns - hence its own range. Wrap selects the mode: OFF = band-driven move,
+        // ON = the beat-synced metronome (where Speed is not used at all and is greyed).
+        'Chase':        { colour: ['colour'],
                           visual: ['speed', 'quantity', 'size', 'wrap', 'invert'],
-                          audio:  ['frequency', 'beatMult', 'beatSens'] },
+                          audio:  ['frequency', 'beatMult', 'beatSens'],
+                          range:  { speed: { min: 1, max: 50, step: 1 } } },
         'Chase 10 - 1': { colour: ['colour'],
                           visual: ['speed', 'quantity', 'size', 'wrap', 'invert'],
                           audio:  ['frequency', 'beatMult', 'beatSens'] },
@@ -1844,10 +1921,51 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         // 'colour' has no single control: its ten boxes are always in use.
     };
 
-    // Per-pattern limits, applied to the controls. Anything a pattern does not
-    // define is left exactly as the HTML has it.
+    // The ranges the MARKUP defines. A pattern that defines none must get these back, or the
+    // previous pattern's range leaks into it - Chase's Speed is 1-50 LEDs/s, and leaving that
+    // on Explosion (whose Speed is seconds per step) would make it crawl.
+    const PARAM_ROW_DEFAULTS = {
+        speed: { min: 0.002, max: 0.50, step: 0.001 }
+    };
+
+    // WRAP ON turns the Chase into a metronome: the BEAT sets the pace, so Speed is not used
+    // and is greyed rather than left looking live. (Momentum will be greyed here too when it
+    // arrives - it cannot exist with wrap on either.)
+    function updateChaseGreying() {
+        let chase = /^chase/i.test(selectedPatternNameLED || '');
+        let wrap  = document.getElementById('paramWrapLED');
+        let sp    = document.getElementById('paramSpeedLED');
+        let row   = document.getElementById('prowLED-speed');
+        if (!sp) return;
+        let off = chase && wrap && wrap.checked;
+        sp.disabled = off;
+        if (row) row.style.opacity = off ? '0.4' : '1';
+    }
+
+    let lastRangePattern = null;
+
+    // Per-pattern limits, applied to the controls.
+    //
+    // ONLY WHEN THE PATTERN CHANGES. This is called on EVERY parameter change (through
+    // updateColourBoxes), and re-writing min/max/step there CLAMPS THE VALUE: the reset to
+    // the markup defaults pulled a Chase Speed of 40 down to 0.5, and the spec's min of 1
+    // then pushed it back to 1 - so the slider snapped to minimum on every drag while the
+    // readout showed the number being dragged.
     function applyParamRanges(spec) {
+        if (selectedPatternNameLED === lastRangePattern) return;   // same pattern: leave it be
+        lastRangePattern = selectedPatternNameLED;
+
         let ranges = spec.range || {};
+        for (let key in PARAM_ROW_DEFAULTS) {
+            let ids = PARAM_ROW_IDS[key];
+            if (!ids || !ids.ctl) continue;
+            let ctl = document.getElementById(ids.ctl);
+            if (!ctl) continue;
+            let d = PARAM_ROW_DEFAULTS[key];
+            if (d.min  !== undefined) ctl.min  = d.min;
+            if (d.max  !== undefined) ctl.max  = d.max;
+            if (d.step !== undefined) ctl.step = d.step;
+        }
         for (let key in ranges) {
             let ids = PARAM_ROW_IDS[key];
             if (!ids || !ids.ctl) continue;
@@ -1858,6 +1976,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             if (r.max  !== undefined) ctl.max  = r.max;
             if (r.step !== undefined) ctl.step = r.step;
         }
+        updateChaseGreying();     // the pattern just applied may or may not use Speed
     }
 
     // Apply the blocks for the selected LED pattern: HIDE a block the pattern
@@ -2145,7 +2264,8 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
     function savePlaylistData(quiet) {
         let payloadJson = playlistDraftJson();   // see saveTimelineData
-        fetch('/save-playlist', {
+        // Returns the promise: the PLAY guard waits for the save to land before starting.
+        return fetch('/save-playlist', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: payloadJson
@@ -2159,9 +2279,51 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     }
 
     // --- TIMELINE BUILDER LOGIC ---
+    // THE DELAY THE BOARD IS PLAYING. The slider is only a DRAFT until it is saved, and the
+    // row labels describe the slot windows - so they must come from the value the show is
+    // ACTUALLY running. Relabelling on the slider alone made the grid read "0-10s" while the
+    // board was still stepping every 20s, which made the moving bar look like the wrong
+    // speed: the bar was right, the LABELS were lying. Now both come from the board.
+    // ---- SHELVED, AGREED WITH THE USER (2026-10-17): PER-ROW TIMINGS -----------------
+    // The slider is the DEFAULT time for every row; an individual row may override it, and
+    // the labels then run CUMULATIVELY (0-10, 10-20 ... 40-50, then a 1s row 50-51, then
+    // 51-61). Agreed details, for whoever builds it:
+    //   - changing the slider moves every row that has NO override, and custom rows keep
+    //     their own time;
+    //   - labels past 60s are written "1m30s";
+    //   - the END OF DISPLAY row has NO time of its own, and rows above it always follow the
+    //     slider - so moving the marker down immediately re-times the rows above it;
+    //   - the slider is then labelled "Default Time Delay (Seconds: #s)";
+    //   - the bar must take each row's own duration (the board reports the CURRENT row's in
+    //     /diag; the row prediction in drawPlayhead() would need the NEXT row's, which this
+    //     page can work out from its own data).
+    // Deferred in favour of the remaining patterns - it is not needed for the shows in use.
+    let tlSavedDelaySec = 20;
+
+    function applyTimelineRowLabels() {
+        let s = document.getElementById('timelineDelaySlider');
+        let draft = s ? parseInt(s.value, 10) : tlSavedDelaySec;
+        if (isNaN(draft) || draft < 1) draft = tlSavedDelaySec;
+        document.querySelectorAll('.timeline-row-label').forEach(l => {
+            let r = parseInt(l.dataset.row, 10);
+            if (isNaN(r)) return;
+            l.innerText = `${r * tlSavedDelaySec}-${(r + 1) * tlSavedDelaySec}s`;
+        });
+        // Say so when the slider is ahead of the board, so a mismatch can never be a mystery.
+        let v = document.getElementById('timelineDelayVal');
+        if (v) {
+            let unsaved = (draft !== tlSavedDelaySec);
+            v.innerText = unsaved ? (draft + 's - press SAVE') : (tlSavedDelaySec + 's');
+            v.style.color = unsaved ? '#ffb300' : 'var(--primary-color)';
+        }
+    }
+
+    // Called on every drag event: it moves the DRAFT readout only. The grid labels stay on
+    // the saved value until the save lands (see applyTimelineRowLabels). The slider floor is
+    // 1s, not 10s: the firmware already clamps tlDelaySec to >= 1.0, so the page was the only
+    // thing stopping it.
     function updateTimelineDelayText() {
-        let val = document.getElementById('timelineDelaySlider').value;
-        document.getElementById('timelineDelayVal').innerText = val;
+        applyTimelineRowLabels();
     }
 
     function renderTimelineGrid() {
@@ -2187,7 +2349,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         container.appendChild(th240);
 
         // Grid Rows
-        let delaySec = parseInt(document.getElementById('timelineDelaySlider').value);
+        // The labels describe the slot windows the BOARD is playing, not the slider draft.
+        let delaySec = tlSavedDelaySec;
+        tlNameScrollers = [];
 
         for (let r = 0; r < timelineRowsCount; r++) {
             let timeLabel = document.createElement('div');
@@ -2209,37 +2373,40 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 if (item) {
                     let block = document.createElement('div');
                     block.className = 'timeline-block';
+                    if (item.layout === 'END_OF_DISPLAY') block.className += ' endof';
                     
+                    // The name is the ONLY thing in a block now. The "Strip n" line is
+                    // gone - the header row already names the column - and so is the ✕,
+                    // which took 18px of every block and cleared a cell on a mis-tap.
+                    // What is left is the item's name, which SCROLLS if it does not fit
+                    // (see tlNameScrollers, applied once the whole grid is built).
                     let title = document.createElement('div');
                     title.className = 'timeline-block-title';
-                    title.innerText = item.name;
+                    let titleText = document.createElement('span');
+                    titleText.innerText = item.name;
+                    title.appendChild(titleText);
                     block.appendChild(title);
+                    tlNameScrollers.push({ clip: title, text: titleText });
 
-                    let sub = document.createElement('div');
-                    sub.className = 'timeline-block-sub';
-                    sub.style.fontSize = '0.65rem';
-                    sub.style.color = 'var(--secondary-color)';
-                    sub.innerText = c === 11 ? '240V' : `Strip ${c}`;
-                    block.appendChild(sub);
+                    // The "Strip n" line that used to sit under the name is deleted. It
+                    // repeated what the header row already says (S1..S10, 240V) and cost
+                    // the name a line of height, in BOTH orientations.
 
-                    let delBtn = document.createElement('button');
-                    delBtn.className = 'timeline-block-delete';
-                    delBtn.innerText = '✕';
-                    delBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        delete timelineData[cellKey];
-                        renderTimelineGrid();
-                    };
-                    block.appendChild(delBtn);
-
-                    // TAPPING A CELL NO LONGER PICKS IT UP. It used to delete the cell and
-                    // arm the item for re-placement, so every tap looked like "put it
-                    // somewhere else" and the cell could never simply be changed. The ✕ is
-                    // the way to clear a cell; a new item is armed from the Playlist tab.
+                    // TAPPING A CELL NO LONGER PICKS IT UP SILENTLY. It used to delete the
+                    // cell and arm the item for re-placement, so every tap looked like "put
+                    // it somewhere else" and the cell could never simply be looked at.
+                    // A tap now opens the cell menu: the item's name, then Move / Cancel /
+                    // Delete. The status line at the top of the tab was nowhere near the
+                    // finger, so it was poor feedback - the dialog appears where the thumb
+                    // already is.
+                    //
+                    // While an item IS armed, tapping a populated cell PLACES it instead
+                    // (the cell's own pointerup handler below does the work), so this stands
+                    // aside in that case.
                     block.onclick = (e) => {
                         e.stopPropagation();
-                        timelineStatus('Cell ' + cellKey + ': ' + item.name +
-                                       '  (use ✕ to clear it, or place a new item from the Playlist)');
+                        if (activeArmedItem) return;
+                        openCellDialog(cellKey, item);
                     };
 
                     cell.appendChild(block);
@@ -2250,7 +2417,35 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                     if (activeArmedItem) {
                         let isPressureDrop = e.pressure && e.pressure > 0.5;
                         if (!timelineData[cellKey] || isPressureDrop) {
-                            timelineData[cellKey] = activeArmedItem;
+                            let moveFrom = activeArmedItem._moveFrom;
+                            if (activeArmedItem._rowSpan) {
+                                // END OF DISPLAY fills the WHOLE ROW. Every column gets its
+                                // own copy so the row is an ordinary part of the grid - but
+                                // Move and Delete always act on the row as a UNIT.
+                                let row = cellKey.split('_')[0];
+                                let fromRow = activeArmedItem._moveFromRow;
+                                for (let c = 1; c <= 11; c++) {
+                                    let copy = JSON.parse(JSON.stringify(activeArmedItem));
+                                    delete copy._rowSpan; delete copy._moveFrom; delete copy._moveFromRow;
+                                    timelineData[row + '_' + c] = copy;
+                                }
+                                // A MOVE clears the row it came from - only now that it has
+                                // landed, so Cancel still changes nothing.
+                                if (fromRow !== undefined && fromRow !== row) {
+                                    for (let c = 1; c <= 11; c++) {
+                                        let k = fromRow + '_' + c;
+                                        if (isMarkerItem(timelineData[k])) delete timelineData[k];
+                                    }
+                                }
+                            } else {
+                                // A MOVE keeps the item's ORIGINAL cell until it has landed
+                                // here, so cancelling a move can never lose it. Internal
+                                // markers are stripped before it is stored - and therefore
+                                // before it is sent to the board.
+                                timelineData[cellKey] = activeArmedItem;
+                                delete timelineData[cellKey]._moveFrom;
+                                if (moveFrom && moveFrom !== cellKey) delete timelineData[moveFrom];
+                            }
                             activeArmedItem = null;
                             hideFloatingItem();
                             renderTimelineGrid();
@@ -2262,14 +2457,122 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             }
         }
 
+        // ONLY THE NAMES THAT DO NOT FIT MOVE. Measured in ONE pass AFTER every block is in
+        // the DOM: getBoundingClientRect() means nothing until layout, and reading between
+        // appendChild calls would force a layout per cell. Measured FRACTIONALLY, not with
+        // scrollWidth/clientWidth - those are rounded to whole pixels and the travel then
+        // ended exactly on the clip edge, which ate the last character. The end margin
+        // carries the text clear of that edge, so the last letter is readable.
+        const TL_END_MARGIN = 14;
+        tlNameScrollers.forEach(s => {
+            let over = s.text.getBoundingClientRect().width -
+                       s.clip.getBoundingClientRect().width;
+            if (over <= 1) return;                    // it fits: leave it alone
+            let travel = Math.ceil(over) + TL_END_MARGIN;
+            s.clip.classList.add('tl-scroll');
+            s.clip.style.setProperty('--tl-shift', (-travel) + 'px');
+            // ~20px of travel per second; the rest of the cycle is the holds at each end.
+            s.clip.style.setProperty('--tl-dur', Math.max(2.5, travel / 10).toFixed(2) + 's');
+        });
+
         // Re-apply the live-slot highlight: this rebuilds the DOM.
         highlightTimelineRow(tlLiveRow, tlIsPlaying);
+
+        // The playback line lives INSIDE the grid - so it scrolls with the columns in
+        // portrait and spans all of them in landscape - and the rebuild above has just
+        // thrown it away. Recreate it and put it straight back on the playing row.
+        buildPlayhead();
+        drawPlayhead();
+    }
+
+    // ---- THE CELL MENU ---------------------------------------------------------
+    // Tapping a cell shows what is IN it - the playlist item's name - and what can be done
+    // with it. The NAME is the point: a block on the grid is clipped to one column, so
+    // before this the only way to be sure which item you were about to delete was to read
+    // it off the status line at the top of the tab, which is nowhere near the finger.
+    function cellSlotLabel(cellKey) {
+        let p = String(cellKey).split('_');
+        return p[1] === '11' ? '240V' : `Strip ${p[1]}`;
+    }
+
+    function openCellDialog(cellKey, item) {
+        let slot1 = parseInt(cellKey.split('_')[0], 10) + 1;
+        let body = `Slot ${slot1}  \u00b7  ${cellSlotLabel(cellKey)}`;
+        // A boundary is a whole row, so say so BEFORE the user picks Move or Delete.
+        if (isMarkerItem(item)) body += '  \u00b7  END OF DISPLAY: Move and Delete act on the WHOLE row';
+        showDialogActions(item.name, body,
+                          [{ label: 'Move', act: () => moveCellItem(cellKey) },
+                           { label: 'Cancel' },
+                           { label: 'Delete', colour: 'var(--error-color)',
+                             act: () => deleteCellOrMarkerRow(cellKey) }]);
+    }
+
+    // Deleting an END OF DISPLAY block deletes the WHOLE ROW it belongs to: a half-deleted
+    // marker row is a boundary the user can no longer see, and the row is the unit that was
+    // placed, so the row is the unit that goes.
+    function deleteCellOrMarkerRow(cellKey) {
+        if (isMarkerItem(timelineData[cellKey])) {
+            let row = cellKey.split('_')[0];
+            for (let c = 1; c <= 11; c++) {
+                let k = row + '_' + c;
+                if (isMarkerItem(timelineData[k])) delete timelineData[k];
+            }
+            timelineStatus('END OF DISPLAY row removed.');
+        } else {
+            delete timelineData[cellKey];
+            timelineStatus('Cell cleared.');
+        }
+        renderTimelineGrid();
+    }
+
+    // MOVE arms the item for re-placement and hands it to the existing "Placing" banner,
+    // which is the way OUT of a placement on a touch screen: the floating pill follows the
+    // finger and can never be tapped.
+    //
+    // The source cell is deliberately NOT cleared here. It is cleared only when the item
+    // lands somewhere else (see the cell's pointerup handler), because clearing it at this
+    // point - which is what the old silent pick-up did - loses the item the moment the
+    // user changes their mind. Cancel therefore always restores the original state.
+    // Is this cell an END OF DISPLAY marker?
+    function isMarkerItem(it) { return !!(it && it.layout === 'END_OF_DISPLAY'); }
+
+    function moveCellItem(cellKey) {
+        let item = timelineData[cellKey];
+        if (!item) return;
+        activeArmedItem = JSON.parse(JSON.stringify(item));
+        activeArmedItem._moveFrom = cellKey;
+        // AN END OF DISPLAY ROW MOVES AS ONE. If a single block could be moved on its own the
+        // columns would end up on different rows, and the next play would restart the show at
+        // a different point for each strip. The ROW is the unit, always.
+        if (isMarkerItem(item)) {
+            activeArmedItem._rowSpan = true;
+            activeArmedItem._moveFromRow = cellKey.split('_')[0];
+            timelineStatus('Moving the whole END OF DISPLAY row - tap a cell in the row you want.');
+        } else {
+            timelineStatus(`Moving "${activeArmedItem.name}" - tap a cell to drop it, or Cancel.`);
+        }
+        showFloatingItem(activeArmedItem.name);
+    }
+
+    // END OF DISPLAY: arms a marker that fills a WHOLE ROW when placed. Placing it is the
+    // same gesture as any other item - arm, then tap the row you want - because WHICH row
+    // it is decides where the show ends. The board treats any row holding the marker as the
+    // end of the show and restarts from slot 1.
+    function armEndOfDisplay() {
+        activeArmedItem = { name: 'END OF DISPLAY', layout: 'END_OF_DISPLAY', _rowSpan: true };
+        showFloatingItem(activeArmedItem.name);
+        timelineStatus('Placing END OF DISPLAY - tap any cell in the row you want it in.');
     }
 
     function showFloatingItem(text) {
+        let moving = !!(activeArmedItem && activeArmedItem._moveFrom);
         let fi = document.getElementById('floatingItem');
-        fi.innerText = `Placing: ${text}`;
+        fi.innerText = `${moving ? 'Moving' : 'Placing'}: ${text}`;
         fi.style.display = 'block';
+        // "Moving" and "Placing" are different acts - one can be cancelled with nothing
+        // lost, the other is dropping something new - so the banner says which it is.
+        let av = document.getElementById('timelineArmedVerb');
+        if (av) av.innerText = moving ? 'Moving' : 'Placing';
         // The pill follows the pointer, so on a touch screen it can never be tapped:
         // the armed row under the transport buttons is a real way out of a placement.
         let an = document.getElementById('timelineArmedName');
@@ -2289,7 +2592,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     function cancelArmedItem() {
         activeArmedItem = null;
         hideFloatingItem();
-        timelineStatus('Placement cancelled.');
+        // True for a MOVE as well: the item's original cell is left untouched until the
+        // item actually lands somewhere (see moveCellItem).
+        timelineStatus('Placement cancelled - nothing was changed.');
     }
 
     // ---- TIMELINE TRANSPORT ----------------------------------------------------
@@ -2314,10 +2619,106 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         });
     }
 
+    // THE TIMELINE PAGE SHOWS NO REPORTS. There is no text area for them any more, so routine
+    // confirmations go nowhere - but a FAILURE still reaches the floating toast, because a
+    // silent failure is how hours get lost.
     function timelineStatus(msg) {
-        let e = document.getElementById('timelineStatus');
-        if (e) e.innerText = msg;
+        if (/fail|error|cannot|unable|missing/i.test(String(msg))) note(msg);
     }
+
+    // ---- THE PLAYBACK LINE -----------------------------------------------------
+    // A thin line across the WHOLE timeline - every column, portrait and landscape alike -
+    // showing exactly where the display is inside the slot being played.
+    //
+    // The position is NOT guessed from the page's own clock. The board reports the time
+    // spent inside the current row (/diag), and this interpolates between polls so the line
+    // glides instead of stepping. Open the page halfway through a show and the line lands
+    // in the right place immediately: the board is the master, the page only fills in the
+    // gaps between its poll.
+    let tlHead = { playing: false, row: 0, elapsed: 0, delay: 20000, at: 0, shown: 0, shownRow: -1 };
+
+    // Created here rather than in the markup because the grid it lives in is rebuilt from
+    // scratch (innerHTML = '') on every change - placing an item would otherwise erase it.
+    function buildPlayhead() {
+        let container = document.getElementById('timelineGridContainer');
+        if (!container) return;
+        let line = document.createElement('div');
+        line.id = 'tlPlayLine';
+        // ONE THIN LINE ACROSS THE WHOLE TIMELINE, travelling DOWN with the time. Absolute
+        // inside the grid, so it spans every column and scrolls with them in portrait; its
+        // top edge is measured from the real cell of the row it is in, so it lands on the
+        // row boundaries whatever the orientation or the font size does.
+        line.style.cssText = 'position:absolute; left:0; right:0; height:2px; display:none; ' +
+                             'pointer-events:none; z-index:5; background:#ffffff; ' +
+                             'box-shadow:0 0 4px rgba(0,0,0,0.9);';   // dark halo: white stays visible over white blocks
+        container.appendChild(line);
+    }
+
+    // WHERE THE SHOW GOES AFTER A ROW: the next one, or back to the top when the next row is
+    // the END OF DISPLAY boundary - the board never plays that row, it restarts instead. The
+    // page can see the markers in its own data, so the prediction agrees with the board.
+    function nextTimelineRow(row) {
+        let next = row + 1;
+        if (next >= timelineRowsCount) next = 0;
+        for (let c = 1; c <= 11; c++) {
+            if (isMarkerItem(timelineData[next + '_' + c])) return 0;
+        }
+        return next;
+    }
+
+    function drawPlayhead() {
+        let line = document.getElementById('tlPlayLine');
+        if (!line) return;
+        let tab = document.getElementById('tab-timeline');
+        if (!tab || !tab.classList.contains('active')) return;   // nothing to draw on a hidden tab
+        if (!tlHead.playing) { line.style.display = 'none'; return; }
+
+        let delay = tlHead.delay > 0 ? tlHead.delay : 20000;
+        let nowMs = performance.now();
+        let elapsed = tlHead.elapsed + (nowMs - tlHead.at);
+        if (elapsed < 0) elapsed = 0;
+
+        // PREDICT THE ROW CHANGE. The row advance is only LEARNED from /diag, once a second
+        // while playing - so without this the line sits at the end of the finished row until
+        // the poll arrives and then snaps: that is the stall as it passes a row. The page
+        // already knows every row's length and where the show ends, so it can make the
+        // transition itself and the next poll merely confirms it. The board stays the master.
+        //
+        // The loop guard covers a page that has been in the background, where throttled
+        // timers can leave the elapsed time spanning several rows at once.
+        // (When per-row timings arrive, this is the place that must take the NEXT row's
+        // duration rather than the global one.)
+        let moves = 0;
+        while (elapsed >= delay && moves < timelineRowsCount) {
+            elapsed -= delay;
+            tlHead.row     = nextTimelineRow(tlHead.row);
+            tlHead.elapsed = elapsed;
+            tlHead.at      = nowMs;
+            tlHead.shown   = elapsed;
+            tlHead.shownRow = tlHead.row;
+            highlightTimelineRow(tlHead.row + 1, true);   // the slot highlight moves with it
+            moves++;
+        }
+        if (elapsed > delay) elapsed = delay;      // a very long gap: hold, the poll will correct
+
+        // NEVER BACKWARDS WITHIN A ROW. By the time a poll is processed it is already stale,
+        // so re-syncing could step the line UP by the request time - the "jumps back in time"
+        // twitch. Taking the largest value keeps it monotonic, and a row change resets it, so
+        // the correction cannot accumulate.
+        if (tlHead.shownRow === tlHead.row && elapsed < tlHead.shown) elapsed = tlHead.shown;
+        tlHead.shown = elapsed; tlHead.shownRow = tlHead.row;
+
+        let probe = document.querySelector('.timeline-cell[data-row="' + tlHead.row + '"]');
+        if (!probe) { line.style.display = 'none'; return; }
+        line.style.display = 'block';
+        // Top of the row -> bottom of the row over the slot's length. The bottom of one row
+        // IS the top of the next, so the descent is continuous across slots.
+        line.style.top = (probe.offsetTop + probe.offsetHeight * (elapsed / delay)).toFixed(1) + 'px';
+    }
+
+    // The line is redrawn five times a second, so the tick touches two style values and
+    // nothing else. While the show is stopped there is nothing to draw and it does no work.
+    setInterval(() => { if (tlHead.playing) drawPlayhead(); }, 200);
 
     // ---- UNSAVED-CHANGE DETECTION -------------------------------------------------
     // The BOARD plays what is STORED on it; the page's grid is only a draft until it is
@@ -2328,7 +2729,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
     function timelineDraftJson() {
         let d = document.getElementById('timelineDelaySlider');
-        return JSON.stringify({ delay: (d ? d.value : '20'), items: timelineData });
+        return JSON.stringify({ delay: (d ? parseFloat(d.value) : 20), items: timelineData });
     }
     function playlistDraftJson() { return JSON.stringify({ items: playlistItems }); }
 
@@ -2341,17 +2742,25 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         let dirtyPl = (playlistDraftJson()  !== savedPlaylistJson);
         if (dirtyTl || dirtyPl) {
             showDialog('Timeline will be saved',
-                       'The board plays what is SAVED on it, so this draft cannot start yet.'
-                       + (dirtyPl ? ' The playlist will be saved too.' : '')
-                       + ' Press PLAY again to start the show.',
+                       'The board plays what is SAVED on it, so this draft is saved first'
+                       + (dirtyPl ? ' (the playlist too)' : '')
+                       + ' and the show then starts on its own.',
                        'OK',
                        function () {
-                           saveTimelineData(true);
-                           if (dirtyPl) savePlaylistData(true);
-                           timelineStatus('Saved - press PLAY again to start.');
+                           // SAVE, then START - no second press. The playback call WAITS for
+                           // the save to land, because the board plays the file it has just
+                           // been handed: starting first would run the OLD timeline.
+                           let jobs = [saveTimelineData(true)];
+                           if (dirtyPl) jobs.push(savePlaylistData(true));
+                           Promise.all(jobs).then(startTimelinePlayback);
+                           timelineStatus('Saved - starting...');
                        });
             return;
         }
+        startTimelinePlayback();
+    }
+
+    function startTimelinePlayback() {
         fetch('/timeline-play', { cache: 'no-store' })
             .then(r => r.text())
             .then(t => { timelineIsPlaying = true; timelineStatus(t); note('timeline-play OK'); })
@@ -2379,7 +2788,11 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                     timelineData = d.items;
                     if (d.delay) {
                         let s = document.getElementById('timelineDelaySlider');
-                        if (s) { s.value = d.delay; updateTimelineDelayText(); }
+                        if (s) { s.value = d.delay; }
+                        // The board's delay becomes the one the grid labels describe, because
+                        // this is the value its show is running at.
+                        tlSavedDelaySec = parseInt(d.delay, 10) || tlSavedDelaySec;
+                        applyTimelineRowLabels();
                     }
                     renderTimelineGrid();
                     savedTimelineJson = timelineDraftJson();   // what the board holds now
@@ -2423,7 +2836,8 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         // up to date. Re-reading the UI after the round-trip could record an edit the
         // user made while the request was in flight as "already saved".
         let payloadJson = timelineDraftJson();
-        fetch('/save-timeline', {
+        // Returns the promise: the PLAY guard waits for the save to land before starting.
+        return fetch('/save-timeline', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: payloadJson
@@ -2431,6 +2845,10 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         .then(() => {
             triggerSaveFlash();
             savedTimelineJson = payloadJson;
+            // The labels are NOT updated from the slider here: the board reports its own delay
+            // in /diag and the labels follow THAT, so a save that failed to land cannot leave
+            // the grid describing a show the board is not running.
+            applyTimelineRowLabels();
             timelineStatus('Timeline saved to the board (' + Object.keys(timelineData).length + ' cells).');
             if (!quiet) alert('Timeline saved successfully!');
         })
@@ -2630,7 +3048,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 // the three it does not report keep stale browser values which are then
                 // written back on the next save.
                 if (Array.isArray(cfg.themeColorsAll)) {
-                    const themeOrder = ['Disco', 'Christmas', 'Halloween', 'Animations'];
+                    const themeOrder = ['Disco', 'Christmas', 'Halloween'];
                     for (let t = 0; t < cfg.themeColorsAll.length && t < themeOrder.length; t++) {
                         let tn = themeOrder[t];
                         if (!themePresets[tn] || !Array.isArray(cfg.themeColorsAll[t])) continue;
@@ -2685,10 +3103,17 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 // screen wake) blanked a running display and made it look like
                 // the system had "shut down". The firmware boots dark on its own;
                 // use the "All Off" button when you actually want outputs off.
-                fetchDiag();
                 // Keep the diagnostics live: "NOW UP" restarting from 0 means
                 // the board rebooted, and the reason survives the reset.
-                setInterval(fetchDiag, 3000);
+                //
+                // The interval is NOT fixed. /diag also carries the PLAYBACK LINE, and the
+                // line has to be in the right place "at that precise moment" - so while the
+                // show is running it is asked once a second, and a slot change appears at
+                // once instead of up to three seconds late. Idle, three seconds is plenty.
+                (function pollDiag() {
+                    fetchDiag();
+                    setTimeout(pollDiag, tlHead.playing ? 1000 : 3000);
+                })();
                 updateVuAvailability();
             });
     };
@@ -2761,6 +3186,27 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                         : (parseInt(j.tlLoaded, 10) === 1
                              ? 'Timeline loaded, STOPPED.'
                              : 'No timeline stored on the board.'));
+
+                    // THE PLAYHEAD's source of truth: which row, how long it is, and how much
+                    // of it has already gone. Everything else the line needs is interpolation.
+                    if (j.tlElapsedMs !== undefined) {
+                        tlHead.playing = tlIsPlaying;
+                        tlHead.row     = tlLiveRow - 1;
+                        tlHead.elapsed = parseInt(j.tlElapsedMs, 10) || 0;
+                        tlHead.delay   = parseInt(j.tlDelayMs, 10) || 20000;
+                        tlHead.at      = performance.now();
+                        // THE BOARD'S ROW LENGTH IS WHAT THE LABELS DESCRIBE, so they are
+                        // re-derived from it here rather than from a page-side guess made when
+                        // a save was sent. This is what stops the grid and the bar from ever
+                        // telling different stories - and it is why "press SAVE" only clears
+                        // once the board actually confirms the new delay.
+                        let secNow = Math.round(tlHead.delay / 1000);
+                        if (secNow > 0 && secNow !== tlSavedDelaySec) {
+                            tlSavedDelaySec = secNow;
+                            applyTimelineRowLabels();
+                        }
+                        drawPlayhead();          // show a slot change at once, not 3s later
+                    }
                 }
             })
             .catch(e => note('diag FAILED -> ' + e.message));

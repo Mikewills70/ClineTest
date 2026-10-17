@@ -53,7 +53,6 @@ struct PlaylistItem {
   bool enable240V;
   char pattern240V[32];
   bool audioEnabled240V;
-  float clockDelay240V;
   int antifreeze240V;
   float speed240V;
   int qty240V;

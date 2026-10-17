@@ -39,6 +39,11 @@ int portColorOrders[NUM_PORTS] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2}; // Default to B
 // NOTE: ledShowAll()/ledClearAll() are defined further DOWN, after the pattern
 // type declarations. The Arduino builder inserts its automatic prototypes just
 // before the FIRST function definition in the sketch, so defining a function up
+// NOTE: the reasoning behind the longer comments in this sketch lives in CODE_NOTES.md -
+// the audio paths, the Chase's two modes, the traps that have cost real time, and what is
+// deliberately deferred. Flash is at ~92%, so explanations that need a paragraph go there
+// and the code keeps the one-line "why" with a pointer.
+//
 // here would push every prototype above "enum LedPattern" and break the build.
 
 const int channelPins[10] = {11, 12, 13, 14, 21, 38, 39, 40, 41, 42};
@@ -48,7 +53,6 @@ WebServer server(80);
 
 // ---- Global runtime settings ----
 bool audioEnabled = true;
-float clockDelay = 1.0;
 int antifreeze = 2;
 
 // Separate active pattern per section (240V relay channels vs WS2811 strips).
@@ -313,15 +317,15 @@ unsigned long lastVuPeakFall240V = 0;
 float vuSmoothLED = 0.0;
 
 // Theme preview palette from the UI (up to 8 colours), persisted across reboots
-// Theme colours are stored PER THEME: four themes x eight colours.
+// Theme colours are stored PER THEME: three themes x eight colours.
 //
-// They used to be a single set of eight, so saving one theme OVERWROTE the others
-// and on reboot every theme showed whichever was saved last. That is why Animations
-// appeared to store correctly and the rest reverted.
-#define THEME_COUNT 4
+// There were FOUR: "Animations" existed to hold the EFFECT colours, and the effects are
+// now defined per pattern (the Chase's tail, and whatever each other pattern gets) rather
+// than by a theme of their own - so it is gone, along with its stored colours.
+#define THEME_COUNT 3
 CRGB previewColors[8];                 // the CURRENT theme, used by the renderer
-CRGB themeStore[THEME_COUNT][8];       // all four themes, persisted
-const char* THEME_NAMES[THEME_COUNT] = { "Disco", "Christmas", "Halloween", "Animations" };
+CRGB themeStore[THEME_COUNT][8];       // all three themes, persisted
+const char* THEME_NAMES[THEME_COUNT] = { "Disco", "Christmas", "Halloween" };
 
 
 int previewColorCount = 0;
@@ -347,9 +351,6 @@ volatile bool blankReq     = false;  // request: blank all outputs
 volatile bool flashReq     = false;  // request: do the "saved" confirmation blink
 volatile int  calPort      = 0;      // RGB calibration test: port
 volatile int  calOrder     = 2;      // RGB calibration test: colour order
-// How long the calibration test stays lit. previewMode = 1 was previously latched
-// forever, so opening the Colours page showed the strip lit on the last test.
-#define CAL_TEST_MS 3000UL
 // SAVE CONFIRMATION FLASH: off -> on -> off.
 //
 // Requested several times and never built. The test pixels flash to acknowledge a
@@ -358,9 +359,6 @@ volatile int  calOrder     = 2;      // RGB calibration test: colour order
 #define CAL_FLASH_ON    540UL   // lit
 #define CAL_FLASH_END   900UL   // dark again
 unsigned long calFlashMs = 0;   // 0 = no flash running
-unsigned long calTestMs     = 0; // when the current test started
-
-unsigned long themePrevMs   = 0;     // when the theme preview was requested
 
 // ---------------------------------------------------------------------------
 // Per-strip pattern engine + Timeline + master brightness.
@@ -405,6 +403,9 @@ struct PortCfg {
   // value the renderer draws; colourRef[] is what was STORED, and what a saved
   // playlist item keeps. See the model below.
   uint32_t colourRef[4] = { 0xFFFFFF, 0xFFD000, 0xFF7000, 0xFF0000 };
+  // DARK: this port is blanked for the slot being played, because its timeline cell is
+  // EMPTY (or holds the END OF DISPLAY marker). Set only while the timeline owns the port.
+  bool  dark = false;
 };
 
 PortCfg portCfg[NUM_PORTS];
@@ -527,6 +528,50 @@ int           ledPosArr[NUM_PORTS]  = {0};
 int           ledDirArr[NUM_PORTS]  = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
 int           ledExplArr[NUM_PORTS] = {0};
 unsigned long ledStepMs[NUM_PORTS]  = {0};
+
+// ---- CHASE STATE (per port) ---------------------------------------------------------
+// The Chase is NOT on the step timer. With wrap OFF its movement follows the LEVEL of the
+// audio, capped by Speed; with wrap ON it interpolates ONE traverse between beats, so the
+// light lands at the far end just as the next beat arrives - the metronome.
+//
+// Nothing is drawn while a chase is still, so a silent strip does not re-transmit 500 times
+// a second. The step-timer patterns cannot avoid that, because they always step.
+static float         chaseAcc[NUM_PORTS]      = {0};   // fractional LEDs (wrap OFF)
+static unsigned long chaseTrigAt[NUM_PORTS]   = {0};   // when the last trigger landed
+static unsigned long chaseInterval[NUM_PORTS] = {0};   // measured gap between triggers
+static int           chaseFromPos[NUM_PORTS]  = {0};   // where this traverse started
+
+// THE CHASE is one pattern now: "Chase". chase_10_1 and knight_rider are still rendered if
+// an old playlist or timeline cell names them, but they are no longer listed and chase_10_1
+// now RESOLVES to this one, so old data plays the new behaviour.
+static inline bool isChasePat(int p) { return p == (int)LP_CHASE_1_10; }
+
+// A beat sensitivity at its LOWEST is the user saying "do not let sound drive this
+// pattern": the music has no effect at all and the timer takes over. The slider's floor is
+// 0.01, so that is the test - for EVERY beat-driven pattern, not just the Chase.
+static inline bool sensAtMin(float s) { return s <= 0.011f; }
+
+static inline int chaseDotLen(int p) { return constrain(portCfg[p].size, 1, 10); }
+// Speed for a chase is LEDs per second (1-50), NOT the seconds-per-step the other patterns
+// use. A value BELOW 1 can only be an item saved under the old meaning (e.g. 0.005), and
+// clamping it to the 1-floor left the dot crawling at ONE LED a second - which read as "does
+// not follow the bass at all". Such a value takes a workable default instead. A genuine 1
+// set by the user is not below 1, so it is kept.
+static inline float chaseSpeed(int p) {
+  float s = portCfg[p].speed;
+  if (s < 1.0f) return 20.0f;
+  return constrain(s, 1.0f, 50.0f);
+}
+static inline int chaseMaxPos(int p) {
+  int m = NUM_LEDS_PER_STRIP - chaseDotLen(p);
+  return m < 0 ? 0 : m;
+}
+
+// May this listener act on a beat? Minimum sensitivity means no - the pattern then runs on
+// its own timer instead (Moving Dot keeps stepping, it just stops being flipped).
+static inline bool beatActionAllowed(int i) {
+  return i < NUM_PORTS ? !sensAtMin(portCfg[i].beatSens) : !sensAtMin(beatSens);
+}
 
 #include <NeoPixelBus.h>
 
@@ -686,6 +731,21 @@ struct TlItem {
 TlItem tlData[TL_ROWS][TL_COLS];
 float tlDelaySec = 20.0f;
 int   tlRow = 0;
+
+// ---- END OF DISPLAY --------------------------------------------------------
+// A cell whose id is this marker is a BOUNDARY, not a pattern: it lights nothing. A row
+// containing one is the end of the show - reaching it restarts from row 1 and loops until
+// STOP. The marker is placed by the page as a whole row, but each cell can then be moved
+// or deleted on its own like any other item, so the test is per CELL, not per row.
+static inline bool isEndOfDisplayId(const char *id) {
+  return id && strcmp(id, "END_OF_DISPLAY") == 0;
+}
+static inline bool isEndOfDisplayRow(int r) {
+  if (r < 0 || r >= TL_ROWS) return false;
+  for (int c = 1; c < TL_COLS; c++)
+    if (tlData[r][c].used && isEndOfDisplayId(tlData[r][c].id)) return true;
+  return false;
+}
 // Which ports are currently OWNED by a timeline cell. Cleared when the timeline is
 // reloaded, so a deleted cell reverts its port to the page settings.
 bool  portCellOwned[NUM_PORTS] = {false};
@@ -830,7 +890,11 @@ String patternIdFromName(String name) {
   String n = name;
   n.trim();
   if (n.equalsIgnoreCase("Moving Dot")      || n.equalsIgnoreCase("moving_dot"))       return "moving_dot";
+  if (n.equalsIgnoreCase("Chase")           || n.equalsIgnoreCase("chase"))            return "chase_1_10";
   if (n.equalsIgnoreCase("Chase 1 - 10")    || n.equalsIgnoreCase("chase_1_10"))       return "chase_1_10";
+  // Chase 10 - 1 IS GONE as a pattern of its own; an old item that names it resolves to the
+  // one Chase, so it still plays - as the new behaviour.
+  if (n.equalsIgnoreCase("Chase 10 - 1")    || n.equalsIgnoreCase("chase_10_1"))       return "chase_1_10";
   if (n.equalsIgnoreCase("Chase 10 - 1")    || n.equalsIgnoreCase("chase_10_1"))       return "chase_10_1";
   if (n.equalsIgnoreCase("Explosion")       || n.equalsIgnoreCase("center_out_chase")) return "center_out_chase";
   if (n.equalsIgnoreCase("Knight Rider")    || n.equalsIgnoreCase("knight_rider"))     return "knight_rider";
@@ -851,6 +915,10 @@ String patternIdFromName(String name) {
   if (n.equalsIgnoreCase("VU Meter Dual")   || n.equalsIgnoreCase("vu_dual"))          return "vu_dual";
   if (n.equalsIgnoreCase("VU Meter Centre") || n.equalsIgnoreCase("vu_center_out"))    return "vu_center_out";
   if (n.equalsIgnoreCase("EQ")              || n.equalsIgnoreCase("eq"))               return "eq";
+  // END OF DISPLAY: a whole-row BOUNDARY marker, not a pattern. The board maps names to ids
+  // like this for every item, so the marker gets its own id - and can therefore never
+  // silently degrade into Moving Dot, which is what an unmapped name does.
+  if (n.equalsIgnoreCase("END OF DISPLAY")   || n.equalsIgnoreCase("END_OF_DISPLAY"))  return "END_OF_DISPLAY";
   n.toLowerCase();
   return n;
 }
@@ -911,7 +979,6 @@ void clearAllChannels() {
 void saveSettings() {
   preferences.begin("lightshow", false);
   preferences.putBool("audioEnabled", audioEnabled);
-  preferences.putFloat("clockDelay", clockDelay);
   preferences.putInt("antifreeze", antifreeze);
   preferences.putString("pattern240", activePattern240V);
   preferences.putString("patternLED", activePatternLED);
@@ -957,7 +1024,6 @@ void saveSettings() {
 void loadSettings() {
   preferences.begin("lightshow", true);
   audioEnabled = preferences.getBool("audioEnabled", true);
-  clockDelay = preferences.getFloat("clockDelay", 1.0);
   antifreeze = preferences.getInt("antifreeze", 2);
   activePattern240V = preferences.getString("pattern240", "moving_dot");
   activePatternLED  = preferences.getString("patternLED", "moving_dot");
@@ -1064,7 +1130,6 @@ void handlePing() {
 void handleGetSettings() {
   JsonDocument doc;
   doc["audioEnabled"] = audioEnabled;
-  doc["clockDelay"] = clockDelay;
   doc["antifreeze"] = antifreeze;
   doc["pattern240"] = activePattern240V;
   doc["patternLED"] = activePatternLED;
@@ -1176,7 +1241,6 @@ void handleCalibrateShow() {
   calPort  = port;
   calOrder = portColorOrders[port];      // the STORED value, not a page guess
   previewMode = 1;
-  calTestMs = millis();
   previewDirty = true;
   
   server.send(200, "text/plain", "Showing stored order " + String(calOrder) +
@@ -1204,8 +1268,7 @@ void handleCalibrateTest() {
     //   CALIB (at boot) is what was loaded back
     // A mismatch between those three IS the fault.
     
-    previewMode = 1;      // held by the display task, but only for CAL_TEST_MS
-    calTestMs = millis();
+    previewMode = 1;      // stays lit until SAVE, STOP, or leaving the tab
     previewDirty = true;
     showStatus(2);        // IO48: 2 blinks = calibrate-test received
     server.send(200, "text/plain", "Calibration Test Active");
@@ -1284,7 +1347,6 @@ void handleUpdate() {
   }
 
   if (doc.containsKey("audioEnabled")) audioEnabled = doc["audioEnabled"];
-  if (doc.containsKey("clockDelay"))   clockDelay = doc["clockDelay"];
   if (doc.containsKey("antifreeze"))   antifreeze = doc["antifreeze"];
 
   saveSettings();
@@ -1330,8 +1392,7 @@ void handleThemePreview() {
   // Colour only - rebuilding the ports here would also reset pattern/speed/size on
   // every strip and undo a timeline row that is currently playing.
   applyColourRefsToPorts();
-  themePrevMs = millis();
-  previewMode = 2;      // held by the display task, but only for CAL_TEST_MS
+  previewMode = 2;      // ONE-SHOT: rendered once and released at once (see the loop)
   previewDirty = true;
   showStatus(3);        // IO48: 3 blinks = theme-preview received
 
@@ -1527,6 +1588,11 @@ void handleTimelineStop() {
   // port-agnostic: identical settings render identically.
   for (int p = 0; p < NUM_PORTS; p++) {
     ledPosArr[p] = 0; ledDirArr[p] = 1; ledExplArr[p] = 0; ledStepMs[p] = 0;
+    // RELEASE the ports the timeline blanked. A blank cell in the playing slot sets
+    // portCfg[].dark, and the render loop SKIPS a dark port - so without this a stopped show
+    // left those strips unable to be lit by the page at all. The strips themselves are
+    // already blank (blankReq above), which is what STOP asks for; this only frees them.
+    portCfg[p].dark = false;
   }
   showStatus(1);
   server.send(200, "text/plain", "Timeline stopped - outputs dark, motion synchronised");
@@ -1625,6 +1691,12 @@ void handleDiag() {
   doc["tlLoaded"]  = tlLoaded  ? 1 : 0;
   doc["tlPlaying"] = tlPlaying ? 1 : 0;
   doc["tlRow"]     = tlRow + 1;              // 1-based, as the grid shows it
+  // THE PLAYHEAD. The page draws a line across the timeline for "where we are inside this
+  // slot", so it needs the time already spent in the row AND the row's length. Both come
+  // from here, so the line lands in the right place even if the page is opened halfway
+  // through a show: the board is the master, the page only interpolates between polls.
+  doc["tlElapsedMs"] = tlPlaying ? (uint32_t)(millis() - tlRowStart) : 0;
+  doc["tlDelayMs"]   = (uint32_t)(tlDelaySec * 1000.0f);
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
@@ -2270,8 +2342,11 @@ void rebuildListening() {
   for (int p = 0; p < NUM_PORTS; p++) {
     BeatListener &L = beatListen[p];
     LedPattern pat = (LedPattern)portCfg[p].pat;
-    // Only patterns that ACT on a beat are listeners at all.
-    L.active = (pat == LP_MOVING_DOT || pat == LP_KNIGHT_RIDER || pat == LP_CENTER_OUT);
+    // Only patterns that ACT on a beat are listeners at all. The CHASE listens because its
+    // wrap-ON metronome is TIMED by beats; with wrap OFF its movement comes from the level
+    // and a beat only reaches it as the antifreeze nudge (see actOnBeat).
+    L.active = (pat == LP_MOVING_DOT || pat == LP_KNIGHT_RIDER || pat == LP_CENTER_OUT ||
+                isChasePat((int)pat));
     if (!L.active) continue;
     L.chain = chainForBand((float)portCfg[p].freqHz);
     L.thr   = (1.0f - constrain(portCfg[p].beatSens, 0.01f, 1.0f)) * 60.0f;
@@ -2304,6 +2379,22 @@ static void actForListener(int i) {
     beatFired240 = true;
     g_flip240++;
   }
+}
+
+// ONE PLACE decides what a beat DOES, because two rules cut across the patterns: the Chase
+// is timed rather than flipped, and a minimum sensitivity means the music has no effect.
+static void actOnBeat(int i, unsigned long now, bool fromAntifreeze, bool isSub) {
+  if (i < NUM_PORTS && isChasePat(portCfg[i].pat)) {
+    // A REAL beat times the metronome. A SUB-beat (the half-way one) is NOT a beat for this
+    // purpose - it would reverse the traverse twice per beat - so it is ignored here.
+    // With wrap OFF the level drives every frame and no beat moves it at all; the ANTIFREEZE
+    // still does, in either mode, because it stands in for a beat that never came.
+    if (portCfg[i].wrap && !isSub) chaseBeat(i, now);
+    else if (fromAntifreeze)       chaseBeat(i, now);
+    return;
+  }
+  if (!beatActionAllowed(i)) return;     // minimum sensitivity: the timer takes over
+  actForListener(i);
 }
 
 // THE LISTENING STEP, once per render pass. Each listener compares its OWN chain's
@@ -2359,16 +2450,16 @@ static void listeningStep() {
     if (real) {
       if (L.firePrev) { fireInt[fireIntIdx] = now - L.firePrev; fireIntIdx = (fireIntIdx + 1) & 7; }
       L.firePrev = now;
-      actForListener(i);
+      actOnBeat(i, now, false, false);
       L.taken++;
     } else if (sub) {
       g_beatExtra++;
       if (L.firePrevX) { fireIntX[fireIntIdxX] = now - L.firePrevX; fireIntIdxX = (fireIntIdxX + 1) & 7; }
       L.firePrevX = now;
-      actForListener(i);
+      actOnBeat(i, now, false, true);
       L.taken++;
     } else if (antiFire) {
-      actForListener(i);
+      actOnBeat(i, now, true, false);
       L.taken++;
     }
   }
@@ -3126,8 +3217,10 @@ LedPattern patternEnumFromName(const String& nameIn) {
   name.toLowerCase();
   name.replace(' ', '_');
 
-  if (name == "chase_1_10")       return LP_CHASE_1_10;
-  if (name == "chase_10_1")       return LP_CHASE_10_1;
+  // "Chase" is the ONE chase now. chase_10_1 is matched only so an old saved item still
+  // resolves - and it resolves to the SAME pattern, because the reverse chase no longer
+  // exists as a thing of its own.
+  if (name == "chase" || name == "chase_1_10" || name == "chase_10_1") return LP_CHASE_1_10;
   if (name == "center_out_chase" || name == "explosion") return LP_CENTER_OUT;
   if (name == "knight_rider")     return LP_KNIGHT_RIDER;
   if (name == "vu_meter" || name == "vu_left")           return LP_VU_METER;
@@ -3336,6 +3429,76 @@ void advancePort(int port) {
   }
 }
 
+// A CHASE TRIGGER - a real beat, a half-way beat, or an antifreeze pulse. This is the only
+// place a chase moves because of an EVENT; the level-driven movement is in stepChase().
+static void chaseBeat(int p, unsigned long now) {
+  const int maxPos = chaseMaxPos(p);
+  if (portCfg[p].wrap) {
+    // METRONOME. One reversal per beat, and the dot travels to the far end over the gap
+    // measured to the previous beat, so it lands as the next one arrives.
+    unsigned long gap = (chaseTrigAt[p] == 0) ? 0 : (now - chaseTrigAt[p]);
+    // DEBOUNCE. An extra onset part-way through a traverse used to reverse it, so the dot
+    // went back to the end it had come from - the "many times it moves back the same way"
+    // report. A trigger arriving before 60% of the last measured beat is treated as noise
+    // and ignored, and an ignored trigger does NOT touch the timing.
+    unsigned long minGap = chaseInterval[p] ? (chaseInterval[p] * 6 / 10) : 150;
+    if (chaseTrigAt[p] != 0 && gap < minGap) return;
+    if (gap >= 150 && gap <= 4000) chaseInterval[p] = gap;
+    if (chaseInterval[p] == 0)     chaseInterval[p] = 500;
+    chaseTrigAt[p]  = now;
+    chaseFromPos[p] = ledPosArr[p];
+    // AIM FOR THE FAR END FROM WHEREVER THE DOT IS. Blindly alternating would send it back
+    // the way it came if an extra beat slipped through; aiming at the opposite end cannot.
+    ledDirArr[p] = (ledPosArr[p] > (maxPos / 2)) ? -1 : 1;
+  } else {
+    // One beat's worth of travel, the full Speed value in LEDs. Only the antifreeze and the
+    // minimum-sensitivity timer reach here: with audio, the LEVEL moves it every frame.
+    ledPosArr[p] += (int)chaseSpeed(p);
+    if (ledPosArr[p] > maxPos) ledPosArr[p] = 0;   // wrap OFF: restart at the start
+  }
+}
+
+// The per-frame chase update. Returns TRUE only when the dot MOVED, so a still chase draws
+// and transmits nothing.
+static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
+  const PortCfg &c = portCfg[p];
+  int maxPos = chaseMaxPos(p);
+  int was = ledPosArr[p];
+
+  if (c.wrap) {
+    // ONE TRAVERSE PER BEAT. With no beat for `antifreeze` seconds the traverse is re-armed
+    // anyway - which is what keeps a silent show bouncing, exactly like a beat would.
+    if (chaseTrigAt[p] == 0 ||
+        (now - chaseTrigAt[p]) > (unsigned long)(antifreeze * 1000)) chaseBeat(p, now);
+    unsigned long iv = chaseInterval[p] ? chaseInterval[p] : 500;
+    unsigned long el = now - chaseTrigAt[p];
+    if (el > iv) el = iv;
+    int from = chaseFromPos[p];
+    int to   = (ledDirArr[p] > 0) ? maxPos : 0;
+    ledPosArr[p] = from + (int)(((long)(to - from) * (long)el) / (long)iv);
+  } else {
+    // LEVEL-DRIVEN. Speed is the CAP and the level scales against it. At minimum
+    // sensitivity the level is ignored and Speed is used directly - the timer takes over.
+    // With Audio Detect OFF there is no level at all, so the antifreeze nudges it instead.
+    //
+    // The level goes through a SQUARE ROOT. The bass level sits low on most music (0.05-0.5),
+    // and used raw the dot barely moved on quiet passages - it looked as if it was not
+    // following the music at all. The curve lifts the quiet end without altering the loud
+    // end, where the Speed cap applies anyway.
+    float rate = 0.0f;
+    if (sensAtMin(c.beatSens) || sensAtMin(beatSens)) rate = chaseSpeed(p);
+    else if (audioEnabled)                            rate = sqrtf(audioBass) * chaseSpeed(p);
+    chaseAcc[p] += rate * ((float)dtMs / 1000.0f);
+    if (chaseAcc[p] >= 1.0f) {
+      int add = (int)chaseAcc[p];
+      chaseAcc[p] -= (float)add;
+      ledPosArr[p] += add;
+      if (ledPosArr[p] > maxPos) ledPosArr[p] = 0;         // wrap OFF: restart at the start
+    }
+  }
+  return ledPosArr[p] != was;
+}
+
 // Step every strip independently, then ONE ledShowAll() per frame.
 // The step rate comes ONLY from each strip's Speed setting - antifreeze never
 // affects speed, only direction, and only when Audio Detect is off.
@@ -3349,8 +3512,24 @@ void runLEDPattern() {
   }
 
   bool anyDrew = false;
+  // Frame delta for the chase. CAPPED, so a stall (a flash erase, a wifi burst) cannot
+  // fling the dot halfway down the strip in one frame.
+  static unsigned long lastChaseMs = 0;
+  unsigned long chaseDt = (lastChaseMs == 0) ? 2 : (now - lastChaseMs);
+  if (chaseDt > 100) chaseDt = 100;
+  lastChaseMs = now;
   for (int p = 0; p < NUM_PORTS; p++) {
     const PortCfg &c = portCfg[p];
+    // A DARK port stays blank: skipping it here is what keeps its black buffer black. The
+    // blank itself was written and transmitted once, at the moment the port went dark.
+    if (c.dark) continue;
+    // THE CHASE is not on the step timer: it is updated EVERY FRAME, because with wrap OFF
+    // its movement follows the audio level and with wrap ON it interpolates a traverse
+    // between beats. It reports whether it moved, so a still chase transmits nothing.
+    if (isChasePat(c.pat)) {
+      if (stepChase(p, now, chaseDt)) { drawPortPattern(p); anyDrew = true; }
+      continue;
+    }
     bool isVu = isLevelPat(c.pat);   // VU meters and the EQ are all level-driven
     unsigned long interval = isVu ? 25UL : (unsigned long)(constrain(c.speed, 0.002f, 5.0f) * 1000.0);
     // Floor the step at the frame rate (5 ms), NOT 20 ms. The 20 ms floor here was
@@ -3428,7 +3607,11 @@ void loadTimeline() {
   f.close();
   if (e) return;
 
-  tlDelaySec = doc["delay"] | 20.0f;
+  // jsonNumF, NOT `doc["delay"] | 20.0f`. The page sends the delay as a STRING, and the |
+  // operator silently returns its DEFAULT for a string - so the delay slider had no effect
+  // at all and the show always ran at 20s. The row really was 20s while the grid said 10s,
+  // which is why the moving bar looked like it was at the wrong speed: the bar was right.
+  tlDelaySec = jsonNumF(doc["delay"], 20.0f);
   if (tlDelaySec < 1.0f) tlDelaySec = 1.0f;
 
   JsonObject items = doc["items"].as<JsonObject>();
@@ -3510,13 +3693,25 @@ void applyTimelineRow(int row, bool force) {
 
   for (int p = 0; p < NUM_PORTS; p++) {
     TlItem *cell = (cellsOwn && tlData[row][p + 1].used) ? &tlData[row][p + 1] : nullptr;
-
-    // OWNERSHIP. While playing, a cell that appears for this port takes it over, and an
-    // EMPTY cell in a later row leaves the port playing what it has - it must not fall
-    // back to the page in the middle of a sequence. Ownership is cleared when the
-    // timeline is (re)loaded, so DELETING a cell and saving reverts the port to the page.
     if (cell) portCellOwned[p] = true;
-    if (!cell && portCellOwned[p]) continue;
+
+    // EMPTY CELL = DARK, for the length of that cell's slot. This used to KEEP whatever the
+    // port was already doing, so a blank cell was invisible - the strip simply carried on -
+    // and a blank cell must now mean "this strip is off for this period". The END OF
+    // DISPLAY marker lights nothing either, so it counts as blank here.
+    //
+    // Ownership is cleared when the timeline is (re)loaded, so deleting a cell and saving
+    // reverts the port to the page.
+    bool wantDark = cellsOwn && (!cell || isEndOfDisplayId(cell->id));
+    if (wantDark != portCfg[p].dark) {
+      portCfg[p].dark = wantDark;
+      if (wantDark) {
+        for (int i = 0; i < NUM_LEDS_PER_STRIP; i++) leds[p][i] = CRGB::Black;
+        ledDirty[p] = true;            // the blank has to be TRANSMITTED, not just held
+      }
+      ledPosArr[p] = 0; ledDirArr[p] = 1; ledExplArr[p] = 0; ledStepMs[p] = 0;
+    }
+    if (wantDark) continue;
 
     // ---- what this port SHOULD be ----
     LedPattern wantPat = cell ? renderBranchFor(String(cell->id)) : pagePat;
@@ -3577,7 +3772,7 @@ void applyTimelineRow(int row, bool force) {
   // playlist item and adopted by the timeline cell, and it must not affect any
   // other pattern or timeline entity. Tested on Moving Dot and working.
 
-  if (tlData[row][11].used) {                    // column 11 = 240V display
+  if (tlData[row][11].used && !isEndOfDisplayId(tlData[row][11].id)) {   // column 11 = 240V display
     TlItem &it = tlData[row][11];
     int newQty  = constrain(it.qty, 1, 4);
     int newSize = constrain(it.size, 1, 4);
@@ -3616,7 +3811,16 @@ void runTimelineSequencer() {
   unsigned long now = millis();
   if (now - tlRowStart >= (unsigned long)(tlDelaySec * 1000.0f)) {
     tlRowStart = now;
-    tlRow = (tlRow + 1) % TL_ROWS;
+    int next = (tlRow + 1) % TL_ROWS;
+    // END OF DISPLAY. The marker row is never PLAYED - it is a boundary - so reaching it
+    // restarts the show at row 1, and that loops until STOP. A dark pause between loops is
+    // made by leaving a row EMPTY, because an empty cell now blanks its strip.
+    if (isEndOfDisplayRow(next)) {
+      logAppend("timeline END OF DISPLAY at row %d -> restart at row 1", next + 1);
+      next = 0;
+      tlRowStart = now;
+    }
+    tlRow = next;
     applyTimelineRow(tlRow, false);
   }
 }
@@ -3908,6 +4112,20 @@ void setup() {
   }
 
   loadSettings();
+
+  // ONE-OFF CLEANUP: the dead "clockDelay" key - the Fallback Clock Speed box that was
+  // removed from the Master page - is still sitting in NVS from earlier builds. Nothing
+  // reads it any more. Erasing a key that is NOT there is a no-op that writes nothing, so
+  // this is harmless to leave in place: it reclaims the entry once and does nothing at all
+  // afterwards. The heartbeat's nvsFree count gains one entry when it takes effect.
+  preferences.begin("lightshow", false);
+  preferences.remove("clockDelay");
+  // The "Animations" theme is gone, so its eight stored colours (th3c0..th3c7) are swept
+  // once. The other three themes are untouched. Erasing keys that are not there writes
+  // nothing, so this is harmless to leave in.
+  for (int ti = 0; ti < 8; ti++) preferences.remove((String("th3c") + String(ti)).c_str());
+  preferences.end();
+
   loadPortCalibrations();
 
   // Populate previewColors from the restored theme. WITHOUT THIS the themes come
@@ -4040,7 +4258,7 @@ void loop() {
     if (e < CAL_FLASH_OFF1) {
       previewMode = 0; blankReq = true;                 // dark
     } else if (e < CAL_FLASH_ON) {
-      previewMode = 1; calTestMs = millis();            // lit (keeps the test alive)
+      previewMode = 1;                                  // lit
       if (previewDirty || (millis() - lastPreviewRender >= 500)) {
         previewDirty = false; lastPreviewRender = millis();
         renderCalibrationTest();
@@ -4054,18 +4272,21 @@ void loop() {
     blankReq = false;
     blankDisplays();
   } else if (previewMode == 1) {
-    // AUTO-EXPIRE THE CALIBRATION TEST.
+    // THE CALIBRATION TEST STAYS LIT until it is ended deliberately: SAVE (whose flash finishes
+    // by returning to the normal render), the STOP / leave-the-tab endpoint, or another
+    // preview taking over. There is NO time limit - choosing a colour match takes as long as
+    // it takes.
     //
-    // previewMode = 1 was latched with nothing to end it, so once a test ran the
-    // strip stayed lit showing it - which is why merely opening the Colours page
-    // showed the strip lit in the tested colours. The stop-on-leave endpoint does
-    // not help if the page is cached and calls /calibrate-test on entry, so the
-    // test now ends by itself. Press TEST again to re-arm.
-    if (millis() - calTestMs > CAL_TEST_MS) { previewMode = 0; previewDirty = true; }
+    // It used to auto-expire after 3 s. That was a workaround for the strip lighting up merely
+    // by OPENING the Colours page, and the PAGE has since been fixed for it: the tab-entry call
+    // only reads the stored order, so nothing arms a test except the TEST button. With the
+    // cause gone, the workaround is gone - and re-adding a timer here would take the test away
+    // from the user mid-decision.
+    //
     // Re-assert held previews periodically: they are otherwise only drawn when
     // marked dirty, so a single garbled frame (or anything that repaints the
     // strips) leaves them looking like a brief flash instead of staying on.
-    if (previewMode == 1 && (previewDirty || (millis() - lastPreviewRender >= 500))) {
+    if (previewDirty || (millis() - lastPreviewRender >= 500)) {
       previewDirty = false; lastPreviewRender = millis();
       renderCalibrationTest();
     }
@@ -4333,16 +4554,25 @@ void loop() {
       else
         en += snprintf(cels + en, sizeof(cels) - en, "-------- ");
     }
-    logAppend("cells row%d=%s", tlRow + 1, cels);
+    // The row's elapsed time rides on the same line, so the playback line the page draws
+    // can be checked from the serial log alone, without a phone: t/len in milliseconds.
+    logAppend("cells row%d=%s t=%lums/%lums", tlRow + 1, cels,
+              tlPlaying ? (unsigned long)(millis() - tlRowStart) : 0UL,
+              (unsigned long)(tlDelaySec * 1000.0f));
 
     // MOTION: each port's position and direction. Two ports with identical settings
     // must read the SAME here - that is what makes programming port-agnostic, and it is
     // how "the two strips are in mirror image" is proved rather than guessed at.
     char mot[NUM_PORTS * 7 + 1];
     int  mn = 0;
-    for (int p = 0; p < NUM_PORTS && mn < (int)sizeof(mot); p++)
-      mn += snprintf(mot + mn, sizeof(mot) - mn, "%d%c ",
-                     ledPosArr[p], ledDirArr[p] > 0 ? '>' : '<');
+    // A DARK port prints "D" in place of its position. That makes "which strips are blanked
+    // in this slot" readable straight off the log, which is the only way to check the
+    // empty-cell rule without a phone in front of the strips.
+    for (int p = 0; p < NUM_PORTS && mn < (int)sizeof(mot); p++) {
+      if (portCfg[p].dark) mn += snprintf(mot + mn, sizeof(mot) - mn, "D  ");
+      else mn += snprintf(mot + mn, sizeof(mot) - mn, "%d%c ",
+                          ledPosArr[p], ledDirArr[p] > 0 ? '>' : '<');
+    }
     logAppend("motion play=%d pos=%s", tlPlaying ? 1 : 0, mot);
 
   }
