@@ -1123,12 +1123,37 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     </div>
 
 <script>
+    // A CRASH IN THE PAGE IS INVISIBLE TO THE BOARD. If the browser throws while switching
+    // tabs - resizeCanvas() and the colour-box rebuild on the LED Display tab are the
+    // suspects - the firmware stays perfectly healthy while the screen is dead, and the log
+    // says nothing. Report it to the board (GET /pagerr) so it lands in /log.txt beside the
+    // requests, with the line and the stack.
+    window.addEventListener('error', function (e) {
+        fetch('/pagerr?m=' + encodeURIComponent(String(e.message || '?')) +
+              '&l=' + encodeURIComponent((e.lineno || 0) + ':' + (e.colno || 0)) +
+              '&s=' + encodeURIComponent(String((e.error && e.error.stack) || '').slice(0, 120)))
+            .catch(function () {});
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+        var r = e.reason || {};
+        fetch('/pagerr?m=' + encodeURIComponent('promise: ' + (r.message || r)) +
+              '&l=0:0&s=' + encodeURIComponent(String(r.stack || '').slice(0, 120)))
+            .catch(function () {});
+    });
+
     function switchTab(tabId) {
         // Leaving the PATTERNS tab returns the outputs to DARK. Choosing a pattern there
         // lights every port so it can be programmed, and that preview must not persist
         // once you have moved on. Suppressed while the TIMELINE is playing, so moving
         // around the UI can never kill a running show.
-        if (prevTab === 'patterns' && tabId !== 'patterns' && !timelineIsPlaying) {
+        //
+        // ...AND SUPPRESSED FOR A DISPLAY PAGE. The LED Display and 240V pages are where
+        // that pattern is programmed, so the pattern's own output IS the show there. Firing
+        // /init-off on the way in is exactly the "press LED Display and the lights die"
+        // fault: the log shows req /init-off -> display OFF right after the press. Only
+        // leaving for a NON-display page clears the Patterns preview.
+        const toDisplayPage = (tabId === 'ws2811' || tabId === '240v');
+        if (prevTab === 'patterns' && tabId !== 'patterns' && !timelineIsPlaying && !toDisplayPage) {
             fetch('/init-off', { method: 'POST' }).catch(() => {});
         }
         prevTab = tabId;

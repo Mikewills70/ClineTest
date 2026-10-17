@@ -69,6 +69,33 @@ never large locals.
 - **A full frame transmit is a hard ~4.7 ms** and cannot be shortened by code.
 - **Arduino auto-prototypes** are inserted above the sketch's first function, so any new
   function whose signature mentions a type declared lower down breaks the build.
+- **`dbgStage` is written ONLY by `loop()` and `runLEDPattern()`.** The `/diag` legend that
+  claimed "1 = web server, 5 = timeline, 9 = brightness save" was fiction: 5 and 9 are never
+  written, and the web task writes nothing. `prevStage=1` means "the top of `loop()`" — the
+  exact window the heap-floor guard (`ESP.getFreeHeap() < 15000 -> ESP.restart()`) sits in.
+  The web task's breadcrumbs are `dbgReq` (request in flight) and `dbgSub` (checkpoint).
+- **`POWER_ON` (reason 1) WIPES RTC.** Every RTC breadcrumb — including a boot line that
+  reads back as garbage like `prevUp=2960664895s` — is meaningless after one, and so is
+  "BOOT #2" (the counter lives in RTC too). That is a supply interruption, not a memory
+  overwrite. Reason 2 is the EN pin, 4 a panic, 6 the task WDT, 11 USB.
+- **IO48 carries THREE different signals**, which made "4 flashes" ambiguous and cost a test
+  round: 3 fast power-up flashes; 150 ms command blinks (1 = /live-tweak, 2 =
+  /calibrate-test, 3 = /theme-preview, 4 = /init-off); and the boot report. The report is now
+  slow (a 1 s marker, then 500 ms blinks), starts 1.5 s in, and cannot be cancelled — a
+  command blink waits for it instead of silently truncating it.
+- **Navigation sends requests by itself.** Leaving the Patterns tab fires `/init-off`
+  (`displayActive = false`, `blankReq = true`); opening any tab except Colours fires
+  `/calibrate-stop`, which blanks UNCONDITIONALLY even when no test was running. So a page
+  opening is NOT evidence that a tweak was sent — read the `tweak` line in the log.
+- **`handleLiveTweak()` has no 240V branch at all.** The 240V assignments (`activePattern240V
+  = id`, `speed240V`, `quantity240V`, `freq240V`, `mult240V`, `music240V`, `attack240V`,
+  `decay240V`, `wrap240V`, `invert240V`) sit INSIDE `if (section == "LED")`. Consequences: an
+  LED tweak overwrites every 240V global with the LED page's values (`speed240V` = Speed in
+  LEDs/s, which `run240VDisplayPattern()` then reads as SECONDS per step), and a 240V tweak
+  updates nothing but the global beat sensitivity. The comments in the function assume the
+  branch exists. Introduced 2026-10-14 (3a94152); no baseline ever had it. NOT proven to be
+  the reset — it is a separate real bug, and the page's single shared pattern selection means
+  the shared *id* is intended.
 
 ## 5. STAGE 2 — the exact edit list (agreed, not yet built)
 
@@ -125,3 +152,139 @@ verifiable (the tail visually, momentum by timing a traverse after a loud passag
 - **Tunable band for the Chase** (Stage 1b): swap the level source from `audioBass` to the
   port's own band, 40 Hz–8 kHz, one octave wide, with the Frequency row becoming a band
   centre for this pattern.
+
+## 7. Crash instruments — what to read, and in what order
+
+Added 2026-10-17 (session 2). Read them in this order:
+
+1. **The boot report on IO48** (needs no PC). Three fast power-up flashes, then 1.5 s, then
+   ONE LONG 1 s flash ("this is the boot report"), then the previous reset reason in 500 ms
+   blinks: 1 = POWER_ON, 2 = EN pin, 3 = software (`ESP.restart()` — the heap-floor guard is
+   the one that sits at stage 1), 4 = PANIC, 6 = task WDT, 9 = brown-out, 11 = USB.
+   A burst of FAST flashes with no 3-flash preamble is a COMMAND code (4 = /init-off), not a
+   reset. That distinction is the whole point of the marker flash.
+2. **`prevStage` / `prevReq` / `prevSub`** — `/diag`, and the `BOOT #` line in `/log.txt`.
+   Meaningful when the run ended in a panic or a watchdog. GARBAGE after POWER_ON.
+3. **`lastReq` / `lastReqUpSec` / `lastReqHeap`** — `/diag`. Kept in NVS, so they survive a
+   power cut: the only breadcrumb that means anything after a supply dip. Together with
+   `boots`/`erases` they say whether the run died on power rather than in the firmware.
+4. **The `tweak` line** in `/log.txt` (change-only, so a slider drag cannot flood it):
+   `tweak <section>|<pattern>|<colour count> bytes=… heap=…`. If opening a page produces no
+   such line, that page sends no tweak at all — and the fault is in `/calibrate-stop` or
+   `/init-off`, both of which blank on their own.
+
+`dbgSub` inside `handleLiveTweak()`: 1 = JSON parsed, 2 = scalars read, 3 = section branch
+finished, 4 = per-port config rebuilt, 5 = reply about to go. A `prevReq=/live-tweak` with a
+`prevSub` below 5 names the branch, the colour parse or `applyTimelineRow` as the culprit.
+
+## 8. Speed: one value, four units (root cause found 17 Oct)
+
+`advancePort()`'s step timer clamps the shared Speed to **seconds per step**:
+
+    unsigned long interval = constrain(c.speed, 0.002f, 5.0f) * 1000.0;   // LED step timer
+
+The Chase's Speed is **LEDs per second** (1-50) and the dot patterns' Speed is **seconds per
+step** (0.002-0.5), but `speedLED` is ONE variable. So a Chase Speed of 20 arriving at Moving
+Dot means 20 s/step, the timer clamps it to its 5 s ceiling, and the dot crawls — the "it runs
+very slowly" report, confirmed twice by the user (Moving Dot and Explosion).
+
+Fix — **WITHDRAWN, and the direction corrected by the user (17 Oct)**: a page-side rescale was
+built first (replacing an out-of-range Speed with a per-pattern default on a pattern change).
+The user rejected it, and correctly: **Moving Dot's behaviour is baseline-correct and must not
+be altered.** Speed = seconds per step is right for the dot family; what is wrong is that the
+CHASE — whose Speed is LEDs per second — writes into the same variable and the same port field.
+**So the Chase is what must be corrected, not the dot patterns.** The rescale was reverted
+(`applyParamRanges()` is byte-identical to the baseline again), and the pattern-range specs
+(`PATTERN_PARAMS`) were never touched.
+
+`portCfg[].speed` is read as seconds per step by the generic LED step timer and as LEDs per
+second by `stepChase()` — one field, two units. The three ways to fix that, none of them
+touching the dot path:
+
+- **(A) Give the Chase its own parameter** (`chaseRate`, LEDs/s) with its own control, stored
+  separately through NVS / playlist item / timeline cell, so the shared value is never written
+  by the Chase and the dot family never sees a Chase value. Structurally the honest fix; the
+  plumbing mirrors the `effect`/`momentum` list in §5.
+- **(B) Convert on a pattern change, both ways** (seconds/step <-> LEDs/s = 1/rate), page-side.
+  Mathematically equivalent motion, but Moving Dot's stored number still changes — which is
+  what the user objected to.
+- **(C) The same conversion in the firmware** rather than the page.
+
+Awaiting the user's choice. The `tweak` log line now carries the Speed the page sent, so
+whichever fix is chosen can be verified from the log rather than argued about:
+
+The `tweak` log line now carries the value, so the next test proves it end to end:
+
+    tweak LED|moving_dot|4 speed=0.020 bytes=302 heap=…
+
+## 9. `/tail` — the live log, readable WHILE A SHOW RUNS
+
+`logService()` deliberately never writes flash during a show (a LittleFS write is an erase that
+freezes both cores), so `/log.txt` goes **deaf exactly when the instrument matters**: a run
+whose log stopped at 50 s while the board was at 264 s is what exposed this. `logAppend()`
+therefore also keeps the last 40 lines in RAM (`logRecent`, 6.4 KB, written under the same
+mutex) and `/tail` serves them in order. `/log.txt` is untouched — it is the durable record;
+`/tail` is the live one. `read_board_log.ps1` fetches all three and prints the tail in full.
+`/diag` and `/tail` are fetched with caching defeated: Windows will otherwise replay a `/diag`
+from ten minutes ago, which cost a diagnostic round.
+
+`req` marks now name every request (`req /init-off heap=…`), `display ON/OFF`, `blank`, and a
+page-side `PAGE ERROR` (via `/pagerr`) — so a request, a blanking, a display transition and a
+browser exception all land in the same ordered stream.
+
+### What the first read of the log actually showed (v21 run, 595 s)
+
+- **No reset and no stall.** One `BOOT #` line for the whole run; heartbeats every 30 s from
+  30 s to 570 s; heap flat 178-184 KB (min 156 KB); no `HEAP FLOOR`, no `[slow]` render; and
+  after the run ended, `/diag` reported `prevUpSec=595 prevStage=4 prevReq="none"
+  prevHeap=178356`. Stage 4 is the idle tail of `loop()` — the "crash" left no trace of a
+  fault at all, which is exactly why IO48 stayed quiet.
+- **The LED Display page sends NO `/live-tweak`.** The whole run contains exactly one tweak
+  line: `[86s] tweak LED|moving_dot|4 bytes=302` (selecting Moving Dot on the Patterns tab).
+  So the colour array of the LED branch — the handover's prime suspect — is never sent when
+  the page is opened, and cannot be the cause of a page-open fault. Opening a tab sends only
+  `/calibrate-stop` (every tab but Colours) and `/init-off` (leaving Patterns); BOTH blank.
+- **The 240V tweak is swallowed by the page.** `liveParamChanged()` uses ONE shared
+  `window.liveTimer` for both sections, so `choosePattern()`'s `liveParamChanged('240V')`
+  immediately followed by `liveParamChanged('LED')` cancels the 240V request: only the LED
+  tweak is ever sent. That is why the log never shows a `240V|…` tweak, and it explains why
+  the missing 240V branch in `handleLiveTweak()` went unnoticed — the LED branch writes both
+  engines, so the 240V side still followed the pattern by accident. **Restoring the branch
+  must therefore be done together with the debounce fix** (one timer per section, or send
+  both), or the 240V engine would stop following the pattern selection altogether.
+
+### What the second read showed — and the two fixes it produced (v23, 17 Oct)
+
+The user's report was "Moving Dot was selected, the display went dark a few seconds later".
+The log of that run, with the new instruments:
+
+    28s req /settings                                    (page loaded)
+    32s req /calibrate-stop      blank displayActive=0    (switching TO the Patterns tab)
+    33s req /live-tweak          tweak LED|moving_dot|4 bytes=302
+    33s display ON pLED=moving_dot p240=moving_dot        (Moving Dot selected)
+    38s req /diag
+    38s req /init-off            display OFF              (THE PRESS — 5 s after selecting)
+    38s req /calibrate-stop      blank displayActive=0
+    47s 59s 71s req /diag                                 (page alive and polling normally)
+
+So the "crash" was the firmware being TOLD to switch the display off: `/init-off`, fired by
+the page on the way out of the Patterns tab, with `displayActive = false`. No reset (one
+BOOT line, unbroken uptime), no `PAGE ERROR`, no stall. Two fixes followed:
+
+1. **`switchTab()` no longer fires `/init-off` when the destination is a DISPLAY page**
+   (`ws2811` = LED Display, `240v`). Those are the pages the pattern is programmed on, so its
+   output IS the show; blanking on the way in is the fault. Other destinations still clear the
+   Patterns preview.
+2. **`handleCalibrateStop()` blanks only when there is something to clear**
+   (`wasPreview || !displayActive`). It is sent by EVERY tab switch; blanking unconditionally
+   darkened a running show. The `!displayActive` half keeps the original purpose — a stale
+   TEST FRAME must still be cleared when no pattern is driving the strips.
+
+Also seen in that run, and NOT explained by any of the above: the run started with
+`reason=1 (POWER_ON)` and the RTC erased, and the run before it had been **idle**
+(`shows=0`, nothing lit) when it died. So a supply interruption happened with no load
+switching at that moment — which rules the strips' inrush out as the cause of that one and
+points at the supply/cable. The boot report is the instrument for it: 3 fast flashes always
+mean a real reboot, and the slow count after the marker is the reason (1 = power, 9 = brownout,
+4 = panic).
+

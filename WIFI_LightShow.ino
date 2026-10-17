@@ -771,6 +771,10 @@ volatile unsigned long ledShowCount = 0;
 //   2 blinks = /calibrate-test  (RGB calibration)
 //   3 blinks = /theme-preview   (colour theme)
 //   4 blinks = /init-off
+// These are FAST (150 ms) and happen AT ONCE. They used to be confusable with the boot
+// report, which is SLOW (500 ms, plus a 1 s marker flash 1.5 s in) - "4 flashes on IO48"
+// was read as a reset when it was really /init-off. The report now owns IO48 until it
+// finishes; a command blink waits for it (see the boot-report block in loop()).
 // ---------------------------------------------------------------------------
 volatile int  statusBlinks = 0;      // toggles remaining
 unsigned long statusNext   = 0;
@@ -792,7 +796,12 @@ bool beatDetectedThisLoop = false;
 // RTC memory, which survives a panic / watchdog / brown-out reset (only a real
 // power cycle clears it). setup() copies it into NVS, so /diag can report it at
 // any time afterwards.
-//   dbgStage 1 = web server  2 = render  3 = status blinks  4 = diagnostics
+//   dbgStage 1 = top of loop()  2 = display work  3 = IO48 blinks  4 = diagnostics
+//            6 = 240V engine  7 = LED render  8 = LED transmit. ONLY loop() writes it
+//            (webTask() never does), so a reported "1" is NOT the web server - that
+//            misreading cost a session. See CODE_NOTES.md §3.
+//   dbgReq   the HTTP request IN FLIGHT and dbgSub a checkpoint inside it: the web task's
+//            own breadcrumbs, so a crash in a handler names itself and its line.
 // ---------------------------------------------------------------------------
 #define DBG_MAGIC 0x4C533951UL
 RTC_NOINIT_ATTR uint32_t dbgMagic;
@@ -802,6 +811,52 @@ RTC_NOINIT_ATTR uint32_t dbgHeap;
 RTC_NOINIT_ATTR uint32_t dbgLoops;
 RTC_NOINIT_ATTR uint32_t dbgBoots;      // boots since the last real power cycle
 RTC_NOINIT_ATTR uint32_t dbgNvsErase;   // how many of those erased the NVS
+RTC_NOINIT_ATTR uint32_t dbgReq;        // request in flight (0 = none)
+RTC_NOINIT_ATTR uint32_t dbgSub;        // checkpoint inside it (0 = none)
+RTC_NOINIT_ATTR uint32_t dbgReqN;       // requests served this run
+
+// REQUEST IDS. The list order IS the id, so the two can never drift apart.
+enum { REQ_NONE = 0, REQ_SETTINGS, REQ_LIVE_TWEAK, REQ_CAL_STOP, REQ_CAL_SHOW,
+       REQ_CAL_TEST, REQ_INIT_OFF, REQ_THEME_PREVIEW, REQ_TL_PLAY, REQ_TL_STOP,
+       REQ_SAVE_FLASH, REQ_BRIGHT, REQ_DIAG, REQ_LOG, REQ_AUDIO, REQ_PAGEERR, REQ_TAIL };
+static const char* const REQ_NAME[] = { "none", "/settings", "/live-tweak",
+  "/calibrate-stop", "/calibrate-show", "/calibrate-test", "/init-off",
+  "/theme-preview", "/timeline-play", "/timeline-stop", "/save-flash", "/brightness",
+  "/diag", "/log.txt", "/audio", "/pagerr", "/tail" };
+static inline const char* reqNameTxt(uint32_t r) {
+  return (r < sizeof(REQ_NAME) / sizeof(REQ_NAME[0])) ? REQ_NAME[r] : "?";
+}
+
+// The last request, kept in NVS because RTC does NOT survive a power cut - and a power cut
+// is exactly what a supply dip leaves behind (a share of the crashes are POWER_ON, where
+// every RTC breadcrumb is garbage). Rate-limited: a slider drag sends ~10 tweaks a second
+// and must not become flash wear or a stall.
+static void reqPersist(uint32_t r) {
+  static uint32_t lastR = 0; static unsigned long lastMs = 0;
+  if (r == lastR && (millis() - lastMs) < 1000) return;
+  lastR = r; lastMs = millis();
+  Preferences p; p.begin("diag", false);
+  p.putUInt("lastReq", r); p.putUInt("lastUp", (uint32_t)(millis() / 1000));
+  p.putUInt("lastHeap", (uint32_t)ESP.getFreeHeap());
+  p.end();
+}
+
+// EVERY request, by name, so the order at the moment of a fault is readable: which came
+// first, /init-off or /calibrate-stop, and whether a tweak came at all. /diag is polled
+// every 3 s so it is logged at most once every 10 s - the log must not become a flood.
+static void reqTrace(uint32_t r) {
+  static unsigned long lastDiagMs = 0;
+  if (r == REQ_DIAG && (millis() - lastDiagMs) < 10000) return;
+  if (r == REQ_DIAG) lastDiagMs = millis();
+  logAppend("req %s heap=%u", reqNameTxt(r), (unsigned)ESP.getFreeHeap());
+}
+
+// One line at the top of a handler. Cleared by the destructor on EVERY return path, so it
+// can never get stuck set.
+struct ReqMark {
+  explicit ReqMark(uint32_t r) { dbgReq = r; dbgReqN++; reqPersist(r); reqTrace(r); }
+  ~ReqMark() { dbgReq = REQ_NONE; dbgSub = 0; }
+};
 
 // Why the PREVIOUS run ended. Set in setup() and slow-blinked on IO48 after
 // boot so the cause is visible with no serial port AND no web page.
@@ -1127,7 +1182,19 @@ void handlePing() {
   server.send(200, "application/json", output);
 }
 
+// THE PAGE'S OWN CRASHES, reported by the page (window.onerror / unhandledrejection).
+// A JS exception while switching tabs is invisible to this firmware - the board stays
+// perfectly healthy while the screen looks dead - so the page sends it here and it lands in
+// /log.txt next to the requests, with the line and the stack.
+void handlePageErr() {
+  ReqMark _req(REQ_PAGEERR);
+  logAppend("PAGE ERROR %s @%s stack=%s", server.arg("m").c_str(),
+            server.arg("l").c_str(), server.arg("s").c_str());
+  server.send(200, "text/plain", "logged");
+}
+
 void handleGetSettings() {
+  ReqMark _req(REQ_SETTINGS);
   JsonDocument doc;
   doc["audioEnabled"] = audioEnabled;
   doc["antifreeze"] = antifreeze;
@@ -1236,6 +1303,7 @@ void loadPortCalibrations() {
 // instead. The device now reports what it has, so the button confirms rather than
 // contradicts.
 void handleCalibrateShow() {
+  ReqMark _req(REQ_CAL_SHOW);
   int port = server.arg("port").toInt();
   if (port < 0 || port >= NUM_PORTS) port = 0;
   calPort  = port;
@@ -1248,17 +1316,21 @@ void handleCalibrateShow() {
 }
 
 void handleCalibrateStop() {
+  ReqMark _req(REQ_CAL_STOP);
+  bool wasPreview = (previewMode != 0);
   previewMode = 0;
   previewDirty = true;
-  // ALSO BLANK THE STRIPS. Setting previewMode = 0 only returns to the normal
-  // render - with no pattern selected that leaves the previous test's pixels lit,
-  // so changing port showed the OLD port's colours and looked like they belonged
-  // to the newly selected port. Blank first, then the normal render takes over.
-  blankReq = true;
+  // BLANK ONLY WHEN THERE IS SOMETHING TO CLEAR. This is sent by EVERY tab switch, so
+  // blanking unconditionally made navigation darken a RUNNING show (the log shows the blank
+  // arriving while displayActive was 1). A stale TEST FRAME must still be cleared when
+  // nothing is driving the strips - with no pattern running, previewMode = 0 on its own
+  // leaves the previous test's pixels lit, which is why the second half is there.
+  if (wasPreview || !displayActive) blankReq = true;
   server.send(200, "text/plain", "Calibration test stopped");
 }
 
 void handleCalibrateTest() {
+  ReqMark _req(REQ_CAL_TEST);
   if (server.hasArg("port") && server.hasArg("order")) {
     calPort = server.arg("port").toInt();
     calOrder = server.arg("order").toInt();
@@ -1361,6 +1433,7 @@ void handleSave() {
 
 // Store the theme palette and preview it across every strip
 void handleThemePreview() {
+  ReqMark _req(REQ_THEME_PREVIEW);
   if (!server.hasArg("plain")) { server.send(400, "text/plain", "Bad Request"); return; }
   JsonDocument doc;
   if (deserializeJson(doc, server.arg("plain"))) {
@@ -1417,6 +1490,7 @@ void handleThemePreview() {
 
 // Live parameter updates from the 240V / LED configuration sliders
 void handleLiveTweak() {
+  ReqMark _req(REQ_LIVE_TWEAK);
   if (!server.hasArg("plain")) { server.send(400, "text/plain", "Bad Request"); return; }
   JsonDocument doc;
   if (deserializeJson(doc, server.arg("plain"))) {
@@ -1427,6 +1501,23 @@ void handleLiveTweak() {
   String section = String((const char*)(doc["section"] | "240V"));
   String name    = String((const char*)(doc["name"] | ""));
   String id = patternIdFromName(name);
+  dbgSub = 1;          // past the JSON parse: a crash before this line is the body/parse
+  // WHAT ARRIVED. Change-only: a slider drag sends ~10 tweaks a second, and a log line
+  // for each would be flash wear. This is what proves whether opening a page sends a
+  // tweak AT ALL - the question that decides which request the fault lives in.
+  {
+    JsonArray ca = doc["colour"].as<JsonArray>();
+    static String lastSig;
+    String sig = section + "|" + id + "|" + String(ca.isNull() ? 0 : (unsigned)ca.size());
+    if (sig != lastSig) {
+      lastSig = sig;
+      // The SPEED the page sent is the whole question for "it runs very slowly": Chase sends
+      // LEDs/s (1-50) and the dot patterns send SECONDS per step, and the value is shared.
+      logAppend("tweak %s speed=%.3f bytes=%u heap=%u", sig.c_str(),
+                (double)jsonNumF(doc["speed"], -1.0f),
+                (unsigned)server.arg("plain").length(), (unsigned)ESP.getFreeHeap());
+    }
+  }
 
   float  spd   = jsonNumF(doc["speed"],      1.0f);
   int    qty   = jsonNumI(doc["quantity"],   1);
@@ -1450,6 +1541,7 @@ void handleLiveTweak() {
     beatSens = constrain(bs, 0.01f, 1.00f);
   }
 
+  dbgSub = 2;          // scalars read; the section branch below is the prime suspect
   if (section == "LED") {
     if (id.length()) activePatternLED = id;
     speedLED = spd; quantityLED = constrain(qty, 1, 8); sizeLED = constrain(sz, 1, 10);
@@ -1483,6 +1575,7 @@ void handleLiveTweak() {
     wrap240V = wrap; invert240V = inv;
   }
 
+  dbgSub = 3;          // the section branch is done
   if (id.length()) displayActive = true;  // a pattern was selected: start displaying
   // Re-base the per-strip config on the LED-page settings, then re-apply the
   // current Timeline row (its columns 1-10 override the individual strips).
@@ -1491,6 +1584,7 @@ void handleLiveTweak() {
   // "stamp the page onto every port" step any more, because that is exactly what used
   // to overwrite timeline-controlled ports whenever the page was touched.
   applyTimelineRow(tlRow, false);
+  dbgSub = 4;          // the per-port config has been rebuilt
 
   previewMode = 0;                        // a new selection cancels any held preview/calibration
   // NOTE: no IO48 blink here. IO48 is reserved for the raw beat detector (one
@@ -1513,6 +1607,7 @@ void handleLiveTweak() {
   // Auto-saving on every tweak filled the small NVS partition and stopped the
   // WiFi driver storing its calibration data (phy_init error 0x1105).
 
+  dbgSub = 5;          // everything applied; only the reply is left
   server.send(200, "text/plain", "OK");
 }
 
@@ -1559,6 +1654,7 @@ void handleLoadTimeline() {
 // motion restarts from a known state instead of continuing from wherever it happened
 // to be.
 void handleTimelinePlay() {
+  ReqMark _req(REQ_TL_PLAY);
   if (!tlLoaded) loadTimeline();
   if (!tlLoaded) { server.send(404, "text/plain", "No timeline saved to play"); return; }
   tlRow      = 0;
@@ -1574,6 +1670,7 @@ void handleTimelinePlay() {
 // and blankReq makes the display task clear and transmit black once - the same path the
 // "All Off" button uses.
 void handleTimelineStop() {
+  ReqMark _req(REQ_TL_STOP);
   tlPlaying     = false;
   previewMode   = 0;
   displayActive = false;
@@ -1613,6 +1710,7 @@ void handleSaveTimeline() {
 // (see loop) because saving on every slider input event hammered - and
 // exhausted - the NVS partition.
 void handleBrightness() {
+  ReqMark _req(REQ_BRIGHT);
   if (server.hasArg("value")) {
     masterBrightness = constrain(server.arg("value").toInt(), 0, 100);
     applyMasterBrightness();
@@ -1630,6 +1728,7 @@ void handleBrightness() {
 // Audio Detect on/off. When OFF, the display changes direction on the
 // antifreeze timer only (never on beats, and antifreeze never affects speed).
 void handleAudioDetect() {
+  ReqMark _req(REQ_AUDIO);
   if (server.hasArg("enabled")) {
     String v = server.arg("enabled");
     audioEnabled = v.equalsIgnoreCase("true") || v == "1";
@@ -1642,6 +1741,7 @@ void handleAudioDetect() {
 
 // Crash diagnostics: why did the previous run end, and where was it?
 void handleDiag() {
+  ReqMark _req(REQ_DIAG);
   Preferences dp;
   dp.begin("diag", true);
   int      pReason = dp.getInt("reason", -1);
@@ -1653,6 +1753,11 @@ void handleDiag() {
   uint32_t pBoots  = dp.getUInt("boots", 0);
   uint32_t pErase  = dp.getUInt("erases", 0);
   uint32_t pFreeE  = dp.getUInt("freeE", 0);
+  uint32_t pReq     = dp.getUInt("req", 0);
+  uint32_t pSub     = dp.getUInt("sub", 0);
+  uint32_t pLastReq = dp.getUInt("lastReq", 0);
+  uint32_t pLastUp  = dp.getUInt("lastUp", 0);
+  uint32_t pLastHp  = dp.getUInt("lastHeap", 0);
   String   pLkW    = dp.getString("lkw", "");
   int32_t  pLk1    = dp.getInt("lk1", 0);
   int32_t  pLk2    = dp.getInt("lk2", 0);
@@ -1666,10 +1771,20 @@ void handleDiag() {
   doc["prevValid"]     = pValid;                  // 0 = RTC was lost (real power cycle)
   doc["prevReason"]    = pReason;                 // why the LAST run ended
   doc["prevReasonTx"]  = resetReasonText(pReason);
-  doc["prevStage"]     = pStage;                  // 1=web 2=display 5=timeline
-                                                  // 6=240V 7=LED 8=FastLED.show
+  // LEGEND CORRECTED: 5 and 9 are never written anywhere, and 1 is the TOP OF loop().
+  // The web task does not write dbgStage at all - prevReq/prevSub are its breadcrumbs.
+  doc["prevStage"]     = pStage;                  // 1=top of loop 2=display work
                                                   // 3=IO48 blinks 4=diagnostics
-                                                  // 9=deferred brightness save
+                                                  // 6=240V engine 7=LED render 8=transmit
+  doc["prevReq"]       = pReq;                    // the request in flight when it died
+  doc["prevReqTx"]     = reqNameTxt(pReq);
+  doc["prevSub"]       = pSub;                    // ...and how far into it
+  // THE POWER-CUT-PROOF PAIR. RTC is wiped by a real supply dip, so after a POWER_ON
+  // reset prevReq/prevStage are garbage - these two are in NVS and always mean something.
+  doc["lastReq"]       = pLastReq;
+  doc["lastReqTx"]     = reqNameTxt(pLastReq);
+  doc["lastReqUpSec"]  = pLastUp;                 // uptime when that request arrived
+  doc["lastReqHeap"]   = pLastHp;
   doc["prevUpSec"]     = pUpSec;                  // how long it survived
   doc["prevHeap"]      = pHeap;                   // free heap just before it died
   doc["prevLoops"]     = pLoops;
@@ -1747,6 +1862,15 @@ char             logQueue[LOG_QUEUE][160];
 volatile uint8_t logQHead = 0, logQTail = 0;
 portMUX_TYPE     logLineMux = portMUX_INITIALIZER_UNLOCKED;
 
+// THE LIVE TAIL (served at /tail). logService() deliberately does NOT write flash while a
+// show runs - a LittleFS write is an erase that freezes both cores - so /log.txt goes DEAF
+// exactly when the instrument matters most: the requests arriving at the moment of a fault.
+// A run whose log stopped at 50 s while the board was at 264 s is what this fixes. The last
+// lines are kept in RAM and served on the fly, show or no show. 40 x 160 B = 6.4 KB.
+#define LOG_RECENT 40
+char             logRecent[LOG_RECENT][160];
+volatile uint8_t logRecentN = 0;         // total lines kept (wraps at LOG_RECENT)
+
 void logAppend(const char* fmt, ...) {
   char buf[160];
   va_list ap;
@@ -1777,6 +1901,10 @@ void logAppend(const char* fmt, ...) {
     logQueue[logQHead][sizeof(logQueue[0]) - 1] = '\0';
     logQHead = next;
   }
+  uint8_t rs = (uint8_t)(logRecentN % LOG_RECENT);   // the live tail: never dropped
+  strncpy(logRecent[rs], buf, sizeof(logRecent[0]) - 1);
+  logRecent[rs][sizeof(logRecent[0]) - 1] = '\0';
+  logRecentN++;
   portEXIT_CRITICAL(&logLineMux);
 }
 
@@ -1831,6 +1959,7 @@ void serialDumpFile(const char* path) {
 }
 
 void handleLog() {
+  ReqMark _req(REQ_LOG);
   server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   if (!LittleFS.exists(LOG_PATH)) {
     server.send(200, "text/plain", "(log is empty)\n");
@@ -1843,6 +1972,24 @@ void handleLog() {
   }
   server.streamFile(f, "text/plain");
   f.close();
+}
+
+// THE LIVE LOG, readable while a show is running. /log.txt only ever holds what logService()
+// has flushed, and it does not flush during a show - so this answers "what happened at the
+// moment I pressed that button?" from RAM, whatever the display is doing.
+void handleTail() {
+  ReqMark _req(REQ_TAIL);
+  String out;
+  out.reserve(LOG_RECENT * 48);
+  portENTER_CRITICAL(&logLineMux);
+  uint8_t n = logRecentN < LOG_RECENT ? logRecentN : LOG_RECENT;
+  for (uint8_t i = 0; i < n; i++) {
+    uint8_t slot = (uint8_t)((logRecentN - n + i) % LOG_RECENT);
+    out += logRecent[slot];
+    out += '\n';
+  }
+  portEXIT_CRITICAL(&logLineMux);
+  server.send(200, "text/plain", out);
 }
 
 // ---------------------------------------------------------------------------
@@ -1930,6 +2077,7 @@ void handleBassThr() {
 }
 
 void handleSaveFlash() {
+  ReqMark _req(REQ_SAVE_FLASH);
   saveSettings();     // persist settings + theme colours (NVS only, no LED access)
   flashReq = true;    // the display task performs the confirmation blink
   server.send(200, "text/plain", "Flash executed");
@@ -1937,6 +2085,7 @@ void handleSaveFlash() {
 
 // Called by the UI on load to force all outputs off
 void handleInitOff() {
+  ReqMark _req(REQ_INIT_OFF);
   previewMode = 0;
   displayActive = false;   // back to the quiet, dark idle state
   blankReq = true;         // display task performs the blanking
@@ -3475,7 +3624,8 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     if (el > iv) el = iv;
     int from = chaseFromPos[p];
     int to   = (ledDirArr[p] > 0) ? maxPos : 0;
-    ledPosArr[p] = from + (int)(((long)(to - from) * (long)el) / (long)iv);
+    int np   = from + (int)(((long)(to - from) * (long)el) / (long)iv);
+    ledPosArr[p] = (np < 0 || np > maxPos) ? 0 : np;      // clamped: see the note below
   } else {
     // LEVEL-DRIVEN. Speed is the CAP and the level scales against it. At minimum
     // sensitivity the level is ignored and Speed is used directly - the timer takes over.
@@ -3488,12 +3638,19 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     float rate = 0.0f;
     if (sensAtMin(c.beatSens) || sensAtMin(beatSens)) rate = chaseSpeed(p);
     else if (audioEnabled)                            rate = sqrtf(audioBass) * chaseSpeed(p);
+    // SANITISE THE RATE. This is the crash: sqrtf() of a corrupt level is NaN, constrain()
+    // passes NaN straight through because BOTH of its comparisons are false for NaN, and
+    // (int)NaN is INT_MIN - so the position was thrown far negative, the renderer's `% N`
+    // gave a negative index, and setLed() wrote outside the strip buffer. Anything that is
+    // not a sane positive rate is treated as no movement at all.
+    if (!(rate > 0.0f && rate <= 1000.0f)) rate = 0.0f;
     chaseAcc[p] += rate * ((float)dtMs / 1000.0f);
+    if (!(chaseAcc[p] >= 0.0f && chaseAcc[p] <= 1000.0f)) chaseAcc[p] = 0.0f;
     if (chaseAcc[p] >= 1.0f) {
       int add = (int)chaseAcc[p];
       chaseAcc[p] -= (float)add;
-      ledPosArr[p] += add;
-      if (ledPosArr[p] > maxPos) ledPosArr[p] = 0;         // wrap OFF: restart at the start
+      int np = ledPosArr[p] + add;
+      ledPosArr[p] = (np < 0 || np > maxPos) ? 0 : np;    // clamped both ways
     }
   }
   return ledPosArr[p] != was;
@@ -3526,8 +3683,18 @@ void runLEDPattern() {
     // THE CHASE is not on the step timer: it is updated EVERY FRAME, because with wrap OFF
     // its movement follows the audio level and with wrap ON it interpolates a traverse
     // between beats. It reports whether it moved, so a still chase transmits nothing.
+    //
+    // Its DRAW, however, is capped like every other pattern. Asking for a show every frame
+    // saturated the bus (a ten-strip transmit is a hard ~4.7 ms) and starved the audio and
+    // web tasks - which is what an incoming UI request on top of it was tipping over. The
+    // position is still updated every frame; only the transmit is rate-limited.
     if (isChasePat(c.pat)) {
-      if (stepChase(p, now, chaseDt)) { drawPortPattern(p); anyDrew = true; }
+      bool moved = stepChase(p, now, chaseDt);
+      if (moved && (now - ledStepMs[p]) >= 5) {
+        ledStepMs[p] = now;
+        drawPortPattern(p);
+        anyDrew = true;
+      }
       continue;
     }
     bool isVu = isLevelPat(c.pat);   // VU meters and the EQ are all level-driven
@@ -4018,6 +4185,8 @@ void setup() {
   int      prevReason = (int)esp_reset_reason();
   uint32_t prevValid  = (dbgMagic == DBG_MAGIC) ? 1 : 0;
   uint32_t prevStage  = dbgStage;
+  uint32_t prevReq    = dbgReq;      // which request the web task was inside, if any
+  uint32_t prevSub    = dbgSub;      // and how far into it
   uint32_t prevUpSec  = dbgUpSec;
   uint32_t prevHeap   = dbgHeap;
   uint32_t prevLoops  = dbgLoops;
@@ -4029,12 +4198,15 @@ void setup() {
     dp.putInt("reason",  prevReason);
     dp.putUInt("valid",  prevValid);
     dp.putUInt("stage",  prevStage);
+    dp.putUInt("req",    prevReq);
+    dp.putUInt("sub",    prevSub);
     dp.putUInt("upsec",  prevUpSec);
     dp.putUInt("heap",   prevHeap);
     dp.putUInt("loops",  prevLoops);
     dp.end();
   }
   dbgMagic = DBG_MAGIC; dbgStage = 0; dbgUpSec = 0; dbgHeap = 0; dbgLoops = 0;
+  dbgReq = REQ_NONE; dbgSub = 0; dbgReqN = 0;
   dbgBoots = prevBoots + 1;
   dbgNvsErase = prevErase + (nvsWasErased ? 1 : 0);
   {   // NVS health + boot/erase counters. If "boots" and "erases" climb together
@@ -4053,9 +4225,11 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   // Diagnostic: 1=power-on, 4=panic/crash, 5=WDT, 9=brownout/reset
-  Serial.printf("Boot OK. Reset reason = %d (%s) | previous run: %lus stage=%u heap=%u\n",
+  Serial.printf("Boot OK. Reset reason = %d (%s) | previous run: %lus stage=%u heap=%u"
+                " req=%s sub=%u\n",
                 prevReason, resetReasonText(prevReason),
-                (unsigned long)prevUpSec, (unsigned)prevStage, (unsigned)prevHeap);
+                (unsigned long)prevUpSec, (unsigned)prevStage, (unsigned)prevHeap,
+                reqNameTxt(prevReq), (unsigned)prevSub);
 
   // 10 WS2811 strips, driven by FastLED's own ESP32 driver - see the note below.
   // ==========================================================================
@@ -4143,9 +4317,13 @@ void setup() {
   
 
   logTrimAtBoot();
-  logAppendNow("BOOT #%u reason=%d(%s) prevUp=%us prevStage=%u prevHeap=%u nvsFree=%u erased=%u out=%s",
+  // prevReq/prevSub name the request the web task was inside if the run ended in a panic.
+  // They are GARBAGE after a POWER_ON reset (RTC is lost with the supply) - in that case
+  // read lastReq from /diag, which is kept in NVS and does survive the cut.
+  logAppendNow("BOOT #%u reason=%d(%s) prevUp=%us prevStage=%u prevHeap=%u prevReq=%s prevSub=%u nvsFree=%u erased=%u out=%s",
             (unsigned)dbgBoots, prevReason, resetReasonText(prevReason),
             (unsigned)prevUpSec, (unsigned)prevStage, (unsigned)prevHeap,
+            reqNameTxt(prevReq), (unsigned)prevSub,
             (unsigned)nvsFreeE, nvsWasErased ? 1u : 0u,
             "fastled");
 
@@ -4174,6 +4352,8 @@ void setup() {
   // --- Web routes ---
   server.on("/", HTTP_GET, handleRoot);
   server.on("/ping", HTTP_GET, handlePing);
+  server.on("/pagerr", HTTP_GET, handlePageErr);
+  server.on("/tail", HTTP_GET, handleTail);
   server.on("/settings", HTTP_GET, handleGetSettings);
   server.on("/update", HTTP_POST, handleUpdate);
   server.on("/save", HTTP_POST, handleSave);
@@ -4248,6 +4428,18 @@ void loop() {
   // --- display work (timed: a long render blocks the web server) ---
   dbgStage = 2;
   unsigned long t0 = micros();
+  // Display ON/OFF transitions, ONE line each. This is what separates "the page asked for a
+  // blank" (/init-off, /calibrate-stop) from "the firmware stopped rendering". The request
+  // that caused it is the `req` line immediately above.
+  {
+    static bool wasActive = false;
+    if (displayActive != wasActive) {
+      wasActive = displayActive;
+      logAppend("display %s pLED=%s p240=%s heap=%u", displayActive ? "ON" : "OFF",
+                activePatternLED.c_str(), activePattern240V.c_str(),
+                (unsigned)ESP.getFreeHeap());
+    }
+  }
   if (flashReq) {
     flashReq = false;
     doSaveFlash();
@@ -4270,6 +4462,7 @@ void loop() {
     }
   } else if (blankReq) {
     blankReq = false;
+    logAppend("blank displayActive=%d preview=%d", displayActive ? 1 : 0, previewMode);
     blankDisplays();
   } else if (previewMode == 1) {
     // THE CALIBRATION TEST STAYS LIT until it is ended deliberately: SAVE (whose flash finishes
@@ -4366,31 +4559,47 @@ void loop() {
     saveSettingsPending = true;
   }
 
-  // --- one-off boot signal: SLOW-blink the previous reset reason on IO48 ---
-  // setup() already did the familiar 3 fast power-up flashes. After a 1.5 s
-  // pause this slow code (400 ms on/off) reports why the PREVIOUS run ended, so
-  // the cause is visible with no serial port and no web page - just count them:
-  //   1=POWER_ON  2=EXT_PIN  3=SOFTWARE  4=PANIC  5=INT_WDT
-  //   6=TASK_WDT  7=WDT  9=BROWNOUT  11=USB  12=JTAG
-  static int  bcLeft = -1;
-  static bool bcOn   = false;
+  // --- one-off BOOT REPORT on IO48: the previous reset reason, readable with no PC ---
+  // setup() has just done the 3 fast power-up flashes. Then, 1.5 s in:
+  //   ONE LONG 1 s flash  = "this is the boot report"
+  //   1 s pause, then the reason as 500 ms slow blinks:
+  //   1=POWER_ON 2=EXT_PIN 3=SOFTWARE 4=PANIC 5=INT_WDT 6=TASK_WDT 7=WDT 9=BROWNOUT
+  //   11=USB 12=JTAG.  (Reason 0 = unknown: the marker flash appears alone.)
+  //
+  // IT IS IMMUNE. It used to be CANCELLED by any command blink, so "4 flashes" could be
+  // /init-off (fast) or a PANIC (slow) - and a whole test round was lost to exactly that
+  // reading. It now takes IO48 until it finishes; the command blinker waits its turn.
+  static uint8_t bcPhase = 0;      // 0 waiting 1 marker ON 2 gap 3 counting 4 finished
+  static int     bcLeft  = 0;
+  static bool    bcOn    = false;
   static unsigned long bcNext = 0;
-  if (bcLeft < 0) { bcLeft = g_prevReason; bcNext = millis() + 1500; }
-  if (bcLeft > 0) {
-    if (statusBlinks > 0) {
-      bcLeft = 0;                                  // a command wants the LED: abort
-      digitalWrite(POWER_LED_PIN, LOW);
-    } else if ((long)(millis() - bcNext) >= 0) {
-      bcOn = !bcOn;
-      digitalWrite(POWER_LED_PIN, bcOn ? HIGH : LOW);
-      if (!bcOn) { bcLeft--; if (bcLeft == 0) digitalWrite(POWER_LED_PIN, LOW); }
-      bcNext = millis() + 400;
+  unsigned long bcNow = millis();
+  if (bcPhase == 0) {
+    if (bcNext == 0) bcNext = bcNow + 1500;
+    else if ((long)(bcNow - bcNext) >= 0) {
+      statusBlinks = 0;                                   // the report owns IO48 now
+      bcPhase = 1; bcOn = true; bcNext = bcNow + 1000;    // the marker
+      digitalWrite(POWER_LED_PIN, HIGH);
+    }
+  } else if ((long)(bcNow - bcNext) >= 0) {
+    if (bcPhase == 1) {                                   // marker ends
+      bcOn = false; digitalWrite(POWER_LED_PIN, LOW);
+      bcLeft = g_prevReason; bcPhase = 2; bcNext = bcNow + 500;
+    } else if (bcPhase == 2) {                            // gap ends
+      if (bcLeft <= 0) bcPhase = 4;
+      else { bcOn = true; bcPhase = 3; bcNext = bcNow + 500;
+             digitalWrite(POWER_LED_PIN, HIGH); }
+    } else {                                              // a reasons blink ends
+      bcOn = false; digitalWrite(POWER_LED_PIN, LOW);
+      if (--bcLeft <= 0) bcPhase = 4;
+      else { bcPhase = 2; bcNext = bcNow + 500; }
     }
   }
 
   // --- status blinks on IO48 (serial-free diagnostics) ---
   dbgStage = 3;
-  if (statusBlinks > 0 && millis() >= statusNext) {
+  // Yields to the boot report (bcPhase 1-3) - the two must never drive IO48 at once.
+  if (statusBlinks > 0 && (bcPhase == 0 || bcPhase >= 4) && millis() >= statusNext) {
     statusNext = millis() + 150;
     statusOn = !statusOn;
     digitalWrite(POWER_LED_PIN, statusOn ? HIGH : LOW);
