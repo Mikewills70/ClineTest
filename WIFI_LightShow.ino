@@ -365,6 +365,37 @@ unsigned long calFlashMs = 0;   // 0 = no flash running
 // Declarations live here so every handler can see them; implementations are
 // further down with the LED engine.
 // ---------------------------------------------------------------------------
+// ===========================================================================
+// PER-PATTERN PARAMETERS - ONE RECORD PER LED PATTERN
+//
+// THE RULE (user, 17 Oct 2026): EVERY pattern is unique. Nothing - no value, no colour, no
+// band, no threshold - is shared between patterns. Whatever is changed in Moving Dot must
+// have NO effect on Chase or any other pattern. (The 240V patterns are a separate table,
+// still to be defined; the two sections are independent of each other.)
+//
+// These records are the STORAGE. The speedLED/colourLED/... globals further up are kept as a
+// MIRROR of the SELECTED pattern's record, so every existing reader keeps working unchanged.
+// ===========================================================================
+#define LED_PAT_COUNT 6
+#define LED_PAT_VER   1        // bump when a field is added: an older blob is then ignored
+
+struct LedPatParams {
+  uint16_t ver;
+  uint32_t colour[4];          // references: T0..T7, RB, or #rrggbb
+  float    speed;              // seconds per step - EXCEPT the Chase, which is LEDs/second
+  float    beatSens;           // this pattern's own detection threshold
+  float    attack, decay;      // its own VU/EQ ballistics
+  float    peakDelay, peakSpeed;
+  float    momentum;           // effect: weight of the shed debris (0 = off)
+  int16_t  qty, size, mult, freqHz, peakDir;
+  uint8_t  wrap, invert, vuDir, effect, distance;
+};
+
+const char* const LED_PAT_IDS[LED_PAT_COUNT] = {
+  "moving_dot", "chase_1_10", "center_out_chase", "knight_rider", "vu_meter", "eq"
+};
+LedPatParams ledPats[LED_PAT_COUNT];
+
 enum LedPattern : int {
   LP_MOVING_DOT = 0, LP_CHASE_1_10, LP_CHASE_10_1, LP_CENTER_OUT,
   LP_KNIGHT_RIDER, LP_VU_METER, LP_VU_REV, LP_VU_DUAL, LP_VU_CENTER,
@@ -377,6 +408,99 @@ enum LedPattern : int {
 // old `>= LP_VU_METER` (which would swallow the EQ).
 static inline bool isVuPat(int p) { return p >= (int)LP_VU_METER && p <= (int)LP_VU_CENTER; }
 static inline bool isLevelPat(int p) { return isVuPat(p) || p == (int)LP_EQ; }
+
+// --- per-pattern records: the functions (the TYPES are declared above the enum, because the
+// Arduino builder inserts every prototype before the sketch's FIRST function definition) ---
+
+// Where a pattern that has never been set starts. The Chase's Speed is LEDs per second and
+// the dot family's is seconds per step, so the default differs per pattern - which is only
+// possible because every pattern now owns its own value.
+LedPatParams ledPatDefaultFor(int i) {
+  LedPatParams d = {};
+  d.ver = LED_PAT_VER;
+  d.colour[0] = 0xFFFFFF; d.colour[1] = 0xFFD000; d.colour[2] = 0xFF7000; d.colour[3] = 0xFF0000;
+  d.speed = 0.02f; d.qty = 1; d.size = 1; d.mult = 1; d.freqHz = 50;
+  d.wrap = 0; d.invert = 0; d.beatSens = 0.2f; d.attack = 0.15f; d.decay = 0.01f;
+  d.peakDelay = 0.5f; d.peakSpeed = 1.0f; d.peakDir = 0; d.vuDir = 0;
+  d.effect = 0; d.momentum = 0.0f; d.distance = 20;
+  if (i == 1) d.speed = 20.0f;              // the Chase: LEDs per second
+  return d;
+}
+
+// Which record a pattern ID belongs to. IDs no longer listed resolve to the pattern they
+// became (chase_10_1 and the old VU branches), so saved data still plays.
+int ledPatIndex(const String& id) {
+  String s = id; s.trim(); s.toLowerCase();
+  if (s == "chase_10_1") return 1;
+  if (s == "vu_meter_rev" || s == "vu_dual" || s == "vu_center_out") return 4;
+  for (int i = 0; i < LED_PAT_COUNT; i++) if (s == LED_PAT_IDS[i]) return i;
+  return 0;                                 // unknown -> Moving Dot, exactly as before
+}
+LedPatParams& ledPat(int i) { return ledPats[(i < 0 || i >= LED_PAT_COUNT) ? 0 : i]; }
+LedPatParams& ledSel()      { return ledPat(ledPatIndex(activePatternLED)); }
+
+// The selected pattern's record -> the globals every existing reader uses.
+void mirrorLedPat() {
+  LedPatParams& r = ledSel();
+  speedLED = r.speed; quantityLED = r.qty;  sizeLED = r.size;
+  wrapLED = r.wrap;   invertLED = r.invert; multLED = r.mult;
+  freqLED = r.freqHz; attackLED = r.attack; decayLED = r.decay;
+  beatSens = r.beatSens; freqThreshold = r.freqHz;
+  for (int i = 0; i < 4; i++) colourLED[i] = r.colour[i];
+  vuDirLED = (r.vuDir == 1) ? "RIGHT" : (r.vuDir == 2) ? "CENTRE" : (r.vuDir == 3) ? "ENDS" : "LEFT";
+}
+
+// The record as it was before this build: the single LED settings become the SELECTED
+// pattern's own values. Every other pattern starts from its defaults - nothing else could
+// legitimately have values, because until now nothing was stored per pattern.
+LedPatParams ledFromGlobals() {
+  LedPatParams r = ledPatDefaultFor(ledPatIndex(activePatternLED));
+  r.speed = speedLED; r.qty = quantityLED; r.size = sizeLED;
+  r.wrap = wrapLED;   r.invert = invertLED; r.mult = multLED;
+  r.freqHz = freqLED; r.beatSens = beatSens; r.attack = attackLED; r.decay = decayLED;
+  for (int i = 0; i < 4; i++) r.colour[i] = colourLED[i];
+  r.vuDir = (vuDirLED == "RIGHT") ? 1 : (vuDirLED == "CENTRE") ? 2 : (vuDirLED == "ENDS") ? 3 : 0;
+  r.ver = LED_PAT_VER;
+  return r;
+}
+
+// Read every pattern's own record. A missing or older-layout record is replaced by THAT
+// pattern's defaults, except the selected one, which is seeded from the single LED settings
+// this build replaces - so nothing already set is silently lost. Returns true when that
+// migration happened, and the boot line reports it.
+bool loadLedPatRecords() {
+  bool migrated = false;
+  int sel = ledPatIndex(activePatternLED);
+  Preferences p; p.begin("lightshow", true);
+  for (int i = 0; i < LED_PAT_COUNT; i++) {
+    LedPatParams tmp;
+    size_t n = p.getBytes((String("lp") + String(i)).c_str(), &tmp, sizeof(tmp));
+    if (n == sizeof(tmp) && tmp.ver == LED_PAT_VER) { ledPats[i] = tmp; }
+    else {
+      ledPats[i] = (i == sel) ? ledFromGlobals() : ledPatDefaultFor(i);
+      if (i == sel) migrated = true;
+    }
+    ledPatNormalise(i);
+  }
+  p.end();
+  return migrated;
+}
+
+void saveLedPatRecords() {
+  Preferences p; p.begin("lightshow", false);
+  for (int i = 0; i < LED_PAT_COUNT; i++) {
+    ledPats[i].ver = LED_PAT_VER;
+    p.putBytes((String("lp") + String(i)).c_str(), &ledPats[i], sizeof(LedPatParams));
+  }
+  p.end();
+}
+
+// MOVING DOT HAS NO WRAP (user, 17 Oct): the row is greyed out on the page, and the value is
+// forced OFF here as well - so a Wrap ticked before per-pattern records existed (or set by an
+// old timeline cell) can never make the dot bounce at the ends of the strip.
+void ledPatNormalise(int i) {
+  if (i == 0) ledPats[0].wrap = 0;
+}
 
 struct PortCfg {
   int   pat    = LP_MOVING_DOT;
@@ -528,6 +652,199 @@ int           ledPosArr[NUM_PORTS]  = {0};
 int           ledDirArr[NUM_PORTS]  = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
 int           ledExplArr[NUM_PORTS] = {0};
 unsigned long ledStepMs[NUM_PORTS]  = {0};
+
+// ---- MOVING DOT EFFECT: SHED DEBRIS (per port; RAM only, a live effect is never stored) ----
+// THE BEHAVIOUR (user, 17 Oct 2026): every time the dot REVERSES it sheds a little of itself.
+//   1..Distance/5 one-pixel pieces (max 4), RANDOMISED, leave from the dot's position in the
+//   direction it WAS travelling - an eruption from the point of reversal - then drift and dim
+//   on their own. Momentum is the WEIGHT of those pieces and is TIED to brightness: heavy
+//   slows fast AND dims fast, light keeps its speed and fades away. Debris dies at the
+//   Distance extent - the number of pixels the effect may use.
+//   EROSION: every TENTH reversal the dot loses one WHOLE pixel, all its dots together, so a
+//   3-pixel dot is gone after 30 reversals; a dot that is gone STAYS dark until the pattern is
+//   applied afresh (a timeline row, PLAY, or selecting the pattern again).
+// Effects = 0 or Distance = 0 means NONE of this - the pattern behaves exactly as before.
+#define MD_FRAGS 24                   // pieces per strip. Sized for the DEATH BLAST (the whole
+                                      // pool is used at once) - the ordinary debris recycles.
+struct MdFrag {
+  bool     alive;
+  bool     blast;      // part of the death blast: ignores Distance, and decays on its own terms
+  float    posf;       // CONTINUOUS position along the strip. A FLOAT deliberately: with a
+                       // whole-pixel integer, a slow piece rounds its frame step to zero and
+                       // never moves at all - it just fades where it spawned.
+  int8_t   dir;        // the direction the DOT was travelling when this broke off
+  float    speed;      // pixels per second, decaying with the weight
+  float    bright;     // 1.0 -> 0, decaying with the same weight
+  float    moved;      // pixels travelled so far: it dies at the Distance extent
+};
+static MdFrag   mdFrags[NUM_PORTS][MD_FRAGS];
+static uint8_t  mdFlips[NUM_PORTS];   // reversals since the last whole pixel was lost
+static uint8_t  mdLost[NUM_PORTS];    // whole pixels the dot has lost
+static uint32_t mdRng[NUM_PORTS];     // per-port randomiser state
+static unsigned long mdLastMs = 0;    // for the per-frame advance
+static float    mdLastDotPxS = 0;     // the dot's own speed at the last reversal (px/s)
+static float    mdLastMomFrac = 0;    // the Momentum fraction used at the last reversal (0..1)
+
+// The record a PORT's pattern belongs to. A port's pattern can differ from the page's
+// selection when a timeline cell sets it, so this is never the selected record by assumption.
+int ledPatIndexOfEnum(int pat) {
+  switch (pat) {
+    case (int)LP_MOVING_DOT:   return 0;
+    case (int)LP_CHASE_1_10:
+    case (int)LP_CHASE_10_1:   return 1;
+    case (int)LP_CENTER_OUT:   return 2;
+    case (int)LP_KNIGHT_RIDER: return 3;
+    case (int)LP_EQ:           return 5;
+    default:                   return 4;      // the four VU branches are ONE pattern
+  }
+}
+
+static inline uint32_t mdRand(int p) {        // xorshift: rand() has no place in a frame path
+  uint32_t x = mdRng[p] ? mdRng[p] : 0x9E3779B9u;
+  x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+  mdRng[p] = x;
+  return x;
+}
+
+// Is the effect live on this port? Moving Dot only, Effects > 0 and Distance > 0.
+static inline bool mdEffectOn(int p) {
+  if (portCfg[p].pat != LP_MOVING_DOT) return false;
+  LedPatParams& r = ledPat(ledPatIndexOfEnum(portCfg[p].pat));
+  return (r.effect > 0 && r.distance > 0);
+}
+
+// The dot's length WITH the effect's erosion. It only ever SHORTENS, and only the dot's own
+// pattern can do it: every other pattern, and Effects = 0, return Size exactly.
+static inline int mdDotLen(int p) {
+  int len = constrain(portCfg[p].size, 1, 10);
+  if (!mdEffectOn(p)) return len;
+  int left = len - (int)mdLost[p];
+  return (left < 0) ? 0 : left;
+}
+
+// Everything back to full: a fresh dot and no debris. Called when the pattern is applied
+// afresh - a timeline row, PLAY, or selecting the pattern again.
+void mdResetAll() {
+  for (int p = 0; p < NUM_PORTS; p++) {
+    mdFlips[p] = 0; mdLost[p] = 0;
+    mdRng[p] = 0x1234567u + (uint32_t)p * 2654435761u;
+    for (int k = 0; k < MD_FRAGS; k++) mdFrags[p][k].alive = false;
+  }
+}
+
+// THE DEATH BLAST. When the erosion takes the dot's LAST pixel the strip explodes from the
+// position where it died: a spray of one-pixel pieces radiating BOTH ways that fade to nothing.
+// It is the END of the display, not a repeatable effect, so it ignores the Distance extent (it
+// spans the whole strip) and its decay ignores Momentum - a heavy setting must not be able to
+// turn the ending into a fizzle. It clears the old debris as it goes: once the dot is gone
+// there is nothing left moving, so the cloud dies with it.
+static void mdExplode(int p, int at) {
+  for (int k = 0; k < MD_FRAGS; k++) mdFrags[p][k].alive = false;
+  at = constrain(at, 0, NUM_LEDS_PER_STRIP - 1);
+  for (int k = 0; k < MD_FRAGS; k++) {
+    MdFrag& f = mdFrags[p][k];
+    f.alive  = true;
+    f.blast  = true;
+    f.posf   = (float)at;
+    f.dir    = (k & 1) ? -1 : 1;                    // outwards, both ways
+    f.speed  = 50.0f + (float)(mdRand(p) % 260);    // a SPREAD, so they arrive at different
+    f.bright = 1.0f;                                // times and reach the far ends
+    f.moved  = 0.0f;
+  }
+}
+
+// A REVERSAL: erode first, then shed.
+static void mdShed(int p) {
+  if (!mdEffectOn(p)) return;
+  // A DOT THAT NO LONGER EXISTS SHEDS NOTHING - and must not explode a second time either.
+  if (constrain(portCfg[p].size, 1, 10) - (int)mdLost[p] <= 0) return;
+  LedPatParams& r = ledPat(ledPatIndexOfEnum(portCfg[p].pat));
+  // EROSION: a WHOLE pixel every (10 x Effects) reversals (user, 17 Oct). With Effects 4 that
+  // is 40 reversals per pixel, so a 3-pixel dot survives 120 of them.
+  int flipsPerPixel = 10 * constrain((int)r.effect, 1, 10);
+  if (++mdFlips[p] >= flipsPerPixel) {
+    mdFlips[p] = 0;
+    if (mdLost[p] < 200) mdLost[p]++;
+    if (constrain(portCfg[p].size, 1, 10) - (int)mdLost[p] <= 0) {
+      mdExplode(p, (int)ledPosArr[p]);
+      return;
+    }
+  }
+  // THE COUNT IS THE EFFECT SLIDER, EXACTLY: 1..10 pieces per direction change, and NOT
+  // randomised. (It used to be Distance/5 capped at 4 and randomised.)
+  int n = constrain((int)r.effect, 1, 10);
+  // MOMENTUM IS THE PIECES' SPEED AWAY FROM THE DOT (user, 17 Oct, second look): at MAXIMUM
+  // they leave at the dot's OWN speed, at MINIMUM they "hit the wall" and stay exactly where
+  // the dot turned. (The first build had this the wrong way round - heavy meant slow.)
+  float frac = constrain(r.momentum, 0.0f, 0.5f) / 0.5f;         // 0 = wall, 1 = dot's speed
+  float dotPxS = 1.0f / ((portCfg[p].speed > 0.0005f) ? portCfg[p].speed : 0.0005f);
+  if (dotPxS > 600.0f) dotPxS = 600.0f;
+  if (dotPxS < 1.0f)   dotPxS = 1.0f;
+  float piecePxS = dotPxS * frac;
+  mdLastDotPxS  = dotPxS;
+  mdLastMomFrac = frac;
+  for (int k = 0; k < n; k++) {
+    int slot = -1;
+    for (int j = 0; j < MD_FRAGS; j++) if (!mdFrags[p][j].alive) { slot = j; break; }
+    if (slot < 0) slot = (int)(mdRand(p) % MD_FRAGS);   // all busy: the oldest is recycled
+    MdFrag& f = mdFrags[p][slot];
+    f.alive  = true;
+    f.blast  = false;                                  // ordinary debris, not the death blast
+    f.posf   = (float)constrain((int)ledPosArr[p] + (int)(mdRand(p) % 3) - 1,
+                                0, NUM_LEDS_PER_STRIP - 1);
+    f.dir    = (ledDirArr[p] > 0) ? -1 : 1;            // the direction the dot WAS travelling
+    f.speed  = piecePxS * (0.55f + (float)(mdRand(p) % 90) / 100.0f);   // they break up
+    f.bright = 1.0f;
+    f.moved  = 0.0f;
+  }
+}
+
+// ADVANCE EVERY FRAME. The debris is a cloud, not a dot: it must not move on the dot's step
+// timer, or a fast dot would leave a stutter of separate pixels instead of a stream.
+void mdAdvanceAll(unsigned long now) {
+  if (mdLastMs == 0) { mdLastMs = now; return; }
+  float dtMs = (float)(now - mdLastMs);
+  mdLastMs = now;
+  if (dtMs <= 0.0f) return;
+  if (dtMs > 100.0f) dtMs = 100.0f;
+  float dtS = dtMs / 1000.0f;
+
+  for (int p = 0; p < NUM_PORTS; p++) {
+    LedPatParams& r = ledPat(ledPatIndexOfEnum(portCfg[p].pat));
+    // MOMENTUM IS THE PIECES' SPEED AWAY FROM THE DOT (user, 17 Oct, second look) and
+    // brightness is tied to it the SAME way round: a fast piece lasts, a stopped one dims out.
+    float frac = constrain(r.momentum, 0.0f, 0.5f) / 0.5f;    // 0 = hits the wall, 1 = dot speed
+    // A piece still SLOWS as it goes, but the endpoints must read exactly as specified: at
+    // maximum it streaks away keeping (nearly) the dot's speed, at minimum it never moved.
+    float kSpeed  = expf(-dtMs / (600.0f + 2400.0f * frac));
+    // BRIGHTNESS IS TIED TO MOMENTUM the same way round: one that "hit the wall" dims out at
+    // once, one travelling at speed lingers.
+    float kBright = expf(-dtMs / (90.0f + 900.0f * frac));
+    int   extent  = constrain((int)r.distance, 0, 100);
+    // The DEATH BLAST decays on its OWN terms: it must always span the strip and always fade
+    // out, whatever Momentum and Distance are set to.
+    float kBlastS = expf(-dtMs / 1500.0f);
+    float kBlastB = expf(-dtMs /  900.0f);
+    for (int k = 0; k < MD_FRAGS; k++) {
+      MdFrag& f = mdFrags[p][k];
+      if (!f.alive) continue;
+      // CONTINUOUS movement, in floats. Rounding to whole pixels per frame is what made the
+      // debris look stationary: at ~57 px/s and a 5 ms frame the step is 0.28 px, which rounds
+      // to ZERO every frame - so the piece faded exactly where it spawned.
+      float adv = f.speed * dtS;
+      f.posf  += (float)f.dir * adv;
+      f.moved += adv;
+      float kS  = f.blast ? kBlastS : kSpeed;
+      float kB  = f.blast ? kBlastB : kBright;
+      int   ext = f.blast ? (NUM_LEDS_PER_STRIP - 1) : extent;
+      if (f.moved >= (float)ext || f.posf < 0.0f ||
+          f.posf > (float)(NUM_LEDS_PER_STRIP - 1)) f.alive = false;
+      f.speed  *= kS;
+      f.bright *= kB;
+      if (f.bright < 0.02f) f.alive = false;
+    }
+  }
+}
 
 // ---- CHASE STATE (per port) ---------------------------------------------------------
 // The Chase is NOT on the step timer. With wrap OFF its movement follows the LEVEL of the
@@ -1073,6 +1390,9 @@ void saveSettings() {
     }
   }
   preferences.end();
+  // EVERY pattern's own values, one blob per pattern, written AFTER the end() above because
+  // Preferences cannot have the same namespace open twice at once.
+  saveLedPatRecords();
 }
 
 // Restore runtime settings from NVS
@@ -1150,6 +1470,16 @@ void loadSettings() {
     }
   }
   preferences.end();
+
+  // PER-PATTERN RECORDS. The single LED values just read become the SELECTED pattern's own
+  // record if it has none yet (the one-off migration); every other pattern starts from its
+  // own defaults. mirrorLedPat() then makes the globals agree with the selected record, so
+  // every reader downstream is unchanged.
+  bool ledMigrated = loadLedPatRecords();
+  mirrorLedPat();
+  logAppend("LED records %s selected=%s", ledMigrated ? "MIGRATED: selected seeded from pre-record settings"
+                                                      : "loaded per pattern",
+            activePatternLED.c_str());
 
   freqThreshold = constrain(freqLED, 20, 100);
   multiplier = (multLED > 1) ? 2 : 1;   // the DISPLAY multiplier (LED page checkbox)
@@ -1276,6 +1606,28 @@ void handleGetSettings() {
     char buf[8];
     snprintf(buf, sizeof(buf), "#%02X%02X%02X", previewColors[i].r, previewColors[i].g, previewColors[i].b);
     cols.add(buf);
+  }
+  // ALL SIX LED PATTERNS, each with its OWN values. Without this a page reload could only
+  // learn the SELECTED pattern's numbers, and the first tweak after switching would then
+  // overwrite another pattern's saved values with defaults. The page seeds its per-pattern
+  // store from this, exactly as it adopts themeColorsAll.
+  {
+    JsonObject all = doc["ledPatAll"].to<JsonObject>();
+    for (int i = 0; i < LED_PAT_COUNT; i++) {
+      JsonObject o = all[LED_PAT_IDS[i]].to<JsonObject>();
+      o["speed"] = ledPats[i].speed;      o["qty"] = ledPats[i].qty;
+      o["size"] = ledPats[i].size;        o["wrap"] = ledPats[i].wrap;
+      o["invert"] = ledPats[i].invert;    o["mult"] = ledPats[i].mult;
+      o["freq"] = ledPats[i].freqHz;      o["beatSens"] = ledPats[i].beatSens;
+      o["atk"] = ledPats[i].attack;       o["dec"] = ledPats[i].decay;
+      o["peakDelay"] = ledPats[i].peakDelay; o["peakSpeed"] = ledPats[i].peakSpeed;
+      o["peakDir"] = ledPats[i].peakDir;  o["vuDir"] = (int)ledPats[i].vuDir;
+      o["effect"] = (int)ledPats[i].effect; o["momentum"] = ledPats[i].momentum;
+      o["distance"] = (int)ledPats[i].distance;
+      JsonArray cr = o["colourRef"].to<JsonArray>();
+      char cb[8];
+      for (int k = 0; k < 4; k++) { refToString(ledPats[i].colour[k], cb, sizeof(cb)); cr.add(cb); }
+    }
   }
   String output;
   serializeJson(doc, output);
@@ -1534,20 +1886,39 @@ void handleLiveTweak() {
   if (music.equalsIgnoreCase("FULL RANGE") || music.equalsIgnoreCase("FULL")) music = "FULL";
   else music = "BASS";
 
-  // Beat sensitivity is GLOBAL - one detector drives both displays - so it is
-  // applied here regardless of section.
-  if (doc.containsKey("beatSens")) {
+  // Beat sensitivity: PER PATTERN for the LED section (written into the record above and
+  // mirrored into the globals), so what remains here is the 240V section's own detector
+  // value. A 240V tweak must not be able to move an LED pattern's threshold.
+  if (section == "240V" && doc.containsKey("beatSens")) {
     float bs = jsonNumF(doc["beatSens"], beatSens);
     beatSens = constrain(bs, 0.01f, 1.00f);
   }
 
   dbgSub = 2;          // scalars read; the section branch below is the prime suspect
   if (section == "LED") {
+    // A PATTERN CHANGE PERSISTS THE RECORDS. Without this, a reboot before a Save would
+    // re-seed the newly selected pattern from the legacy single-value keys and hand it the
+    // OTHER pattern's values - the contamination this whole change exists to remove.
+    // Selecting a pattern is a deliberate act (the same case as a theme colour, which is
+    // already allowed its one write); sliders still never touch flash.
+    if (id.length() && id != activePatternLED) { saveLedPatRecords(); mdResetAll(); }
     if (id.length()) activePatternLED = id;
-    speedLED = spd; quantityLED = constrain(qty, 1, 8); sizeLED = constrain(sz, 1, 10);
-    freqLED = frq; multLED = (bm > 1) ? 2 : 1;   // checkbox: 1 or 2
-    attackLED = atk; decayLED = dec;
-    wrapLED = wrap; invertLED = inv;
+    // THIS PATTERN'S OWN RECORD - never another pattern's. The globals are refreshed from it
+    // by mirrorLedPat() below, which is what keeps every existing reader correct.
+    LedPatParams& r = ledSel();
+    r.speed = spd; r.qty = constrain(qty, 1, 8); r.size = constrain(sz, 1, 10);
+    r.freqHz = frq; r.mult = (bm > 1) ? 2 : 1;   // checkbox: 1 or 2
+    r.attack = atk; r.decay = dec;
+    r.wrap = wrap; r.invert = inv;
+    // The per-pattern EFFECT rows. Stored now so the values travel with the pattern; nothing
+    // renders them until the Moving Dot effect build.
+    if (doc.containsKey("effect"))   r.effect   = (uint8_t)constrain(jsonNumI(doc["effect"], 0), 0, 10);
+    if (doc.containsKey("momentum")) r.momentum = constrain(jsonNumF(doc["momentum"], 0.0f), 0.0f, 0.5f);
+    if (doc.containsKey("distance")) r.distance = (uint8_t)constrain(jsonNumI(doc["distance"], 0), 0, 100);
+    // The LED section's sensitivity is THIS pattern's own. (The 240V section still writes the
+    // shared detector value until its own parameter list is defined.)
+    if (doc.containsKey("beatSens"))
+      r.beatSens = constrain(jsonNumF(doc["beatSens"], r.beatSens), 0.01f, 1.00f);
     // Colour: the UI sends an array of REFERENCES - "T0".."T7" (theme palette
     // index, resolved live), "RB" (rainbow) or "#rrggbb" (custom). Index 0 is
     // used by the dot/chase/centre-out patterns, and 0..3 are the VU meter's
@@ -1557,7 +1928,7 @@ void handleLiveTweak() {
       int i = 0;
       for (JsonVariant v : ca) {
         if (i >= 4) break;
-        colourLED[i] = parseColourRef(v.as<const char*>(), colourLED[i]);
+        r.colour[i] = parseColourRef(v.as<const char*>(), r.colour[i]);
         i++;
       }
     }
@@ -1566,8 +1937,20 @@ void handleLiveTweak() {
     if (doc.containsKey("vuDir")) {
       String d = String((const char*)(doc["vuDir"] | "LEFT"));
       d.toUpperCase();
-      if (d == "LEFT" || d == "RIGHT" || d == "CENTRE" || d == "ENDS") vuDirLED = d;
+      if (d == "LEFT")        r.vuDir = 0;
+      else if (d == "RIGHT")  r.vuDir = 1;
+      else if (d == "CENTRE") r.vuDir = 2;
+      else if (d == "ENDS")   r.vuDir = 3;
     }
+    mirrorLedPat();          // the globals now agree with THIS pattern's record
+    ledPatNormalise(ledPatIndex(activePatternLED));   // Moving Dot's Wrap is forced off
+  }
+  // THE 240V SECTION'S OWN VALUES. This branch did not exist at all: the LED branch above
+  // wrote the 240V globals too, which is exactly the cross-section contamination the
+  // isolation rule forbids - and the reason the 240V page's own sliders did nothing. The
+  // 240V patterns still share one set until their own parameter list is defined, but they no
+  // longer receive LED values.
+  else if (section == "240V") {
     if (id.length()) activePattern240V = id;
     speed240V = spd; quantity240V = constrain(qty, 1, 4); size240V = constrain(sz, 1, 4);
     freq240V = frq; mult240V = constrain(bm, 1, 9); music240V = music;
@@ -2519,6 +2902,9 @@ static void actForListener(int i) {
   if (i < NUM_PORTS) {
     if (portCfg[i].pat == LP_MOVING_DOT || portCfg[i].pat == LP_KNIGHT_RIDER)
       ledDirArr[i] = -ledDirArr[i];
+    // THE MOVING DOT EFFECT. A reversal is the only trigger there is: every one sheds debris,
+    // and every TENTH also costs the dot a whole pixel. Knight Rider has no effect yet.
+    if (portCfg[i].pat == LP_MOVING_DOT) mdShed(i);
     else if (portCfg[i].pat == LP_CENTER_OUT)
       ledExplArr[i] = 0;
     g_flipLED++;
@@ -3520,9 +3906,23 @@ void drawPortPattern(int port) {
   else {
     // moving_dot / chase_1_10 / chase_10_1 / knight_rider
     int pos = ledPosArr[port];
+    // THE EFFECT'S DEBRIS, drawn FIRST so the dot always wins where they overlap: one pixel of
+    // light each, in the dot's OWN colour sampled at that pixel, only dimmer.
+    for (int k = 0; k < MD_FRAGS; k++) {
+      MdFrag& f = mdFrags[port][k];
+      if (!f.alive) continue;
+      int ipos = (int)(f.posf + 0.5f);
+      if (ipos < 0 || ipos >= N) continue;            // just off the end
+      CRGB dc = slotColourAt(c.colourRef, c.colour, 0, ipos);
+      dc.nscale8((uint8_t)(constrain(f.bright, 0.0f, 1.0f) * 255.0f));
+      setLed(port, ipos, dc);
+    }
+    // The dot's length WITH the effect's erosion. 0 means fully erased: it stays dark, and
+    // Size is only ever its STARTING length.
+    int dlen = mdDotLen(port);
     for (int q = 0; q < effQty; q++) {
       int base = (pos + (q * N) / effQty) % N;
-      for (int s = 0; s < dotLen; s++) {
+      for (int s = 0; s < dlen; s++) {
         int idx = (base + s) % N;
         setLed(port, idx, slotColourAt(c.colourRef, c.colour, 0, idx));
       }
@@ -3662,6 +4062,10 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
 void runLEDPattern() {
   unsigned long now = millis();
   bool drew = false;
+
+  // THE MOVING DOT EFFECT'S DEBRIS moves EVERY FRAME: it is a cloud, not a dot, so it must not
+  // be tied to the dot's step timer.
+  mdAdvanceAll(now);
 
   // The EQ bars advance ONCE per frame, never once per port.
   for (int p = 0; p < NUM_PORTS; p++) {
@@ -3833,6 +4237,13 @@ void loadTimeline() {
 // Column 11 controls the 240V display; columns 1-10 control the strips.
 void applyTimelineRow(int row, bool force) {
   if (row < 0 || row >= TL_ROWS) row = 0;
+  // THE EFFECT RE-ARMS HERE: a new timeline ROW (a fresh cell is "seen again") or PLAY. NOT on
+  // a slider move - a tweak passes through this function too, and re-arming there would
+  // resurrect a dead dot every time any control moved.
+  {
+    static int mdRow = -1;
+    if (force || row != mdRow) { mdRow = row; mdResetAll(); }
+  }
   // NOTE: there is deliberately NO `!tlLoaded` early return any more. With no timeline
   // every port simply takes the page's settings - which is exactly what the
   // derivation below does when it finds no cell for that port.
@@ -3891,7 +4302,7 @@ void applyTimelineRow(int row, bool force) {
                                                   : ((multLED > 1) ? 2 : 1);
     int   wantFreq     = (cell && cell->freqHz > 0) ? constrain(cell->freqHz, 20, 100) : freqLED;
     float wantSens     = (cell && cell->beatSens >= 0.0f)
-                           ? constrain(cell->beatSens, 0.01f, 1.0f) : beatSens;
+                           ? constrain(cell->beatSens, 0.01f, 1.0f) : ledSel().beatSens;
     const uint32_t *wantRef = (cell && cell->hasColour) ? cell->colour : colourLED;
 
     // MOTION is compared SEPARATELY from the rest: changing a colour, a sensitivity or
@@ -4783,6 +5194,37 @@ void loop() {
                           ledPosArr[p], ledDirArr[p] > 0 ? '>' : '<');
     }
     logAppend("motion play=%d pos=%s", tlPlaying ? 1 : 0, mot);
+
+    // THE MOVING DOT EFFECT, per port, in the same compact style: flips since the last whole
+    // pixel / whole pixels lost / live debris pieces. An ERASED dot (lost == its Size) is
+    // otherwise invisible in the log - it simply draws nothing.
+    {
+      char ef[NUM_PORTS * 12 + 1];
+      int en = 0;
+      for (int p = 0; p < NUM_PORTS && en < (int)sizeof(ef); p++) {
+        int live = 0;
+        for (int k = 0; k < MD_FRAGS; k++) if (mdFrags[p][k].alive) live++;
+        en += snprintf(ef + en, sizeof(ef) - en, "%u/%u/%d ",
+                       (unsigned)mdFlips[p], (unsigned)mdLost[p], live);
+      }
+      logAppend("effect flips/lost/frags %s", ef);
+      // The SPEEDS and a live piece, so "do they move?" is answered by the log rather than
+      // guessed: dot = the dot's own px/s, cap = the visibility limit applied, and p/v/b = the
+      // first live piece's position, speed and brightness of port 1.
+      {
+        int pp = -1; float pv = 0.0f, pb = 0.0f, pt = 0.0f;
+        for (int k = 0; k < MD_FRAGS; k++) {
+          if (mdFrags[0][k].alive) {
+            pp = (int)(mdFrags[0][k].posf + 0.5f); pv = mdFrags[0][k].speed;
+            pb = mdFrags[0][k].bright; pt = mdFrags[0][k].moved;
+            break;
+          }
+        }
+        logAppend("effect speeds dot=%.0f mom=%.2f | piece1 p=%d v=%.0f b=%.2f t=%.0f",
+                  (double)mdLastDotPxS, (double)mdLastMomFrac, pp, (double)pv, (double)pb,
+                  (double)pt);
+      }
+    }
 
   }
 

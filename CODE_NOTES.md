@@ -129,6 +129,22 @@ dot falling to nothing at its end — instead of the old flat 50% stub.
 - plumbing the same shape as the Effect flag (`momentumLED`, `TlItem.momentum` with -1 =
   "the cell carries none", `PlaylistItem.momentumLED`, a `prowLED-momentum` slider).
 
+**BUILT 2026-10-17 (controls only — the plumbing above is NOT done).** Three rows now exist in
+the Visual block of the LED page, with the ids this section names, and all three read minimum
+as OFF:
+
+| Row | id | Control id | Range | Notes |
+|---|---|---|---|---|
+| Effects | `prowLED-effect` | `paramEffectLED` | 0–10, step 1, default 0 | unit is per pattern; for the Chase it is the tail's length in LEDs |
+| Momentum | `prowLED-momentum` | `paramMomentumLED` | 0–0.5 s, step 0.01, default 0 | release of the level→motion response |
+| Distance | `prowLED-distance` | `paramDistanceLED` | 0–100, step 1, default 100 | **added 17 Oct by the user**: the intended replacement for Speed in the Chase |
+
+They register in `PARAM_ROW_IDS` (so visibility/greying works) and are listed in the Visual
+list of the five dot/Chase patterns, so they are live for those and greyed for VU/EQ. The
+values are **page-side only**: they are not in `collectCurrentParameters()`, nothing is stored,
+and the firmware does not read them — moving them changes nothing on the strips. `Speed` is
+left in place for every pattern, including the Chase, until Distance's behaviour is defined.
+
 **Why it is split from Stage 1:** momentum's meaning depends on the level-driven movement,
 and the tail is a rendering change; neither touches the beat path, so each is independently
 verifiable (the tail visually, momentum by timing a traverse after a loud passage).
@@ -172,6 +188,116 @@ Added 2026-10-17 (session 2). Read them in this order:
    `tweak <section>|<pattern>|<colour count> bytes=… heap=…`. If opening a page produces no
    such line, that page sends no tweak at all — and the fault is in `/calibrate-stop` or
    `/init-off`, both of which blank on their own.
+
+## 10. Per-pattern parameters — NOTHING is shared (STEP A, built 17 Oct)
+
+THE RULE (user): every pattern is unique. Nothing — no value, no colour, no band, no threshold
+— is shared between patterns, on either section. Changing anything in Moving Dot must have no
+effect on Chase or any other pattern.
+
+**Firmware**
+- `LedPatParams`: ONE RECORD PER LED PATTERN, six of them — `moving_dot`, `chase_1_10`,
+  `center_out_chase`, `knight_rider`, `vu_meter`, `eq`. Each holds colour[4], speed, qty,
+  size, wrap, invert, mult, freqHz, beatSens, attack, decay, peakDelay/peakSpeed/peakDir,
+  vuDir, effect, momentum, distance.
+- The record is the STORAGE. The old `speedLED`/`colourLED`/… globals are a **MIRROR of the
+  SELECTED pattern's record** (`mirrorLedPat()`), so every existing reader is unchanged.
+- `applyTimelineRow()` falls back to the selected **record** (not the global, which a 240V
+  tweak could move). A timeline cell still overrides per strip, as before.
+- NVS: one blob per pattern (`lp0`…`lp5`), written on **Save** and on a **pattern change** —
+  the latter so a reboot before a Save cannot re-seed the new selection from the legacy keys.
+- Migration: the pre-record single-value keys seed the SELECTED pattern's record once; every
+  other pattern starts from `ledPatDefaultFor()`. The boot line prints
+  `LED records MIGRATED: selected seeded from pre-record settings`.
+- `ledPatNormalise()`: **Moving Dot's Wrap is forced OFF in the firmware too**, so a Wrap
+  ticked before records existed (or by an old timeline cell) cannot make the dot bounce.
+- `/live-tweak` now has a real `else if (section == "240V")` branch. The LED branch used to
+  write the 240V globals, which is why the 240V page's own sliders did nothing — and it is the
+  cross-section contamination the rule forbids.
+- `/settings` reports the selected pattern as before PLUS **`ledPatAll`** (all six records).
+
+**Page**
+- `ledPatStore` (one set per pattern NAME) + `LED_PAT_STORE_IDS`; `saveLedPatternSet()` when
+  leaving a pattern, `loadLedPatternSet()` when entering one — and the load happens AFTER
+  `applyParamRanges()`, or the outgoing pattern's range clamps the incoming values.
+- Seeded from `ledPatAll`, so a reload restores EVERY pattern. Without it, the first tweak
+  after a switch would have written defaults over another pattern's stored values.
+- `captureMarkupDefaults()` snaps the markup defaults at startup, so a pattern with no stored
+  set starts from those and never inherits the previous pattern's controls.
+- **ONE DEBOUNCE TIMER PER SECTION** (`window.liveTimers[section]`). The single shared
+  `window.liveTimer` cancelled the 240V tweak whenever `choosePattern()` fired both, so the
+  240V page only ever appeared to work through the firmware's LED branch.
+- Distance carries its own per-pattern range (Moving Dot **0–20**, default 0–100) and is in
+  `PARAM_ROW_DEFAULTS`, or the 20 would leak into the next pattern — the trap Speed had.
+
+**Still open (deliberate, as agreed):** the 240V patterns share one set until their own
+parameter list is defined; the page's per-pattern store is LED-only for now.
+
+## 11. Moving Dot's effect — shed debris (STEP B, built 17 Oct)
+
+**Trigger: EVERY reversal of the dot** — a real beat, or a sub-beat when Beat Multiplier = 2.
+Wrap is forced off for Moving Dot, so the end-of-strip jump is not a reversal and never sheds.
+
+Per reversal `mdShed()` spawns **1..Distance/5 pieces (max 4, randomised)**, each about **one
+pixel of light**, at the dot's position, travelling in the direction the dot **was** going (the
+eruption comes from the point of reversal) — and every **TENTH** reversal the dot loses one
+**whole** pixel (`mdLost`), all of its dots together. At 0 length the dot draws nothing and
+**stays dark** until re-armed.
+
+`mdAdvanceAll()` runs **EVERY FRAME** — the debris is a cloud, not a dot; tied to the step timer
+it would stutter. **Momentum is WEIGHT and drives speed AND brightness together** (the user's
+decision): at its maximum a piece stops within ~1 px and is gone at once; at its minimum it
+keeps the dot's starting speed (1 / Speed, in pixels per second) for the whole flight and fades
+gently. It dies at the **Distance** extent, at the strip end, or when brightness reaches 2%.
+**8 pieces per strip, oldest recycled** — a fast passage reverses ~10x a second.
+
+**Effects = 0 or Distance = 0** → `mdEffectOn()` false → **no debris AND no erosion**: the
+pattern behaves exactly as it did before. Drawing: debris **under** the dot, in the dot's own
+colour reference sampled at each pixel, dimmed by its own brightness.
+
+**Re-arm** (`mdResetAll()`): a timeline **ROW change**, **PLAY**, and **selecting the pattern**
+again. Deliberately NOT on a slider move — a tweak also calls `applyTimelineRow()`, and
+resetting there would resurrect a dead dot every time any control moved.
+
+**Log:** `effect flips/lost/frags` per port, beside `motion`, plus a live piece's position,
+speed, brightness and travel distance — an erased dot is otherwise invisible, because it simply
+draws nothing. The live values are what settled "the debris is not moving" without guessing.
+
+### Revised 17 Oct (after the user's first look at it)
+
+- **The count is the EFFECT SLIDER, exactly**: 1..10 pieces per direction change, **no
+  randomisation at all**. It used to be `Distance/5` capped at 4 and randomised. Effects = 0 is
+  still OFF (their earlier rule: "if effect is at 0 nothing changes, and Momentum and Distance
+  are greyed"), so the slider is 0-10 with 0 = off.
+- **THE DEATH BLAST.** When the tenth reversal takes the dot's LAST pixel the strip explodes
+  from the position where it died: 24 one-pixel pieces, radiating BOTH ways, with a spread of
+  speeds (50-310 px/s) so they arrive at different times and reach the far ends. It ignores the
+  **Distance** extent (it spans the whole strip) and its decay ignores **Momentum** (a heavy
+  setting must not turn the ending into a fizzle). It also **clears the old debris**: with the
+  dot gone there is nothing left moving, so the cloud dies with it — the display is then over
+  until the pattern is applied afresh (a timeline row, PLAY, or re-selecting it).
+- A dot that is already gone sheds nothing further and **cannot explode twice**
+  (`mdShed` returns immediately once `Size - lost <= 0`).
+
+### TRAP that cost a round: a per-frame step rounded to whole pixels freezes slow movement
+
+`int step = (int)(speed * dtS + 0.5f);` looks harmless, but at 57 px/s and a 5 ms frame the step
+is **0.28 px — which rounds to 0 every single frame**, so the piece never moves and merely fades
+where it spawned. The user saw exactly that ("stationary dots at the position the dot changes
+direction"). **Positions that move slowly must be floats** (`MdFrag.posf`), with the integer
+computed only at draw time. The same trap applies to `travel`/`moved`, and to anything else
+advanced per frame in this firmware.
+
+### Second trap from the same round: a blur cannot throw visible debris
+
+The pieces started at the dot's speed, and the dot at 0.002 s/step is **500 px/s** — a piece
+would cross the whole 20-pixel Distance extent in **40 ms**. Debris is only debris if it can be
+seen, so the start speed is the dot's **only when that is slow enough**: capped so a piece
+always takes at least ~0.5 s to cross the extent (`visCap = Distance / 0.5`). The log prints the
+raw and the capped figure (`effect speeds dot=… cap=…`).
+
+**Still to come (Step C):** Effects / Momentum / Distance in the playlist item and the timeline
+cell, so a cell can carry an effect per strip and a row change re-arms it.
 
 `dbgSub` inside `handleLiveTweak()`: 1 = JSON parsed, 2 = scalars read, 3 = section branch
 finished, 4 = per-port config rebuilt, 5 = reply about to go. A `prevReq=/live-tweak` with a

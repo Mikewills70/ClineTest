@@ -5,3 +5,4 @@ board_log.txt
 *.log
 board_diag.txt
 board_tail.txt
+board_settings.txt

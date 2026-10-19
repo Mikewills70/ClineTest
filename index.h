@@ -945,6 +945,32 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                     <td class="name-col">Invert</td>
                     <td><input type="checkbox" id="paramInvertLED" onchange="liveParamChanged('LED')"></td>
                 </tr>
+                <!-- EFFECTS / MOMENTUM / DISTANCE - controls added 17 Oct, behaviour defined per
+                     pattern later. ALL THREE read minimum as OFF, so a single slider both
+                     enables and sizes whatever it does. Nothing is sent to the board yet (the
+                     values are page-side only), so moving them changes nothing on the strips.
+                     Distance (0-100) is the intended replacement for Speed in the Chase. -->
+                <tr id="prowLED-effect">
+                    <td class="name-col">Effects</td>
+                    <td>
+                        <input type="range" id="paramEffectLED" min="0" max="10" step="1" value="0" oninput="liveParamChanged('LED')">
+                        <span id="effectValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0</span>
+                    </td>
+                </tr>
+                <tr id="prowLED-momentum">
+                    <td class="name-col">Momentum</td>
+                    <td>
+                        <input type="range" id="paramMomentumLED" min="0" max="0.5" step="0.01" value="0" oninput="liveParamChanged('LED')">
+                        <span id="momentumValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.00s</span>
+                    </td>
+                </tr>
+                <tr id="prowLED-distance">
+                    <td class="name-col">Distance</td>
+                    <td>
+                        <input type="range" id="paramDistanceLED" min="0" max="100" step="1" value="100" oninput="liveParamChanged('LED')">
+                        <span id="distanceValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">100</span>
+                    </td>
+                </tr>
             </tbody>
             <!-- BLOCK: AUDIO - beat detection. These three tune ONE shared detector,
                  so they are engine-level rather than per-pattern behaviour.
@@ -1460,7 +1486,118 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     let timelineData = {}; // key: "row_col", value: playlistItemObj
     let activeArmedItem = null; // Holds item being placed or moved
 
+    // =====================================================================
+    // PER-PATTERN PARAMETER STORE - the isolation rule, on the page.
+    //
+    // THE RULE (user, 17 Oct 2026): every pattern is unique. Nothing - no value, no colour, no
+    // band, no threshold - is shared between patterns. This store holds ONE SET PER PATTERN:
+    // switching stores the set you were editing under that pattern's name and loads the
+    // incoming pattern's own set, so nothing can be inherited. That inheritance is exactly how
+    // a Chase Speed of 20 became 20 s/step on Moving Dot, and how a Wrap ticked for one
+    // pattern appeared on a pattern that has no Wrap.
+    //
+    // It is seeded from the DEVICE (/settings -> ledPatAll), so a reload restores EVERY
+    // pattern's own values, not just the selected one's.
+    // =====================================================================
+    let ledPatStore = {};
+
+    // The page's pattern NAMES <-> the IDs the device stores. The store is keyed by NAME (that
+    // is what choosePattern receives); the device's map is keyed by ID.
+    const LED_PAT_STORE_IDS = {
+        'Moving Dot': 'moving_dot', 'Chase': 'chase_1_10', 'Explosion': 'center_out_chase',
+        'Knight Rider': 'knight_rider', 'VU Meter': 'vu_meter', 'EQ': 'eq'
+    };
+
+    // The rows that carry a plain .value. Checkboxes, the radio group and the colour slots are
+    // handled separately, because they do not.
+    const LED_VALUE_KEYS = ['speed', 'quantity', 'size', 'frequency', 'beatSens', 'attack',
+                            'decay', 'peakDelay', 'peakSpeed', 'effect', 'momentum', 'distance'];
+
+    // The markup's own defaults, captured ONCE at startup, so a pattern with no stored set
+    // still cannot inherit the previous pattern's controls.
+    let PARAM_MARKUP_DEFAULTS = null;
+    function captureMarkupDefaults() {
+        let o = {};
+        LED_VALUE_KEYS.forEach(function (k) {
+            let ids = PARAM_ROW_IDS[k];
+            let e = (ids && ids.ctl) ? document.getElementById(ids.ctl) : null;
+            if (e) o[k] = e.value;
+        });
+        let pd = document.getElementById('paramPeakDirLED'); if (pd) o.peakDir = pd.value;
+        o.wrap = false; o.invert = false; o.beatMult = '1';
+        let vd = document.querySelector('input[name="vuDirLED"]:checked');
+        o.vuDir = vd ? vd.value : 'LEFT';
+        o.colour = ['#ffffff', '#ffd000', '#ff7000', '#ff0000'];
+        PARAM_MARKUP_DEFAULTS = o;
+    }
+
+    function ledSetFromDom() {
+        let o = {};
+        LED_VALUE_KEYS.forEach(function (k) {
+            let ids = PARAM_ROW_IDS[k];
+            let e = (ids && ids.ctl) ? document.getElementById(ids.ctl) : null;
+            if (e) o[k] = e.value;
+        });
+        let w  = document.getElementById('paramWrapLED');     if (w)  o.wrap = w.checked;
+        let iv = document.getElementById('paramInvertLED');   if (iv) o.invert = iv.checked;
+        let bm = document.getElementById('paramBeatMultLED'); if (bm) o.beatMult = bm.checked ? '2' : '1';
+        let pd = document.getElementById('paramPeakDirLED');  if (pd) o.peakDir = pd.value;
+        let vd = document.querySelector('input[name="vuDirLED"]:checked');
+        if (vd) o.vuDir = vd.value;
+        o.colour = colourRefLED.slice();
+        return o;
+    }
+
+    function ledSetToDom(o) {
+        if (!o) return;
+        LED_VALUE_KEYS.forEach(function (k) {
+            if (o[k] === undefined) return;
+            let ids = PARAM_ROW_IDS[k];
+            let e = (ids && ids.ctl) ? document.getElementById(ids.ctl) : null;
+            if (e) e.value = o[k];
+        });
+        const chk = function (id, v) { let e = document.getElementById(id); if (e && v !== undefined) e.checked = !!v; };
+        chk('paramWrapLED', o.wrap); chk('paramInvertLED', o.invert);
+        let bm = document.getElementById('paramBeatMultLED');
+        if (bm && o.beatMult !== undefined) bm.checked = (String(o.beatMult) === '2');
+        let pd = document.getElementById('paramPeakDirLED');
+        if (pd && o.peakDir !== undefined) pd.value = o.peakDir;
+        if (o.vuDir) {
+            let r = document.querySelector('input[name="vuDirLED"][value="' + String(o.vuDir).toUpperCase() + '"]');
+            if (r) r.checked = true;
+        }
+        if (Array.isArray(o.colour)) {
+            for (let i = 0; i < 4 && i < o.colour.length; i++) {
+                if (/^(#[0-9a-f]{6}|T[0-7]|RB)$/i.test(o.colour[i])) colourRefLED[i] = o.colour[i];
+            }
+            lastCommittedRef = colourRefLED.slice();
+            updateColourBoxes('LED');
+        }
+        // MOVING DOT HAS NO WRAP: its row is greyed out by the pattern spec, and it must read
+        // UNTICKED rather than ticked-but-dead. Forced here so a Wrap left over from another
+        // pattern (or from before per-pattern records) cannot be sent for Moving Dot.
+        if (selectedPatternNameLED === 'Moving Dot') {
+            let wEl = document.getElementById('paramWrapLED');
+            if (wEl) wEl.checked = false;
+        }
+    }
+
+    // Store the set now on screen under the pattern that owns it.
+    function saveLedPatternSet(name) {
+        if (name) ledPatStore[name] = ledSetFromDom();
+    }
+    // Load that pattern's OWN set; with no entry, the markup defaults - never the previous
+    // pattern's values.
+    function loadLedPatternSet(name) {
+        ledSetToDom(ledPatStore[name] || PARAM_MARKUP_DEFAULTS);
+    }
+
     function choosePattern(patternName, el) {
+        // ISOLATION. Store the set belonging to the pattern being LEFT under that pattern's
+        // own name, then load the incoming pattern's own set below. Never carry a value across.
+        if (selectedPatternNameLED && selectedPatternNameLED !== patternName)
+            saveLedPatternSet(selectedPatternNameLED);
+
         selectedPatternName240 = patternName;
         selectedPatternNameLED = patternName;
         patternChosen = true;
@@ -1473,6 +1610,13 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
         document.getElementById('tabBtn240').removeAttribute('disabled');
         document.getElementById('tabBtnLED').removeAttribute('disabled');
+
+        // Ranges and defaults for the NEW pattern must be applied BEFORE its values are loaded,
+        // or the outgoing pattern's range would clamp them on the way in (Chase's 1-50 Speed
+        // range against Moving Dot's 0.002-0.1, for instance).
+        applyParamRanges(paramSpecForPattern(patternName) || {});
+        loadLedPatternSet(patternName);
+        updateParamLabels('LED');
 
         // Tell the ESP32 which pattern was chosen so the displays can start.
         // Outputs stay dark until a pattern is selected.
@@ -1522,6 +1666,11 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             let d = val('paramDecayLed_LED');  if (d !== null) lbl('decLedValLED', parseFloat(d).toFixed(2) + 's');
             let pd = val('paramPeakDelayLED'); if (pd !== null) lbl('peakDelayValLED', parseFloat(pd).toFixed(1) + 's');
             let ps = val('paramPeakSpeedLED'); if (ps !== null) lbl('peakSpeedValLED', parseFloat(ps).toFixed(1));
+            // Effects / Momentum / Distance read-outs. Page-side only for now: nothing is
+            // sent to the board until each pattern's behaviour is defined.
+            let ef = val('paramEffectLED');   if (ef !== null && ef !== '') lbl('effectValLED', ef);
+            let mo = val('paramMomentumLED'); if (mo !== null && mo !== '') lbl('momentumValLED', parseFloat(mo).toFixed(2) + 's');
+            let di = val('paramDistanceLED'); if (di !== null && di !== '') lbl('distanceValLED', di);
         }
     }
 
@@ -1531,6 +1680,30 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     function restoreParams(cfg) {
         const set = (id, v) => { let e = document.getElementById(id); if (e && v !== undefined && v !== null) e.value = v; };
         const chk = (id, v) => { let e = document.getElementById(id); if (e && v !== undefined) e.checked = !!v; };
+
+        // SEED THE PER-PATTERN STORE from the device: every pattern's own values arrive
+        // together (ledPatAll). Without this a reload could only learn the SELECTED pattern's
+        // numbers, and the first tweak after a switch would write defaults over another
+        // pattern's saved values.
+        if (cfg.ledPatAll && typeof cfg.ledPatAll === 'object') {
+            const asStr = (v) => (v === undefined || v === null) ? undefined : String(v);
+            for (let nm in LED_PAT_STORE_IDS) {
+                let s = cfg.ledPatAll[LED_PAT_STORE_IDS[nm]];
+                if (!s) continue;
+                ledPatStore[nm] = {
+                    speed: asStr(s.speed), quantity: asStr(s.qty), size: asStr(s.size),
+                    wrap: !!s.wrap, invert: !!s.invert,
+                    beatMult: (parseInt(s.mult, 10) > 1) ? '2' : '1',
+                    frequency: asStr(s.freq), beatSens: asStr(s.beatSens),
+                    attack: asStr(s.atk), decay: asStr(s.dec),
+                    peakDelay: asStr(s.peakDelay), peakSpeed: asStr(s.peakSpeed),
+                    peakDir: asStr(s.peakDir),
+                    vuDir: ['LEFT', 'RIGHT', 'CENTRE', 'ENDS'][parseInt(s.vuDir, 10) || 0],
+                    effect: asStr(s.effect), momentum: asStr(s.momentum), distance: asStr(s.distance),
+                    colour: Array.isArray(s.colourRef) ? s.colourRef.slice(0, 4) : undefined
+                };
+            }
+        }
 
         set('paramSpeed240', cfg.speed240);   set('paramSpeedLED', cfg.speedLED);
         set('paramBeatSens', cfg.beatSens);   // global
@@ -1583,8 +1756,13 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         updateParamLabels(section);
         updateColourBoxes(section);
 
-        clearTimeout(window.liveTimer);
-        window.liveTimer = setTimeout(() => {
+        // ONE TIMER PER SECTION. A single shared window.liveTimer meant choosePattern()'s two
+        // calls (240V then LED, 100 ms apart) cancelled the FIRST - so the 240V section never
+        // received its own values and only looked right because the firmware's LED branch also
+        // wrote the 240V globals. With the sections isolated, each must send its own.
+        if (!window.liveTimers) window.liveTimers = {};
+        clearTimeout(window.liveTimers[section]);
+        window.liveTimers[section] = setTimeout(() => {
             fetch('/live-tweak', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1628,6 +1806,11 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             peakDir:   (section === '240V') ? undefined : document.getElementById('paramPeakDirLED').value,
             vuDir:     (section === '240V') ? undefined
                         : ((document.querySelector('input[name="vuDirLED"]:checked') || {}).value),
+            // The EFFECT rows, per pattern on the device. Their behaviour is defined per
+            // pattern later - nothing renders them yet - but they must travel with the pattern.
+            effect:    (section === '240V') ? undefined : document.getElementById('paramEffectLED').value,
+            momentum:  (section === '240V') ? undefined : document.getElementById('paramMomentumLED').value,
+            distance:  (section === '240V') ? undefined : document.getElementById('paramDistanceLED').value,
             // Global beat-detection sensitivity (one detector, both displays), so
             // it is sent with either section.
             beatSens: document.getElementById('paramBeatSens').value,
@@ -1884,24 +2067,25 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
     const PATTERN_PARAMS = {
         'Moving Dot':   { colour: ['colour'],
-                          visual: ['speed', 'quantity', 'size', 'invert'],
+                          visual: ['speed', 'quantity', 'size', 'invert', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'],
-                          range:  { speed: { min: 0.002, max: 0.1, step: 0.001 } } },
+                          range:  { speed:    { min: 0.002, max: 0.1,  step: 0.001 },
+                                    distance: { min: 0,     max: 20,   step: 1 } } },
         // ONE CHASE. Speed for it is LEDs per second (1-50), NOT seconds per step like the
         // dot patterns - hence its own range. Wrap selects the mode: OFF = band-driven move,
         // ON = the beat-synced metronome (where Speed is not used at all and is greyed).
         'Chase':        { colour: ['colour'],
-                          visual: ['speed', 'quantity', 'size', 'wrap', 'invert'],
+                          visual: ['speed', 'quantity', 'size', 'wrap', 'invert', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'],
                           range:  { speed: { min: 1, max: 50, step: 1 } } },
         'Chase 10 - 1': { colour: ['colour'],
-                          visual: ['speed', 'quantity', 'size', 'wrap', 'invert'],
+                          visual: ['speed', 'quantity', 'size', 'wrap', 'invert', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'] },
         'Explosion':    { colour: ['colour'],
-                          visual: ['speed', 'quantity', 'size', 'invert'],
+                          visual: ['speed', 'quantity', 'size', 'invert', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'] },
         'Knight Rider': { colour: ['colour'],
-                          visual: ['speed', 'quantity', 'size', 'invert'],
+                          visual: ['speed', 'quantity', 'size', 'invert', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'] },
         // ONE entry covers the VU pattern names while several still exist in the
         // list; they all show the same LED rows.
@@ -1942,7 +2126,11 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         vuLeft:    { ctl: 'paramVuLeftLED' },
         vuRight:   { ctl: 'paramVuRightLED' },
         vuCentre:  { ctl: 'paramVuCentreLED' },
-        vuEnds:    { ctl: 'paramVuEndsLED' }
+        vuEnds:    { ctl: 'paramVuEndsLED' },
+        // Added 17 Oct (controls only, behaviour later): the row and its read-out for each.
+        effect:    { ctl: 'paramEffectLED',   val: 'effectValLED' },
+        momentum:  { ctl: 'paramMomentumLED', val: 'momentumValLED' },
+        distance:  { ctl: 'paramDistanceLED', val: 'distanceValLED' }
         // 'colour' has no single control: its ten boxes are always in use.
     };
 
@@ -1950,7 +2138,11 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     // previous pattern's range leaks into it - Chase's Speed is 1-50 LEDs/s, and leaving that
     // on Explosion (whose Speed is seconds per step) would make it crawl.
     const PARAM_ROW_DEFAULTS = {
-        speed: { min: 0.002, max: 0.50, step: 0.001 }
+        speed:    { min: 0.002, max: 0.50, step: 0.001 },
+        // Distance is 0-100 by default and 0-20 for Moving Dot (its own range, in
+        // PATTERN_PARAMS). The defaults must be re-applied BEFORE a pattern's own ranges,
+        // otherwise Moving Dot's 20 would leak into the next pattern - the same trap Speed had.
+        distance: { min: 0, max: 100, step: 1 }
     };
 
     // WRAP ON turns the Chase into a metronome: the BEAT sets the pace, so Speed is not used
@@ -1965,6 +2157,41 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         let off = chase && wrap && wrap.checked;
         sp.disabled = off;
         if (row) row.style.opacity = off ? '0.4' : '1';
+    }
+
+    // THE EFFECT GATES ITS OWN PARAMETERS (user's requirement, 17 Oct - stated for Moving Dot
+    // first, applied to every pattern that shows these rows):
+    //   Effect at MINIMUM = the pattern behaves exactly as it does today, so the effect's own
+    //   controls mean nothing and are GREYED rather than left looking live.
+    //   Raise Effect and Momentum + Distance become live.
+    // A row the PATTERN never uses (VU and EQ show none of these three) stays greyed however
+    // the Effect is set. Uses the same `param-greyed` class as applyParamVisibility, so a
+    // greyed row also has no value read-out - the established rule here.
+    function updateEffectGreying() {
+        let ef = document.getElementById('paramEffectLED');
+        if (!ef) return;
+        let spec = paramSpecForPattern(selectedPatternNameLED);
+        let effectOff = parseFloat(ef.value) <= parseFloat(ef.min);
+
+        [['prowLED-momentum', 'paramMomentumLED', 'momentumValLED', 'momentum'],
+         ['prowLED-distance', 'paramDistanceLED', 'distanceValLED', 'distance']].forEach(function (r) {
+            let used = false;
+            if (spec) {
+                for (let b in spec) {
+                    if (b !== 'range' && (spec[b] || []).indexOf(r[3]) >= 0) used = true;
+                }
+            }
+            let off = !used || effectOff;          // not this pattern's row, or the effect is off
+            let ctl = document.getElementById(r[1]);
+            let row = document.getElementById(r[0]);
+            let val = document.getElementById(r[2]);
+            if (ctl) ctl.disabled = off;
+            if (row) row.classList.toggle('param-greyed', off);
+            if (val && off) val.innerText = '';
+        });
+
+        // Bring the read-outs back when the gate opens: they were cleared while greyed.
+        if (!effectOff && spec) updateParamLabels('LED');
     }
 
     let lastRangePattern = null;
@@ -2068,6 +2295,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         // is the one place every LED parameter change and the page load both pass
         // through.
         applyParamVisibility(section);
+        // ...and the EFFECT GATE, which must run AFTER it: applyParamVisibility enables every
+        // row the pattern uses, and this narrows Momentum/Distance back down when Effect is 0.
+        updateEffectGreying();
     }
 
     function getLayoutSvgIcon(layout) {
@@ -3062,6 +3292,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     requestAnimationFrame(renderPreviewLoop);
 
     window.onload = function() {
+        // The markup's own defaults, captured BEFORE anything restores values into them: a
+        // pattern with no stored set must start from these, never from the last pattern's.
+        captureMarkupDefaults();
         // Restore the saved theme/colours from the ESP32 so a power cycle
         // does not lose the colour-theme settings.
         fetch('/settings', { cache: 'no-store' })
