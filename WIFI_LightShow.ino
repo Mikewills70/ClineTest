@@ -412,6 +412,54 @@ enum LedPattern : int {
   LP_KNIGHT_RIDER, LP_VU_METER, LP_VU_REV, LP_VU_DUAL, LP_VU_CENTER,
   LP_EQ
 };
+// ============================================================================================
+// THE THREE AUDIO SOURCES, AND WHICH PATTERN USES WHICH  -  SET IN STONE (user, 19 Oct)
+//
+// There are ALWAYS THREE measurements of the music, produced once and shared by every pattern
+// that wants them. A pattern SELECTS one of the three, IN CODE, via the table below. The bands of
+// the two bass sources may be retuned, but the three themselves never change, and nothing may be
+// added to this list without this table being updated in the same commit.
+//
+//   AUD_BASS_BEAT    the onset detector - WHEN a beat lands.
+//                    Band: Frequency row .. 250 Hz (ODF_LP_HZ).
+//   AUD_BASS_LEVEL   the FFT band level - HOW LOUD the bass is.
+//                    Band: Frequency row .. 500 Hz (FFT_BASSLEVEL_MAX).
+//   AUD_FULL         the whole-spectrum level - every frequency.
+//
+//   Moving Dot       -> AUD_BASS_BEAT    a beat reverses the dot, and fires the shed/erode effect
+//   Knight Rider     -> AUD_BASS_BEAT
+//   Explosion        -> AUD_BASS_BEAT
+//   Chase, Wrap ON   -> AUD_BASS_BEAT    the metronome is TIMED by beats
+//   Chase, Wrap OFF  -> AUD_BASS_LEVEL   the football: the LEVEL kicks it. The Bass Beat onset is
+//                                        used as its TRIGGER and the level's own rise as a
+//                                        fallback, but the DISTANCE and the strength come from
+//                                        the level.
+//   VU meters        -> AUD_BASS_LEVEL
+//   EQ               -> AUD_FULL         (not built yet)
+// ============================================================================================
+enum AudioSource : int { AUD_BASS_BEAT = 0, AUD_BASS_LEVEL, AUD_FULL };
+
+// THE TABLE. This is the ONE place a pattern's audio source is decided - no pattern decides for
+// itself anywhere else.
+static inline AudioSource audioSourceForPattern(int pat, bool wrap) {
+  switch ((LedPattern)pat) {
+    case LP_CHASE_1_10: return wrap ? AUD_BASS_BEAT : AUD_BASS_LEVEL;
+    case LP_VU_METER:
+    case LP_VU_REV:
+    case LP_VU_DUAL:
+    case LP_VU_CENTER:  return AUD_BASS_LEVEL;
+    case LP_EQ:         return AUD_FULL;
+    default:            return AUD_BASS_BEAT;   // Moving Dot, Knight Rider, Explosion
+  }
+}
+
+// Does this pattern consume ONSETS? True for a pattern whose source IS the Bass Beat, and also
+// for the Chase with Wrap OFF, which takes onsets as its kick TRIGGER (its source is the level).
+static inline bool patternListensToBeats(int pat, bool wrap) {
+  return (audioSourceForPattern(pat, wrap) == AUD_BASS_BEAT) || isChasePat(pat);
+}
+
+
 
 // The four VU render branches are now ONE pattern: "VU Meter", with the direction
 // row in the Special block choosing which branch is used. LP_EQ therefore sits
@@ -917,22 +965,48 @@ void mdAdvanceAll(unsigned long now) {
 //   BASS LEVEL how much of that credit is on offer right now ("how much of the distance is
 //              covered"), and how hard the kick is applied
 //   EFFECT     the SPEED of the kicked movement: 1 = twice the rolling speed, 10 = KICK_CEIL
-//   MOMENTUM   the DECELERATION: 0 = full kick speed until the credit is gone and then a dead
-//              stop, 0.5 = the SAME pixels delivered as a gentler ~0.6 s slide
+//   MOMENTUM   the DECELERATION: 0 = a dead stop the moment the credit is gone, 0.5 = a long
+//              coast that eases back to the roll (and so travels FURTHER than Distance)
 //
-// Both the fast phase and Momentum's decay spend the SAME credit, so DISTANCE is a genuine hard
-// maximum rather than a starting speed.
+// The fast phase spends the credit and stops at DISTANCE; MOMENTUM's coast is EXTRA travel on top
+// of it. That was not the original plan - the decay was going to shape the same pixels - but a
+// decay confined inside a 10-pixel kick lasts 40 ms and cannot be seen, so it has to continue past
+// the Distance for the deceleration to be visible at all (user, 19 Oct).
 //
 // The ceiling is the user's own definition of the fastest a dot may move without the display
 // stepping: the Moving Dot display's minimum Speed of 0.002 s per step, i.e. 500 pixels/second.
 static const float KICK_CEIL   = 500.0f;   // px/s - the Speed 0.002 equivalent
-static const float KICK_REFILL = 0.5f;     // seconds for a spent credit to trickle back
+// (There was a KICK_REFILL trickle here. It is GONE: it kept the credit above zero, so the code
+// never left the kick branch and momentum's coast was cancelled a frame after it began.)
 // The smallest gap between the gate and the full-kick reference, so n can never divide by zero in
 // a very quiet passage. The reference itself is the MUSIC'S OWN PEAK now - see stepChase.
 static const float KICK_MIN_SPAN = 0.06f;
 
 static float    chaseCredit[NUM_PORTS];    // extra pixels this kick may still travel
-static float    chaseKickI[NUM_PORTS];     // the kick's intensity now (1 = freshly kicked)
+static float    chaseCoast[NUM_PORTS];     // excess speed (px/s) coasting back down to the roll
+static float    chaseCoastTau[NUM_PORTS];  // the glide's decay time, derived from Momentum
+// THE HYBRID TRIGGER, TIMED TO THE BEAT'S CENTRE (user, 19 Oct).
+//
+// The onset detector fires at the LEADING EDGE of the beat, but the Bass Level envelope takes
+// ~80 ms to rise - so granting the credit then took the level from BEFORE the beat. That is why
+// kicks were small and plenty of beats appeared to do nothing at all. A beat now arms a grant
+// CHASE_BEAT_CENTRE_MS in the future, and the credit is taken from the level as it stands then:
+// the peak of the beat, not its leading edge. The LENGTH of the beat has no bearing on the
+// distance - only Distance and the level do.
+//
+// The level's own rise still triggers a kick as a FALLBACK, rate-limited so one beat cannot fire
+// twice (once from the onset, once from the rise that follows it).
+static bool     chaseHit[NUM_PORTS];       // kept for the log/state dump; the grant is timed below
+static unsigned long chaseGrantAt[NUM_PORTS];   // when this beat's credit is due (0 = none pending)
+static unsigned long chaseLastGrant[NUM_PORTS]; // when a kick was last granted (fallback limiter)
+static const unsigned long CHASE_BEAT_CENTRE_MS = 100;   // onset -> centre of the beat
+static const unsigned long CHASE_FALLBACK_GAP_MS = 200;  // min gap between fallback kicks
+// Set by the per-port adoption loop when ANY port's motion changed, and applied ONCE after the
+// loop so EVERY port restarts together and in phase. A per-port restart left the restarted port
+// at 0 while the others carried on - a permanent gap between display 1 and display 2 (user,
+// 19 Oct: "why is there a definite gap between displays on Port 1 and 2?"). With a timeline row
+// loaded the cells differ per port, so SOME ports restarted and others did not.
+static bool     g_restartMotion = false;
 static float    chaseLvlLast[NUM_PORTS];   // the RAW envelope last frame, so a RISE can be spotted
 static float    chaseNlast[NUM_PORTS];     // the gated, referenced level last frame (the log's n=)
 
@@ -953,24 +1027,24 @@ static inline bool isChaseKick(int p) {
   return portCfg[p].pat == LP_CHASE_1_10 && !portCfg[p].wrap;
 }
 
-// EFFECT sets the SPEED of the kick: twice the rolling speed at 1, the ceiling at 10, stepped
-// logarithmically so every step is a similar jump. Effect 0 means no kick - just the roll.
+// EFFECT sets the SPEED of the kick, as an ABSOLUTE ramp: KICK_MIN_PX_S at 1, KICK_CEIL at 10.
+// It used to be a multiple of the rolling speed ("1 = twice the current speed"), which made sense
+// when the roll was 1-50 px/s. The roll can now be 0.1 px/s, and twice that is invisible - so the
+// ramp is absolute and a kick is always a kick. Effect 0 means no kick at all, just the roll.
+static const float KICK_MIN_PX_S = 40.0f;   // px/s at Effect 1
 static float chaseKickSpeed(int p) {
   float roll = chaseSpeed(p);
   int   eff  = constrain(portCfg[p].effect, 0, 10);
   if (eff <= 0) return roll;
-  float base = roll * 2.0f;
-  if (base >= KICK_CEIL) return KICK_CEIL;
-  float v = base * powf(KICK_CEIL / base, (float)(eff - 1) / 9.0f);
+  float v = KICK_MIN_PX_S * powf(KICK_CEIL / KICK_MIN_PX_S, (float)(eff - 1) / 9.0f);
   if (!(v >= roll && v <= KICK_CEIL)) v = KICK_CEIL;      // NaN guard
   return v;
 }
 
-// MOMENTUM sets the DECELERATION: the 0-0.5 slider becomes a 0-0.6 s settling time. Zero means
-// no momentum at all - the kick holds its speed until the credit is spent, then stops dead.
-static inline float chaseKickTau(int p) {
-  return constrain(portCfg[p].momentum, 0.0f, 0.5f) * 1.2f;
-}
+// MOMENTUM is now measured in DISTANCE, not time: it sets how far the glide after a kick runs -
+// Distance x 6 x momentum, so 0 is no glide at all and the maximum is 3 x Distance. The glide
+// starts at the kick speed, so the dot decelerates smoothly. (It was a 0-6 s settling time here;
+// that made the glide's length depend on the kick speed and let it run for hundreds of pixels.)
 
 // ---- CHASE STATE (per port) ---------------------------------------------------------
 // The Chase is NOT on the step timer. With wrap OFF its movement follows the LEVEL of the
@@ -995,15 +1069,15 @@ static inline bool isChasePat(int p) { return p == (int)LP_CHASE_1_10; }
 static inline bool sensAtMin(float s) { return s <= 0.011f; }
 
 static inline int chaseDotLen(int p) { return constrain(portCfg[p].size, 1, 10); }
-// Speed for a chase is LEDs per second (1-50), NOT the seconds-per-step the other patterns
-// use. A value BELOW 1 can only be an item saved under the old meaning (e.g. 0.005), and
-// clamping it to the 1-floor left the dot crawling at ONE LED a second - which read as "does
-// not follow the bass at all". Such a value takes a workable default instead. A genuine 1
-// set by the user is not below 1, so it is kept.
+// CHASE SPEED IS SECONDS PER PIXEL, 1-10 (user, 19 Oct: "1 is still too fast. I'd like to change
+// this from 1 to 10S, where it takes 1 to 10 seconds to move 1 pixel"). This function returns
+// PIXELS per second, which is what every caller works in: 1 s/px -> 1 px/s (fastest), 10 s/px ->
+// 0.1 px/s (a slow roll). It now matches the dot patterns, whose Speed is seconds per step. An
+// item saved under the OLD meaning (pixels per second, 1-50) simply clamps.
 static inline float chaseSpeed(int p) {
-  float s = portCfg[p].speed;
-  if (s < 1.0f) return 20.0f;
-  return constrain(s, 1.0f, 50.0f);
+  float s = constrain(portCfg[p].speed, 1.0f, 10.0f);
+  if (!(s >= 1.0f)) s = 1.0f;              // NaN guard
+  return 1.0f / s;
 }
 static inline int chaseMaxPos(int p) {
   int m = NUM_LEDS_PER_STRIP - chaseDotLen(p);
@@ -1422,6 +1496,23 @@ String patternIdFromName(String name) {
   // like this for every item, so the marker gets its own id - and can therefore never
   // silently degrade into Moving Dot, which is what an unmapped name does.
   if (n.equalsIgnoreCase("END OF DISPLAY")   || n.equalsIgnoreCase("END_OF_DISPLAY"))  return "END_OF_DISPLAY";
+  // NAMES WITH EXTRA WORDS (user, 19 Oct). Items are named freely on the page - "Chase Green x2",
+  // "Moving Dot Red Fast" - and the exact matches above can never resolve those. An unmapped name
+  // fell through to its own lowercased text, which matches NO pattern, and renderBranchFor() then
+  // degrades it to MOVING DOT. That is what a saved "Chase Green x2" did: the timeline played for
+  // two minutes with bKicks 0 while bOns was 198 - no port was ever a Chase, so stepChase() never
+  // ran and there was nothing to kick.
+  //
+  // A CONTAINS pass, checked after every exact match and before the fallback, resolves any name
+  // that MENTIONS a pattern. An exact name still wins, so nothing already working changes.
+  String lc = n;
+  lc.toLowerCase();
+  if (lc.indexOf("chase")     >= 0) return "chase_1_10";
+  if (lc.indexOf("knight")    >= 0) return "knight_rider";
+  if (lc.indexOf("explosion") >= 0) return "center_out_chase";
+  if (lc.indexOf("moving")    >= 0) return "moving_dot";
+  if (lc.indexOf("vu")        >= 0) return "vu_meter";
+  if (lc.indexOf("eq")        >= 0) return "eq";
   n.toLowerCase();
   return n;
 }
@@ -2267,6 +2358,12 @@ void handleAudioDetect() {
   }
 }
 
+// The beat instruments are added to /diag by a function defined DOWN WITH THE BEAT STATE - the
+// globals it reads (beatListen, odfChainUse, odfNovelty) are declared after this handler, and this
+// prototype is what lets /diag call it from here.
+static void diagBeatFields(JsonDocument &doc);
+
+
 // Crash diagnostics: why did the previous run end, and where was it?
 void handleDiag() {
   ReqMark _req(REQ_DIAG);
@@ -2351,6 +2448,7 @@ void handleDiag() {
   doc["aSlow"] = (double)g_bassSlow;   // the slow peak the Chase's gate is derived from
   doc["aMid"]  = (double)audioMid;
   doc["aLvl"]  = (double)audioLevel;
+  diagBeatFields(doc);     // beat instruments: defined with the beat state, far below
   g_bassPeak = g_bassLvlEnv;                 // start a fresh peak for the next read
   String out;
   serializeJson(doc, out);
@@ -3031,14 +3129,19 @@ void rebuildListening() {
   for (int p = 0; p < NUM_PORTS; p++) {
     BeatListener &L = beatListen[p];
     LedPattern pat = (LedPattern)portCfg[p].pat;
-    // Only patterns that ACT on a beat are listeners at all. The CHASE listens because its
-    // wrap-ON metronome is TIMED by beats; with wrap OFF its movement comes from the level
-    // and a beat only reaches it as the antifreeze nudge (see actOnBeat).
-    L.active = (pat == LP_MOVING_DOT || pat == LP_KNIGHT_RIDER || pat == LP_CENTER_OUT ||
-                isChasePat((int)pat));
+    // Only patterns that CONSUME ONSETS are listeners at all - decided by the table above, never
+    // here. The CHASE is a listener even with wrap OFF (its source is the level, but it takes
+    // onsets as the kick TRIGGER).
+    L.active = patternListensToBeats(portCfg[p].pat, portCfg[p].wrap);
     if (!L.active) continue;
+    // THIS PATTERN'S OWN BAND. The three audio SOURCES are shared measurements, but the BAND of
+    // the Bass Beat source is a per-pattern setting (the Frequency row), so a listener asks for the
+    // chain matching its own band and shares it with any pattern using the same one.
+    // (This was briefly `L.chain = 0`, from misreading "the music output must remain constant".
+    // What must remain constant is the THREE SOURCES - see the table at the LedPattern enum - not
+    // the per-pattern band. The Frequency row is a real setting and must not be ignored.)
     L.chain = chainForBand((float)portCfg[p].freqHz);
-    L.thr   = (1.0f - constrain(portCfg[p].beatSens, 0.01f, 1.0f)) * 60.0f;
+    L.thr   = (1.0f - constrain(portCfg[p].beatSens, 0.01f, 1.0f)) * 60.0f;   // per PATTERN
     L.mult  = (portCfg[p].mult > 1) ? 2 : 1;
     L.lastSeq = odfChain[L.chain].seq;      // never act on a STALE frame
   }
@@ -3052,6 +3155,53 @@ void rebuildListening() {
   R.thr    = (1.0f - constrain(beatSens, 0.01f, 1.0f)) * 60.0f;
   R.mult   = (mult240V > 1) ? 2 : 1;
   R.lastSeq = odfChain[0].seq;
+
+  // AND NOW PUBLISH WHAT THE LISTENERS ACTUALLY ASKED FOR.
+  //
+  // odfConfigureChains() at the TOP of this function runs BEFORE the listeners choose their chains,
+  // so the chain mask it computes still says "chain 0 only". The audio core SKIPS any chain that is
+  // not in odfChainUse - so a listener allocated chain 1 or higher read a chain that was never
+  // processed, its novelty stayed 0 for ever, and that port heard NOTHING.
+  //
+  // On the page every port shares chain 0, so this could not show up there. It showed up in the
+  // TIMELINE, where the cells' Frequency differs from the page's: "they play correctly in patterns,
+  // but do not respond to music at all in the timeline".
+  //
+  // The call is safe to repeat: it leaves an in-use chain's band alone and just recomputes the
+  // mask, so running it again here is exactly what was missing.
+  odfConfigureChains();
+}
+
+// THE BEAT INSTRUMENTS FOR /diag. Defined here, with the state it reads, and called from the /diag
+// handler above through a prototype - because a SHOW CANNOT BE LOGGED: logService() does not flush
+// while a show runs and /tail is a DELTA endpoint, so during a timeline the only live view is this.
+//   bOns/bActs/bFlips/bKicks  the counters since they were last reset by the log's beats line
+//   bNov/bThr                 chain 0's novelty (ADC counts) and its threshold
+//   p0thr                     port 0's own threshold - the per-PATTERN part
+static void diagBeatFields(JsonDocument &doc) {
+  doc["bOns"]    = (uint32_t)g_onsetReal;
+  doc["bActs"]   = (uint32_t)g_beatReal;
+  doc["bFlips"]  = (uint32_t)g_flipLED;
+  doc["bKicks"]  = (uint32_t)g_kickLED;
+  doc["bUse"]    = (uint32_t)odfChainUse;      // which chains are configured (1 = chain 0 only)
+  doc["bNov"]    = (double)odfNovelty;         // chain 0's last novelty, in ADC counts
+  doc["bThr"]    = (double)odfThr;             // chain 0's threshold
+  doc["p0pat"]   = portCfg[0].pat;
+  doc["p0sens"]  = (double)portCfg[0].beatSens;
+  doc["p0act"]   = beatListen[0].active ? 1 : 0;
+  doc["p0thr"]   = (double)beatListen[0].thr;
+  doc["p0taken"] = (uint32_t)beatListen[0].taken;
+  doc["p1thr"]   = (double)beatListen[1].thr;
+  // WHAT EACH PORT IS ACTUALLY RUNNING, plus what the current row's cells are CALLED. These two
+  // proved that a "Chase Green x2" item was playing as MOVING DOT: an unmapped item name resolves
+  // to no pattern at all and renderBranchFor() degrades it, so no port was ever a Chase and
+  // stepChase() never ran - bKicks stayed 0 while bOns climbed.
+  doc["p1pat"]   = portCfg[1].pat;
+  doc["p2pat"]   = portCfg[2].pat;
+  doc["p3pat"]   = portCfg[3].pat;
+  doc["c0id"]    = tlData[tlRow][1].id;
+  doc["c1id"]    = tlData[tlRow][2].id;
+  doc["c2id"]    = tlData[tlRow][3].id;
 }
 
 // The per-pattern ACTION - the only place a beat moves anything.
@@ -3089,6 +3239,16 @@ static void actOnBeat(int i, unsigned long now, bool fromAntifreeze, bool isSub)
     // in for a beat that never came.
     if (portCfg[i].wrap && !isSub)              chaseBeat(i, now);
     else if (portCfg[i].wrap && fromAntifreeze) chaseBeat(i, now);
+    // THE HYBRID, wrap OFF only: an ONSET (or an antifreeze pulse) arms a hit. It is not a beat
+    // action in the old sense - it adds no travel of its own. It just tells stepChase that a hit
+    // has landed, and the LEVEL decides how hard it was. This is what catches the beats the
+    // level's own rises miss.
+    else if (!portCfg[i].wrap && !isSub) {
+      // ARM THE GRANT FOR THE CENTRE OF THE BEAT - see the note at the trigger state. 0 means
+      // "none pending", so two onsets inside the same window cannot double-arm it.
+      if (chaseGrantAt[i] == 0) chaseGrantAt[i] = now + CHASE_BEAT_CENTRE_MS;
+      chaseHit[i] = true;
+    }
     return;
   }
   if (!beatActionAllowed(i)) return;     // minimum sensitivity: the timer takes over
@@ -4256,7 +4416,7 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
       float peak = g_bassSlow;
       if (!(peak >= 0.0f && peak <= 1.0f)) peak = 0.0f;            // NaN guard
       if (peak < 0.16f) peak = 0.16f;       // the room's own idle level measures ~0.15
-      gate = peak * (1.0f - 0.45f * sens);  // sens 1 -> 55% of peak; sens 0.2 -> 91%
+      gate = peak * (1.0f - 0.75f * sens);  // sens 1 -> 25% of peak; sens 0.2 -> 85%
       if (gate < 0.16f) gate = 0.16f;
       float ref = peak;
       if (ref < gate + KICK_MIN_SPAN) ref = gate + KICK_MIN_SPAN;
@@ -4269,7 +4429,7 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
 
     int   dm   = constrain(portCfg[p].distance, 1, 50);
     float kSpd = chaseKickSpeed(p);                                // EFFECT: the kick's speed
-    float tau  = chaseKickTau(p);                                  // MOMENTUM: the deceleration
+    // (Momentum is applied where the glide is set up, from the kick speed - see below.)
 
     // A RISING LEVEL IS A KICK, so the dot answers the bass at once instead of waiting for the
     // credit to trickle back. The grant is the hit's own strength share of Distance, and the
@@ -4277,7 +4437,6 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     //
     // THE RISE IS MEASURED ON THE RAW ENVELOPE, not on `n`: after the gate and the reference a
     // real hit is a small number, so a threshold on `n` would miss hits entirely.
-    bool wasFull = (chaseCredit[p] >= (float)dm - 0.001f);
     // WHAT COUNTS AS A HIT - and the SENSITIVITY sets it. A FIXED threshold was why raising Bass
     // Sensitivity did nothing once the gate was already below the music: the gate only decides
     // which hits are big enough to matter, this decides what is a hit at all.
@@ -4289,20 +4448,36 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     bool rising = (env > chaseLvlLast[p] + riseNeeded);
     chaseLvlLast[p] = env;
     chaseNlast[p]   = n;
+
+    // A HIT IS A BEAT OR A RISE - NEVER BOTH. The onset arms a timed grant, and the credit is
+    // taken from the level AT THAT MOMENT, which is the beat's centre (its peak) rather than its
+    // leading edge. The level's own rise is only a fallback, rate-limited so the rise that
+    // follows an onset cannot fire the same beat a second time.
+    bool hit = false;
+    if (chaseGrantAt[p] != 0 && (long)(now - chaseGrantAt[p]) >= 0) {
+      hit = true;
+      chaseGrantAt[p] = 0;
+    } else if (chaseGrantAt[p] == 0 && rising &&
+               (long)(now - chaseLastGrant[p]) > (long)CHASE_FALLBACK_GAP_MS) {
+      hit = true;
+    }
+    if (hit) chaseLastGrant[p] = now;
+    chaseHit[p] = hit;
     if (!(chaseCredit[p] >= 0.0f && chaseCredit[p] <= 1000.0f)) chaseCredit[p] = 0.0f;
-    if (!(chaseKickI[p]  >= 0.0f && chaseKickI[p]  <= 1.0f))    chaseKickI[p]  = 0.0f;
-    if (rising) chaseCredit[p] += (float)dm * n;
-    chaseCredit[p] += ((float)dm / KICK_REFILL) * dtSec;           // and a slow trickle back
-    bool nowFull = (chaseCredit[p] >= (float)dm - 0.001f);
+    if (!(chaseCoast[p] >= 0.0f && chaseCoast[p] <= 1000.0f)) chaseCoast[p] = 0.0f;
+    // A HIT GRANTS THE CREDIT - there is NO continuous top-up any more. That trickle was what
+    // stopped the coast from ever running: it kept the credit above zero, so the code stayed in
+    // the kick branch and the glide was cancelled within a frame of starting. That is why the
+    // user saw "an effect, but done in a fraction of a second" with momentum at maximum.
+    // Hits are frequent enough to keep it alive; the credit is Distance x the hit's strength.
+    if (hit) chaseCredit[p] += (float)dm * n;                      // ONE grant per beat
     if (chaseCredit[p] > (float)dm) chaseCredit[p] = (float)dm;    // DISTANCE IS THE MAXIMUM
-    // A RISING LEVEL OR A CREDIT THAT HAS REFILLED ARMS A FRESH KICK. Without the second half a
-    // steady loud passage would fade: the intensity decays while the credit is spent, so every
-    // new burst has to start from full again.
-    if (n > 0.0f && (rising || (!wasFull && nowFull))) { chaseKickI[p] = 1.0f; g_kickLED++; }
+    if (hit && n > 0.0f) { chaseCoast[p] = 0.0f; g_kickLED++; }
 
     float rate = roll;
     if (n > 0.0f && chaseCredit[p] > 0.0f && kSpd > roll) {
-      rate = roll + (kSpd - roll) * n * chaseKickI[p];
+      // THE KICK ITSELF: full kick speed until the credit (Distance x hit strength) is spent.
+      rate = roll + (kSpd - roll) * n;
       float spend = (rate - roll) * dtSec;                         // pixels the kick pays for
       if (spend > chaseCredit[p]) {                                // the credit runs out mid-frame
         float frac = (spend > 0.0f) ? (chaseCredit[p] / spend) : 0.0f;
@@ -4310,11 +4485,30 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
         spend = chaseCredit[p];
       }
       chaseCredit[p] -= spend;
-      // MOMENTUM: the intensity decays while the credit is being spent, so a longer Momentum
-      // delivers the SAME pixels as a gentler slide instead of adding more of them. Zero holds
-      // full speed to the last pixel and then stops dead.
-      if (tau > 0.0f) chaseKickI[p] *= expf(-dtSec / tau);
-      else            chaseKickI[p]  = 1.0f;
+      // THE GLIDE. MOMENTUM NOW SETS HOW FAR IT GOES: Distance x 6 x momentum - no glide at all
+      // at zero, 3 x Distance at maximum - and it starts at the KICK SPEED, so the dot
+      // decelerates smoothly instead of braking and then crawling. The decay time follows from
+      // the two: travel = coastV x tau, so tau = the glide's distance / its starting speed.
+      // (The previous version capped the SPEED at Distance/tau. That held the total under
+      // 2 x Distance, but it left Momentum able to change only a 10-pixel crawl - "momentum still
+      // has very little effect". Momentum is measured in DISTANCE now, which is what it does.)
+      float coastV   = rate - roll;
+      float glideCap = (float)dm * 6.0f * constrain(portCfg[p].momentum, 0.0f, 0.5f);
+      chaseCoast[p]    = coastV;
+      chaseCoastTau[p] = (coastV > 0.5f && glideCap > 0.0f) ? (glideCap / coastV) : 0.0f;
+    } else if (chaseCoastTau[p] > 0.0f && chaseCoast[p] > 0.5f) {
+      // THE COAST - THIS IS MOMENTUM, and it is why it was invisible before: the speed used to
+      // decay WHILE the credit was being spent, but the credit is gone in tens of milliseconds at
+      // these speeds, so the decay never got going and the dot snapped straight back to the roll.
+      // Now the kick's own distance is covered at full kick speed and THEN the excess decays back
+      // to the roll, so the whole dot visibly carries on and slows down.
+      //   Momentum 0    -> tau 0    -> no coast at all: a dead stop exactly at Distance.
+      //   Momentum 0.5  -> tau 6s   -> a long glide that eases back into the roll over seconds.
+      chaseCoast[p] *= expf(-dtSec / chaseCoastTau[p]);
+      rate = roll + chaseCoast[p];
+      if (chaseCoast[p] <= 0.5f) chaseCoast[p] = 0.0f;   // the glide is spent
+    } else {
+      chaseCoast[p] = 0.0f;
     }
 
     // SANITISE THE RATE. This is the crash: sqrtf() of a corrupt level is NaN, constrain()
@@ -4590,7 +4784,7 @@ void applyTimelineRow(int row, bool force) {
         for (int i = 0; i < NUM_LEDS_PER_STRIP; i++) leds[p][i] = CRGB::Black;
         ledDirty[p] = true;            // the blank has to be TRANSMITTED, not just held
       }
-      ledPosArr[p] = 0; ledDirArr[p] = 1; ledExplArr[p] = 0; ledStepMs[p] = 0;
+      g_restartMotion = true;          // applied after the loop, so ALL ports restart in phase
     }
     if (wantDark) continue;
 
@@ -4604,8 +4798,18 @@ void applyTimelineRow(int row, bool force) {
     int   wantMult     = (cell && cell->mult > 0) ? ((cell->mult > 1) ? 2 : 1)
                                                   : ((multLED > 1) ? 2 : 1);
     int   wantFreq     = (cell && cell->freqHz > 0) ? constrain(cell->freqHz, 20, 100) : freqLED;
-    float wantSens     = (cell && cell->beatSens >= 0.0f)
-                           ? constrain(cell->beatSens, 0.01f, 1.0f) : ledSel().beatSens;
+    // THE CELL'S OWN SENSITIVITY, OR THE PATTERN'S WHEN THERE IS NO CELL (user, 19 Oct: "A timeline
+    // cell should not affect the sensitivity in any way shape or form. That is all handled in the
+    // patterns page and stored in the playlist. The timeline is a playback facility only").
+    //
+    // A cell IS the saved playlist item: it carries the parameters saved with it, and the timeline
+    // only decides WHEN it plays. So the cell's value is authoritative while it owns the port.
+    // (A "sensitivity floor" was added and removed on the same day - it made a cell's own value
+    // lose to the pattern's, which is not how the playlist is supposed to work.) If a cell seems
+    // to ignore a sensitivity, the ITEM needs re-saving: edit the pattern on the patterns page,
+    // then save it into the playlist.
+    float wantSens = (cell && cell->beatSens >= 0.0f)
+                       ? constrain(cell->beatSens, 0.01f, 1.0f) : ledSel().beatSens;
     const uint32_t *wantRef = (cell && cell->hasColour) ? cell->colour : colourLED;
     // THE EFFECT'S VALUES ARE THE CELL'S OWN (user, 19 Oct). A cell that carries NONE means the
     // effect is OFF - NOT "inherit whatever the pattern happens to be set to". An item saved
@@ -4660,9 +4864,23 @@ void applyTimelineRow(int row, bool force) {
       CRGB v = resolveColourRef(wantRef[i]);      // a theme reference resolves LIVE
       portCfg[p].colour[i] = ((uint32_t)v.r << 16) | ((uint32_t)v.g << 8) | v.b;
     }
-    if (force || motionDiff) {                    // restart only if the MOTION changed
-      ledPosArr[p] = 0; ledDirArr[p] = 1; ledExplArr[p] = 0; ledStepMs[p] = 0;
+    if (force || motionDiff) {                    // the MOTION changed: restart (see below)
+      g_restartMotion = true;                     // applied after the loop, so ALL ports restart
     }
+  }
+
+  // EVERY PORT RESTARTS TOGETHER, or none does. Restarting only the ports whose motion changed
+  // left them at different phases - the permanent gap between display 1 and display 2. The
+  // chase's own motion state is reset here too, so a restart is a real restart.
+  if (g_restartMotion) {
+    for (int p = 0; p < NUM_PORTS; p++) {
+      ledPosArr[p] = 0; ledDirArr[p] = 1; ledExplArr[p] = 0; ledStepMs[p] = 0;
+      chaseAcc[p] = 0.0f; chaseCredit[p] = 0.0f; chaseCoast[p] = 0.0f;
+      chaseLvlLast[p] = 0.0f; chaseNlast[p] = 0.0f;
+      chaseHit[p] = false; chaseGrantAt[p] = 0; chaseLastGrant[p] = 0;
+      chaseCoastTau[p] = 0.0f;
+    }
+    g_restartMotion = false;
   }
 
   // ---- PER-PORT INVERT IS NO LONGER FORCED OFF ------------------------------
@@ -5521,12 +5739,12 @@ void loop() {
     // Printed for the FIRST wrap-OFF chase port - the one a single-strip test would use.
     for (int p = 0; p < NUM_PORTS; p++) {
       if (!isChaseKick(p)) continue;
-      logAppend("chase kick p=%d env=%.2f n=%.2f bs=%.2f roll=%.0f spd=%.0f eff=%d cr=%.1f/%d mom=%.2f i=%.2f",
+      logAppend("chase kick p=%d env=%.2f n=%.2f bs=%.2f roll=%.0f spd=%.0f eff=%d cr=%.1f/%d mom=%.2f coast=%.0f",
                 p, (double)g_bassLvlEnv, (double)chaseNlast[p], (double)portCfg[p].beatSens,
                 (double)chaseSpeed(p), (double)chaseKickSpeed(p),
                 (int)portCfg[p].effect, (double)chaseCredit[p],
                 (int)constrain(portCfg[p].distance, 1, 50), (double)portCfg[p].momentum,
-                (double)chaseKickI[p]);
+                (double)chaseCoast[p]);
       break;
     }
 

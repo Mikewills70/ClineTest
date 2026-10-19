@@ -6,3 +6,5 @@ board_log.txt
 board_diag.txt
 board_tail.txt
 board_settings.txt
+board_timeline.json
+board_playlist.json

@@ -594,3 +594,176 @@ the kick never re-arms.
 
 `hb ... bass=0.07 blvl=0.31 env=0.28 ...` now reports both the raw Bass Level and the smoothed
 figure the gate sees, so the gate default can be set from real music rather than a guess.
+
+### The gate is AUTOMATIC (19 Oct, after two failed hand-set versions)
+
+A HAND-SET gate cannot work and both attempts failed for opposite reasons:
+
+* gate too low -> it sits inside the room noise (measured: the 61-500 Hz band idles at ~0.10-0.15)
+  and the dot shoots in silence;
+* gate too high -> **the slider's maximum asked for 0.46 while the music peaked at 0.38**, so
+  almost nothing could kick. That was reported as "all I see is a slow moving dot".
+
+So the gate is now derived from the music:
+
+    g_bassSlow  a slow peak of the envelope (rises at once, falls over ~2.5 s, in the audio path)
+    peak        max(g_bassSlow, 0.16) - the 0.16 floor is above this room's measured idle level
+    gate        peak * (1 - 0.45 * sens)   sens 1 -> 55% of peak, sens 0.2 -> 91%
+    ref         peak, so a hit at the music's own full height is a FULL kick at any volume
+
+The row is **"Bass Sensitivity"** on the Chase (a LEVEL pattern) and "Beat Sensitivity" elsewhere:
+the same stored per-pattern value, a different meaning, and the map does the relabelling.
+**The sensitivity also sets the HIT THRESHOLD** (`riseNeeded = 0.12 * (1.2 - sens)`, floor 0.03):
+setting only the gate made the slider feel dead once the gate was already below the music.
+
+### MOMENTUM is a COAST after the kick, not a decay during it
+
+It was invisible because the speed decayed WHILE the credit was being spent - and the credit is
+gone in tens of milliseconds at kick speed (10 px at 240 px/s = 42 ms), so the decay never got
+going and the dot snapped straight back to the roll. It now works in two phases:
+
+1. the kick: full kick speed until the Distance x hit-strength credit is spent;
+2. the coast: the excess speed decays (tau = momentum x 12 s) back down to the roll.
+
+The multiplier was 1.2 s (0.6 s at the slider's maximum) and the user found it far too fast, asking
+for "a factor of 10" - hence 12. **The slider's steps are now 0.12 s**, so the usable range is the
+bottom of the slider (0.01-0.20 -> 0.12-2.4 s). Momentum 0 = no coast, a dead stop exactly at
+Distance; 0.5 = tau 6 s, a very long glide.
+**MOMENTUM IS MEASURED IN DISTANCE NOW (final, 19 Oct).** It sets how far the glide after a kick
+runs: `Distance x 6 x momentum` - 0 = no glide at all, 0.5 = 3 x Distance. The glide starts **at
+the kick speed**, so the dot decelerates smoothly rather than braking and then crawling, and the
+decay time follows: `tau = glide distance / starting speed`.
+
+Two earlier attempts and why they failed:
+
+* capping the coast **speed** at `Distance / tau` held the total under 2 x Distance, but it left
+  momentum able to change only a 10-pixel crawl -> "momentum still has very little effect";
+* a plain 0-6 s settling time let the glide run for hundreds of pixels (kick speed 10 = 500 px/s
+  with momentum 0.05 coasted **300 px on a 100-px strip**).
+Momentum now scales something the eye can read - DISTANCE - and the total is bounded at
+`Distance + 3 x Distance` = 4 x Distance at the slider's maximum.
+
+### CHASE SPEED IS SECONDS PER PIXEL (19 Oct)
+
+`chaseSpeed()` returns px/s for its callers, but the slider is 1-10 **seconds per pixel**: 1 = 1
+px/s (fastest the user wants), 10 = 0.1 px/s. "1 px/s is still too fast" - this now matches the
+dot patterns, whose Speed is seconds per step. An item saved under the old meaning (pixels per
+second, 1-50) simply clamps.
+
+**The kick speed ramp is ABSOLUTE** (`KICK_MIN_PX_S` 40 px/s at Effect 1, `KICK_CEIL` 500 at 10).
+It used to be "1 = twice the rolling speed", which is meaningless once the roll can be 0.1 px/s.
+
+### THE THREE AUDIO SOURCES - SET IN STONE (19 Oct)
+
+Declared in the sketch immediately above the `LedPattern` enum, with the pattern-to-source table
+written out in full. **There are always three measurements of the music, and a pattern selects one
+of them IN CODE.** The three never change; their bands may be retuned.
+
+| Source | Meaning | Band |
+|---|---|---|
+| `AUD_BASS_BEAT` | onset detector - WHEN a beat lands | Frequency row .. 250 Hz |
+| `AUD_BASS_LEVEL` | FFT band level - HOW LOUD the bass is | Frequency row .. 500 Hz |
+| `AUD_FULL` | whole-spectrum level | every frequency |
+
+| Pattern | Source |
+|---|---|
+| Moving Dot, Knight Rider, Explosion | `AUD_BASS_BEAT` |
+| Chase, Wrap ON (metronome) | `AUD_BASS_BEAT` |
+| **Chase, Wrap OFF (football)** | **`AUD_BASS_LEVEL`** (the Bass Beat onset is its TRIGGER) |
+| VU meters | `AUD_BASS_LEVEL` |
+| EQ | `AUD_FULL` (not built yet) |
+
+`audioSourceForPattern()` is the single place a source is decided; `patternListensToBeats()` says
+whether a pattern consumes onsets (true for the beat sources and for the Chase with Wrap OFF).
+
+**DO NOT CONFLATE THE THREE SOURCES WITH THE BAND.** A misreading of "the music output Bass Beat,
+Bass Level and FFT need to remain constant. It is the patterns themselves that need to adjust their
+sensitivity" once produced `L.chain = 0` for every listener - which silently ignored the per-pattern
+**Frequency** row. The three SOURCES are what must remain constant; the per-pattern band is a real
+setting and is honoured by `chainForBand(portCfg[p].freqHz)`.
+
+**THE TRICKLE WAS THE CULPRIT (19 Oct).** Even after the coast was added, momentum at maximum
+still finished "in a fraction of a second". The cause was the continuous credit top-up
+(`KICK_REFILL`, Distance px per 0.5 s): it refilled the moment the kick had spent the credit, so
+`chaseCredit > 0` was true again on the next frame, the code went straight back into the kick
+branch and the coast was cancelled. **There is no trickle any more** - the credit comes only from
+hits (a level rise or a Bass Beat onset). If a top-up is ever added back, this is what will break.
+
+### THE HYBRID TRIGGER, TIMED TO THE CENTRE OF THE BEAT (19 Oct)
+
+The onset decides WHEN; the level decides HOW HARD (the credit is Distance x n). But **WHEN the
+level is read matters**, and that was the real bug:
+
+* the onset detector fires at the **leading edge** of the beat;
+* the Bass Level envelope takes ~80 ms to rise.
+
+So granting the credit on the onset took the level from **before** the beat - small kicks, and
+often no kick at all, which is the "still missing a lot of beats even with sensitivity at max".
+A beat now arms `chaseGrantAt[p] = now + 100 ms` and the credit is taken from the level at that
+moment: the **centre (peak) of the beat**. The LENGTH of the beat therefore has no bearing on the
+distance - a long note does not push the dot further.
+
+One `hit` per beat: the level's own rise is only a fallback (a steady groove barely rises between
+hits), rate-limited by `CHASE_FALLBACK_GAP_MS` = 200 ms so the rise that follows an onset cannot
+fire the same beat twice. Antifreeze pulses arm a grant too; the gate keeps them silent in a quiet
+room.
+
+**Frequency matters here**: at 100 Hz the detector was discarding the kick drum's fundamental -
+the very thing it times on. The user found 50 Hz made "a big difference to the number of beats
+recognised". Keep the Chase's Cut Off Below Frequency low (40-60 Hz).
+
+### A SAVED CELL COULD SILENTLY DEAFEN A PATTERN (19 Oct)
+
+"when I play the timeline my moving dot is no longer responding to the beat. That is a major
+fault."
+
+A timeline cell OWNS its port while the timeline plays, and it carries its own `beatSens`. These
+cells were saved when Bass Sensitivity sat at **0.09**, i.e. `thr = (1 - 0.09) x 60 = 54.6` counts
+- and a band peak only reaches **5-40 counts** in music. So onsets stopped dead the instant PLAY
+was pressed, while the page worked (slider at maximum -> thr 0). The Chase survived it because its
+kick has a LEVEL fallback; Moving Dot has no fallback, so its beat reversal simply stopped. **The
+Chase looking fine while Moving Dot was dead was the clue.**
+
+Fixed by making the item's PATTERN the floor for sensitivity: a cell may be MORE sensitive than its
+pattern, never less. Nothing saved earlier can deafen a pattern again. (The underlying scale is
+fine: the flux and the threshold are both in ADC counts - the comment in the audio core says band
+peaks reach 5-40, which is why 54.6 blocks everything.)
+
+### AN ITEM'S NAME DECIDED ITS PATTERN - AND EXTRA WORDS BROKE IT (19 Oct)
+
+"the chase is not moving as it should to music", while the SAME parameters on the page worked.
+The live counters settled it in one read:
+
+    bOns 198   bActs 1795   bFlips 204   <- detector healthy, Moving Dot working
+    bKicks 0                              <- the Chase never kicked in two minutes
+    p0pat 0                               <- that port was MOVING DOT
+
+`bKicks 0` with `bOns 198` can only mean **no port was ever a Chase**, so `stepChase()` never ran.
+
+The cause: a timeline item's pattern is resolved from its **name**, and `patternIdFromName()` did
+EXACT matching only. Items are named freely - "Chase Green x2", "Moving Dot Red Fast" - so none of
+those matched, and the fallback returns the name's own lowercased text, which matches no pattern.
+`renderBranchFor()` then **degrades an unknown id to MOVING DOT** - as its own comment warns. So a
+Chase item played as a Moving Dot. On the PAGE it worked because the page sends the exact pattern
+name ("Chase"), which the exact matcher does resolve.
+
+Fixed with a **CONTAINS pass** in `patternIdFromName()`, after every exact match and before the
+fallback, so any name that MENTIONS a pattern resolves. An exact name still wins, so nothing that
+worked changes. `/diag` now also reports `p0pat..p3pat` (what each port is really running) and
+`c0id..c2id` (what the current row's cells are called), so this is verifiable in one read.
+
+**Any future mapping of names to patterns must keep the contains pass, or a freely-named item will
+silently degrade to Moving Dot again.**
+
+### EVERY PORT RESTARTS TOGETHER (the gap between display 1 and 2)
+
+`adoptTimelineRow` used to reset a port's motion **only if that port's motion had changed**, so
+with a timeline row loaded (whose cells legitimately differ per port) some ports restarted to 0
+while others carried on - a permanent phase gap. It now sets `g_restartMotion` and restarts ALL
+ports once, after the loop, including the chase's own state. The reset is deliberately not done
+inside the loop: that is what caused the gap.
+
+### Local baseline
+
+`baseline-chase-2026-10-19` (local tag, commit 9378fce) is the version the user said "did start to
+give the effect I'm looking for", taken BEFORE the momentum coast. It is not pushed.
