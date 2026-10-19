@@ -142,6 +142,10 @@ volatile bool beatLatch240 = false;
 // still fast enough for beat timing.
 #define FFT_SAMPLES   1024
 #define FFT_MID_MAX   2000.0f      // upper edge of the "mid" band, in Hz
+// BASS LEVEL: the band from the Frequency setting (61 Hz) up to here. A kick drum's body lives
+// between roughly 60 and 250 Hz; 500 Hz catches that with headroom. A CONSTANT, so it can be
+// retuned without touching any pattern.
+#define FFT_BASSLEVEL_MAX 500.0f
 float fftReal[FFT_SAMPLES];
 float fftImag[FFT_SAMPLES];
 
@@ -149,6 +153,11 @@ volatile float audioBass   = 0.0f;   // 0..1 band levels, read by the render loo
 volatile float audioMid    = 0.0f;
 volatile float audioTreble = 0.0f;
 volatile float audioLevel  = 0.0f;   // whole-spectrum level
+// BASS LEVEL - the band a meter or a kick SHOULD be reading: from the Frequency setting
+// (61 Hz) up to FFT_BASSLEVEL_MAX. The FFT's "bass" band above is 17-61 Hz, BELOW what the
+// MAX9814 can hear, which is why the VU meters folded in the mid band as a workaround. The
+// Chase's football and the VU meters now read this instead (user, 19 Oct).
+volatile float audioBassLvl = 0.0f;
 
 // ---- Graphic EQ: ten band levels --------------------------------------------
 // Filled by audioAnalyse() from the SAME FFT the VU meters use, and normalised the
@@ -205,6 +214,7 @@ int           fireIntIdxX = 0;
 volatile uint32_t g_beatReal = 0, g_beatExtra = 0;   // beats delivered, by tag
 volatile uint32_t g_onsetReal = 0;   // DISTINCT onsets acted on (one per render pass)
 volatile uint32_t g_flipLED  = 0, g_flip240   = 0;   // reversals applied, by display
+volatile uint32_t g_kickLED  = 0;   // CHASE kicks applied (Wrap OFF, level-driven)
 
 // ---- Beat clock (phase-locked prediction) ----------------------------------
 // The detector cannot be relied on to catch every beat - a soft hit, or one
@@ -298,6 +308,7 @@ int           barEnergyCnt[4] = {0, 0, 0, 0};
 bool          infillMode = false;
 unsigned long firedCount = 0;                    // direction changes, per log line
 static float bandFloorAll = 0, bandFloorBass = 0, bandFloorMid = 0, bandFloorTreble = 0;
+static float bandFloorBassLvl = 0;   // tracked floor for the 61-500 Hz BASS LEVEL band
 
 unsigned long lastRealBeatTime = 0;
 unsigned long lastAcceptedBeatTime = 0;
@@ -509,6 +520,12 @@ struct PortCfg {
   int   size   = 1;
   bool  wrap   = false;
   bool  invert = false;
+  // THE EFFECT, PER PORT. A timeline cell can give one strip its own Effect / Momentum /
+  // Distance while the next strip keeps the pattern's own values: the effect is part of the
+  // strip's configuration, exactly like speed and size.
+  int   effect   = 0;
+  float momentum = 0.0f;
+  int   distance = 20;
   // LISTENING - this pattern's own view of the audio, on the same scale and with the
   // same formula as the pattern page, so a pattern left alone behaves exactly as the
   // 15/10 baseline did. A timeline cell overrides them for its port, which is what
@@ -632,14 +649,18 @@ static CRGB resolveColourRef(uint32_t ref) {
   return CRGB(refMakeCustom(ref));
 }
 
-// The rainbow for ONE LED, from its POSITION ALONG THE STRIP. Position - not
-// the zone it belongs to - is what makes the four VU body sections join into one
-// continuous rainbow, and what makes a rainbow dot take its colour from where it
-// currently is.
+// The rainbow for ONE LED, from its POSITION ALONG THE STRIP plus a DRIFTING PHASE. Position -
+// not the zone it belongs to - is what makes the four VU body sections join into one continuous
+// rainbow, and what makes a rainbow dot take its colour from where it currently is.
+//
+// THE PHASE MOVES (user, 17 Oct): a fixed position->hue map makes a rainbow completely static,
+// which reads as a still picture instead of a background. One full colour cycle across the
+// strip every ~8 s - slow enough to be a gentle wash behind the pattern, never a flicker.
 static CRGB rainbowAt(int idx, int n) {
   if (n <= 0) n = NUM_LEDS_PER_STRIP;
   if (idx < 0) idx = 0;
-  uint8_t hue = (uint8_t)(((uint32_t)idx * 256UL) / (uint32_t)n);
+  uint8_t phase = (uint8_t)(millis() / 31);          // 256 hue units per ~8 s
+  uint8_t hue = (uint8_t)(((uint32_t)idx * 256UL) / (uint32_t)n + phase);
   return CRGB(CHSV(hue, 255, 255));
 }
 
@@ -664,8 +685,15 @@ unsigned long ledStepMs[NUM_PORTS]  = {0};
 //   3-pixel dot is gone after 30 reversals; a dot that is gone STAYS dark until the pattern is
 //   applied afresh (a timeline row, PLAY, or selecting the pattern again).
 // Effects = 0 or Distance = 0 means NONE of this - the pattern behaves exactly as before.
-#define MD_FRAGS 24                   // pieces per strip. Sized for the DEATH BLAST (the whole
-                                      // pool is used at once) - the ordinary debris recycles.
+#define MD_FRAGS 64                   // pieces per strip: the DEATH BLAST plus the ORDINARY
+                                      // debris of EVERY dot at once (Quantity x Effects can be
+                                      // dozens per reversal - see mdShed()).
+#define MD_BLAST 24                   // pieces the death blast puts out in total, split across
+                                      // the port's dots so each erupts from its own position.
+// THE DOT COMES BACK 3 SECONDS AFTER IT EXPLODES (user, 19 Oct). It restarts ITSELF, so the
+// timeline's "the same item in the next row just continues" rule is never broken by a dead
+// strip and no row has to re-arm it. ONE NUMBER to change if 3 s feels wrong.
+#define MD_RESTART_MS 3000
 struct MdFrag {
   bool     alive;
   bool     blast;      // part of the death blast: ignores Distance, and decays on its own terms
@@ -681,6 +709,7 @@ static MdFrag   mdFrags[NUM_PORTS][MD_FRAGS];
 static uint8_t  mdFlips[NUM_PORTS];   // reversals since the last whole pixel was lost
 static uint8_t  mdLost[NUM_PORTS];    // whole pixels the dot has lost
 static uint32_t mdRng[NUM_PORTS];     // per-port randomiser state
+static unsigned long mdExpiredAt[NUM_PORTS];   // when this port's dot exploded (0 = alive)
 static unsigned long mdLastMs = 0;    // for the per-frame advance
 static float    mdLastDotPxS = 0;     // the dot's own speed at the last reversal (px/s)
 static float    mdLastMomFrac = 0;    // the Momentum fraction used at the last reversal (0..1)
@@ -706,11 +735,11 @@ static inline uint32_t mdRand(int p) {        // xorshift: rand() has no place i
   return x;
 }
 
-// Is the effect live on this port? Moving Dot only, Effects > 0 and Distance > 0.
+// Is the effect live on this port? Moving Dot only, Effects > 0 and Distance > 0. The values
+// are the PORT's own, because a timeline cell may have set them for this strip alone.
 static inline bool mdEffectOn(int p) {
   if (portCfg[p].pat != LP_MOVING_DOT) return false;
-  LedPatParams& r = ledPat(ledPatIndexOfEnum(portCfg[p].pat));
-  return (r.effect > 0 && r.distance > 0);
+  return (portCfg[p].effect > 0 && portCfg[p].distance > 0);
 }
 
 // The dot's length WITH the effect's erosion. It only ever SHORTENS, and only the dot's own
@@ -727,6 +756,7 @@ static inline int mdDotLen(int p) {
 void mdResetAll() {
   for (int p = 0; p < NUM_PORTS; p++) {
     mdFlips[p] = 0; mdLost[p] = 0;
+    mdExpiredAt[p] = 0;                   // a fresh cell cancels any pending restart
     mdRng[p] = 0x1234567u + (uint32_t)p * 2654435761u;
     for (int k = 0; k < MD_FRAGS; k++) mdFrags[p][k].alive = false;
   }
@@ -740,16 +770,25 @@ void mdResetAll() {
 // there is nothing left moving, so the cloud dies with it.
 static void mdExplode(int p, int at) {
   for (int k = 0; k < MD_FRAGS; k++) mdFrags[p][k].alive = false;
-  at = constrain(at, 0, NUM_LEDS_PER_STRIP - 1);
-  for (int k = 0; k < MD_FRAGS; k++) {
-    MdFrag& f = mdFrags[p][k];
-    f.alive  = true;
-    f.blast  = true;
-    f.posf   = (float)at;
-    f.dir    = (k & 1) ? -1 : 1;                    // outwards, both ways
-    f.speed  = 50.0f + (float)(mdRand(p) % 260);    // a SPREAD, so they arrive at different
-    f.bright = 1.0f;                                // times and reach the far ends
-    f.moved  = 0.0f;
+  // EVERY DOT ERUPTS FROM ITS OWN POSITION (user, 19 Oct: "the effects ... should happen on as
+  // many dots as were selected"). MD_BLAST pieces are split across the port's dots, so the whole
+  // strip is covered and a dot is never left out of its own ending.
+  int effQty = constrain(portCfg[p].qty, 1, 8);
+  int per = MD_BLAST / effQty;
+  if (per < 4) per = 4;
+  int slot = 0;
+  for (int q = 0; q < effQty && slot < MD_FRAGS; q++) {
+    int base = (at + (q * NUM_LEDS_PER_STRIP) / effQty) % NUM_LEDS_PER_STRIP;
+    for (int k = 0; k < per && slot < MD_FRAGS; k++, slot++) {
+      MdFrag& f = mdFrags[p][slot];
+      f.alive  = true;
+      f.blast  = true;
+      f.posf   = (float)constrain(base, 0, NUM_LEDS_PER_STRIP - 1);
+      f.dir    = (k & 1) ? -1 : 1;                  // outwards, both ways, from THIS dot
+      f.speed  = 50.0f + (float)(mdRand(p) % 260);  // a spread, so they arrive at different
+      f.bright = 1.0f;                              // times and reach the far ends
+      f.moved  = 0.0f;
+    }
   }
 }
 
@@ -758,44 +797,55 @@ static void mdShed(int p) {
   if (!mdEffectOn(p)) return;
   // A DOT THAT NO LONGER EXISTS SHEDS NOTHING - and must not explode a second time either.
   if (constrain(portCfg[p].size, 1, 10) - (int)mdLost[p] <= 0) return;
-  LedPatParams& r = ledPat(ledPatIndexOfEnum(portCfg[p].pat));
   // EROSION: a WHOLE pixel every (10 x Effects) reversals (user, 17 Oct). With Effects 4 that
   // is 40 reversals per pixel, so a 3-pixel dot survives 120 of them.
-  int flipsPerPixel = 10 * constrain((int)r.effect, 1, 10);
+  int flipsPerPixel = 10 * constrain(portCfg[p].effect, 1, 10);
   if (++mdFlips[p] >= flipsPerPixel) {
     mdFlips[p] = 0;
     if (mdLost[p] < 200) mdLost[p]++;
     if (constrain(portCfg[p].size, 1, 10) - (int)mdLost[p] <= 0) {
+      // ONE LINE PER DEATH, so "did this strip die by itself or because of another one?" is
+      // answered by the log instead of inferred. Each port counts its own reversals.
+      logAppend("effect EXPIRED port=%d at=%d size=%d", p + 1, (int)ledPosArr[p],
+                constrain(portCfg[p].size, 1, 10));
+      mdExpiredAt[p] = millis();      // ...and the automatic restart is timed from HERE
       mdExplode(p, (int)ledPosArr[p]);
       return;
     }
   }
   // THE COUNT IS THE EFFECT SLIDER, EXACTLY: 1..10 pieces per direction change, and NOT
   // randomised. (It used to be Distance/5 capped at 4 and randomised.)
-  int n = constrain((int)r.effect, 1, 10);
+  int n = constrain(portCfg[p].effect, 1, 10);
   // MOMENTUM IS THE PIECES' SPEED AWAY FROM THE DOT (user, 17 Oct, second look): at MAXIMUM
   // they leave at the dot's OWN speed, at MINIMUM they "hit the wall" and stay exactly where
   // the dot turned. (The first build had this the wrong way round - heavy meant slow.)
-  float frac = constrain(r.momentum, 0.0f, 0.5f) / 0.5f;         // 0 = wall, 1 = dot's speed
+  float frac = constrain(portCfg[p].momentum, 0.0f, 0.5f) / 0.5f;  // 0 = wall, 1 = dot's speed
   float dotPxS = 1.0f / ((portCfg[p].speed > 0.0005f) ? portCfg[p].speed : 0.0005f);
   if (dotPxS > 600.0f) dotPxS = 600.0f;
   if (dotPxS < 1.0f)   dotPxS = 1.0f;
   float piecePxS = dotPxS * frac;
   mdLastDotPxS  = dotPxS;
   mdLastMomFrac = frac;
-  for (int k = 0; k < n; k++) {
-    int slot = -1;
-    for (int j = 0; j < MD_FRAGS; j++) if (!mdFrags[p][j].alive) { slot = j; break; }
-    if (slot < 0) slot = (int)(mdRand(p) % MD_FRAGS);   // all busy: the oldest is recycled
-    MdFrag& f = mdFrags[p][slot];
-    f.alive  = true;
-    f.blast  = false;                                  // ordinary debris, not the death blast
-    f.posf   = (float)constrain((int)ledPosArr[p] + (int)(mdRand(p) % 3) - 1,
-                                0, NUM_LEDS_PER_STRIP - 1);
-    f.dir    = (ledDirArr[p] > 0) ? -1 : 1;            // the direction the dot WAS travelling
-    f.speed  = piecePxS * (0.55f + (float)(mdRand(p) % 90) / 100.0f);   // they break up
-    f.bright = 1.0f;
-    f.moved  = 0.0f;
+  // EVERY DOT SHEDS FROM ITS OWN POSITION (user, 19 Oct: "the effects only happen on 1 of the
+  // dots, it should happen on as many dots as were selected"). The dots are drawn at EVEN
+  // OFFSETS from ledPosArr - the same arithmetic as drawPortPattern() - so each one breaks up
+  // exactly where it is, and each sheds the full Effects count of pieces.
+  int effQty = constrain(portCfg[p].qty, 1, 8);
+  for (int q = 0; q < effQty; q++) {
+    int base = (ledPosArr[p] + (q * NUM_LEDS_PER_STRIP) / effQty) % NUM_LEDS_PER_STRIP;
+    for (int k = 0; k < n; k++) {
+      int slot = -1;
+      for (int j = 0; j < MD_FRAGS; j++) if (!mdFrags[p][j].alive) { slot = j; break; }
+      if (slot < 0) slot = (int)(mdRand(p) % MD_FRAGS);   // all busy: the oldest is recycled
+      MdFrag& f = mdFrags[p][slot];
+      f.alive  = true;
+      f.blast  = false;                                  // ordinary debris, not the death blast
+      f.posf   = (float)constrain(base + (int)(mdRand(p) % 3) - 1, 0, NUM_LEDS_PER_STRIP - 1);
+      f.dir    = (ledDirArr[p] > 0) ? -1 : 1;            // the direction the dots WERE travelling
+      f.speed  = piecePxS * (0.55f + (float)(mdRand(p) % 90) / 100.0f);   // they break up
+      f.bright = 1.0f;
+      f.moved  = 0.0f;
+    }
   }
 }
 
@@ -810,17 +860,26 @@ void mdAdvanceAll(unsigned long now) {
   float dtS = dtMs / 1000.0f;
 
   for (int p = 0; p < NUM_PORTS; p++) {
-    LedPatParams& r = ledPat(ledPatIndexOfEnum(portCfg[p].pat));
+    // THE DOT RESTARTS ITSELF (user, 19 Oct): 3 s after it exploded the pattern comes back at
+    // full size, WHERE IT ALREADY IS and still travelling - so a dead strip never disturbs the
+    // timeline (two rows holding the same item still just continue) and no row has to re-arm it.
+    if (mdExpiredAt[p] != 0 && (unsigned long)(now - mdExpiredAt[p]) >= MD_RESTART_MS) {
+      mdExpiredAt[p] = 0;
+      mdFlips[p] = 0; mdLost[p] = 0;
+      for (int k = 0; k < MD_FRAGS; k++) mdFrags[p][k].alive = false;
+      logAppend("effect RESTART port=%d", p + 1);
+    }
     // MOMENTUM IS THE PIECES' SPEED AWAY FROM THE DOT (user, 17 Oct, second look) and
     // brightness is tied to it the SAME way round: a fast piece lasts, a stopped one dims out.
-    float frac = constrain(r.momentum, 0.0f, 0.5f) / 0.5f;    // 0 = hits the wall, 1 = dot speed
+    // The values are the PORT's own: a timeline cell may set them for this strip alone.
+    float frac = constrain(portCfg[p].momentum, 0.0f, 0.5f) / 0.5f;   // 0 = wall, 1 = dot speed
     // A piece still SLOWS as it goes, but the endpoints must read exactly as specified: at
     // maximum it streaks away keeping (nearly) the dot's speed, at minimum it never moved.
     float kSpeed  = expf(-dtMs / (600.0f + 2400.0f * frac));
     // BRIGHTNESS IS TIED TO MOMENTUM the same way round: one that "hit the wall" dims out at
     // once, one travelling at speed lingers.
     float kBright = expf(-dtMs / (90.0f + 900.0f * frac));
-    int   extent  = constrain((int)r.distance, 0, 100);
+    int   extent  = constrain(portCfg[p].distance, 0, 100);
     // The DEATH BLAST decays on its OWN terms: it must always span the strip and always fade
     // out, whatever Momentum and Distance are set to.
     float kBlastS = expf(-dtMs / 1500.0f);
@@ -844,6 +903,73 @@ void mdAdvanceAll(unsigned long now) {
       if (f.bright < 0.02f) f.alive = false;
     }
   }
+}
+
+// ---- THE CHASE KICK: Wrap OFF is a FOOTBALL driven by the BASS LEVEL (user, 19 Oct) --------
+// CHASE ONLY. It is not a Moving Dot behaviour and it is NOT beat-triggered - the level drives
+// it, which is what the user asked for first and then confirmed they prefer. Chase Wrap ON (the
+// metronome) is untouched by any of this, and so are all the other patterns.
+//
+// The dot ROLLS at Speed so the display never stalls, and the BASS LEVEL kicks it along. Every
+// kick has a CREDIT of extra pixels it may travel, and the four controls divide the work:
+//
+//   DISTANCE   the credit's MAXIMUM - the furthest one kick can carry the dot (1-50 px)
+//   BASS LEVEL how much of that credit is on offer right now ("how much of the distance is
+//              covered"), and how hard the kick is applied
+//   EFFECT     the SPEED of the kicked movement: 1 = twice the rolling speed, 10 = KICK_CEIL
+//   MOMENTUM   the DECELERATION: 0 = full kick speed until the credit is gone and then a dead
+//              stop, 0.5 = the SAME pixels delivered as a gentler ~0.6 s slide
+//
+// Both the fast phase and Momentum's decay spend the SAME credit, so DISTANCE is a genuine hard
+// maximum rather than a starting speed.
+//
+// The ceiling is the user's own definition of the fastest a dot may move without the display
+// stepping: the Moving Dot display's minimum Speed of 0.002 s per step, i.e. 500 pixels/second.
+static const float KICK_CEIL   = 500.0f;   // px/s - the Speed 0.002 equivalent
+static const float KICK_REFILL = 0.5f;     // seconds for a spent credit to trickle back
+// The smallest gap between the gate and the full-kick reference, so n can never divide by zero in
+// a very quiet passage. The reference itself is the MUSIC'S OWN PEAK now - see stepChase.
+static const float KICK_MIN_SPAN = 0.06f;
+
+static float    chaseCredit[NUM_PORTS];    // extra pixels this kick may still travel
+static float    chaseKickI[NUM_PORTS];     // the kick's intensity now (1 = freshly kicked)
+static float    chaseLvlLast[NUM_PORTS];   // the RAW envelope last frame, so a RISE can be spotted
+static float    chaseNlast[NUM_PORTS];     // the gated, referenced level last frame (the log's n=)
+
+// THE BASS LEVEL ENVELOPE, shared by every pattern that needs a LEVEL rather than a beat: one
+// smoothed copy of the 61-500 Hz band. It is updated in the AUDIO path, not the render loop, so
+// it is meaningful even when the display is idle - which is what makes the gate tunable from the
+// log. The audio window is ~59 ms, so the attack cannot be faster than a frame: 80 ms attack,
+// 250 ms release.
+volatile float   g_bassLvlEnv = 0.0f;
+volatile float   g_bassPeak   = 0.0f;   // peak of the ENVELOPE since the last /diag read
+// A SLOW peak of the envelope: rises at once, falls over ~2.5 s. This is what the Chase's gate is
+// derived from, so the gate is always a fraction of what the music is ACTUALLY doing instead of
+// a number the user has to guess. A hand-set gate is unworkable: the microphone's absolute scale
+// is nothing like 0-1, so any fixed number is either inside the room noise or above the music.
+volatile float   g_bassSlow   = 0.0f;
+
+static inline bool isChaseKick(int p) {
+  return portCfg[p].pat == LP_CHASE_1_10 && !portCfg[p].wrap;
+}
+
+// EFFECT sets the SPEED of the kick: twice the rolling speed at 1, the ceiling at 10, stepped
+// logarithmically so every step is a similar jump. Effect 0 means no kick - just the roll.
+static float chaseKickSpeed(int p) {
+  float roll = chaseSpeed(p);
+  int   eff  = constrain(portCfg[p].effect, 0, 10);
+  if (eff <= 0) return roll;
+  float base = roll * 2.0f;
+  if (base >= KICK_CEIL) return KICK_CEIL;
+  float v = base * powf(KICK_CEIL / base, (float)(eff - 1) / 9.0f);
+  if (!(v >= roll && v <= KICK_CEIL)) v = KICK_CEIL;      // NaN guard
+  return v;
+}
+
+// MOMENTUM sets the DECELERATION: the 0-0.5 slider becomes a 0-0.6 s settling time. Zero means
+// no momentum at all - the kick holds its speed until the credit is spent, then stops dead.
+static inline float chaseKickTau(int p) {
+  return constrain(portCfg[p].momentum, 0.0f, 0.5f) * 1.2f;
 }
 
 // ---- CHASE STATE (per port) ---------------------------------------------------------
@@ -1043,6 +1169,11 @@ struct TlItem {
   // on the same port is sensitive. -1 / 0 mean "the cell carries none".
   float    beatSens = -1.0f;
   int      freqHz   = 0;
+  // THE MOVING DOT EFFECT travels with the pattern like everything else. -1 means "the cell
+  // carries none", so an older cell leaves the pattern's own values in force.
+  int      effect   = -1;      // -1 none | 0 = off | 1..10 pieces per reversal
+  float    momentum = -1.0f;   // 0..0.5 s: the pieces' speed away from the dot
+  int      distance = -1;      // 0..100 pixels the effect may use
 };
 
 TlItem tlData[TL_ROWS][TL_COLS];
@@ -1313,9 +1444,12 @@ CRGB hexToCRGB(String hex) {
 int computeVuLevel(float &smooth, float attack, float decay, bool fullRange) {
   float src;
   if (fullRange) {
-    src = audioLevel;
+    src = audioLevel;                 // EQ: the whole spectrum
   } else {
-    src = (audioBass > audioMid) ? audioBass : audioMid;
+    // BASS LEVEL (61-500 Hz). This used to be max(bass, mid), a workaround for the microphone
+    // barely responding below ~150 Hz. Bass Level is that band done properly, so the workaround
+    // is gone: a meter should be reading bass level (user, 19 Oct).
+    src = audioBassLvl;
   }
   float target = constrain(src, 0.0f, 1.0f) * 10.0f;
   float a = constrain(attack, 0.01f, 1.0f);
@@ -1865,8 +1999,19 @@ void handleLiveTweak() {
       lastSig = sig;
       // The SPEED the page sent is the whole question for "it runs very slowly": Chase sends
       // LEDs/s (1-50) and the dot patterns send SECONDS per step, and the value is shared.
-      logAppend("tweak %s speed=%.3f bytes=%u heap=%u", sig.c_str(),
-                (double)jsonNumF(doc["speed"], -1.0f),
+      // THE COLOUR (slot 0's reference) AND THE EFFECT VALUES ARE LOGGED WITH IT. "the colour
+      // would not change" and "the effects would not go away" are then answerable from the log
+      // instead of argued about - and this is what the page SENT, not what the strip showed.
+      char cbuf[8];
+      JsonArray cArr = doc["colour"].as<JsonArray>();
+      uint32_t cref = parseColourRef((!cArr.isNull() && cArr.size() > 0)
+                                       ? cArr[0].as<const char*>() : nullptr, 0xFFFFFFFFu);
+      if (cref == 0xFFFFFFFFu) snprintf(cbuf, sizeof(cbuf), "(none)");
+      else                     refToString(cref, cbuf, sizeof(cbuf));
+      logAppend("tweak %s speed=%.3f col0=%s eff=%d mom=%.2f dist=%d bytes=%u heap=%u",
+                sig.c_str(), (double)jsonNumF(doc["speed"], -1.0f), cbuf,
+                jsonNumI(doc["effect"], -1), (double)jsonNumF(doc["momentum"], -1.0f),
+                jsonNumI(doc["distance"], -1),
                 (unsigned)server.arg("plain").length(), (unsigned)ESP.getFreeHeap());
     }
   }
@@ -2195,6 +2340,18 @@ void handleDiag() {
   // through a show: the board is the master, the page only interpolates between polls.
   doc["tlElapsedMs"] = tlPlaying ? (uint32_t)(millis() - tlRowStart) : 0;
   doc["tlDelayMs"]   = (uint32_t)(tlDelaySec * 1000.0f);
+  // AUDIO LEVELS. The log stops flushing while a show runs and /tail is a DELTA endpoint, so
+  // neither can be polled for this - and tuning the Chase's gate needs these numbers.
+  //   bass 17-61 Hz (the FFT's "bass") | blvl 61-500 Hz BASS LEVEL | env its smoothed envelope
+  //   mid 61-2000 Hz | lvl whole spectrum | peak = highest envelope since the last read
+  doc["aBass"] = (double)audioBass;
+  doc["aBlvl"] = (double)audioBassLvl;
+  doc["aEnv"]  = (double)g_bassLvlEnv;
+  doc["aPeak"] = (double)g_bassPeak;
+  doc["aSlow"] = (double)g_bassSlow;   // the slow peak the Chase's gate is derived from
+  doc["aMid"]  = (double)audioMid;
+  doc["aLvl"]  = (double)audioLevel;
+  g_bassPeak = g_bassLvlEnv;                 // start a fresh peak for the next read
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
@@ -2900,10 +3057,13 @@ void rebuildListening() {
 // The per-pattern ACTION - the only place a beat moves anything.
 static void actForListener(int i) {
   if (i < NUM_PORTS) {
+    // MOVING DOT AND KNIGHT RIDER: a beat REVERSES the dot, as it always has. The Chase is not
+    // here at all - its beats go through actOnBeat, and its FOOTBALL is level-driven, not
+    // beat-driven. No pattern shares another's effect.
     if (portCfg[i].pat == LP_MOVING_DOT || portCfg[i].pat == LP_KNIGHT_RIDER)
       ledDirArr[i] = -ledDirArr[i];
-    // THE MOVING DOT EFFECT. A reversal is the only trigger there is: every one sheds debris,
-    // and every TENTH also costs the dot a whole pixel. Knight Rider has no effect yet.
+    // THE MOVING DOT EFFECT. The beat is the trigger: every one sheds debris, and every TENTH
+    // also costs the dot a whole pixel. Knight Rider has no effect yet.
     if (portCfg[i].pat == LP_MOVING_DOT) mdShed(i);
     else if (portCfg[i].pat == LP_CENTER_OUT)
       ledExplArr[i] = 0;
@@ -2922,10 +3082,13 @@ static void actOnBeat(int i, unsigned long now, bool fromAntifreeze, bool isSub)
   if (i < NUM_PORTS && isChasePat(portCfg[i].pat)) {
     // A REAL beat times the metronome. A SUB-beat (the half-way one) is NOT a beat for this
     // purpose - it would reverse the traverse twice per beat - so it is ignored here.
-    // With wrap OFF the level drives every frame and no beat moves it at all; the ANTIFREEZE
-    // still does, in either mode, because it stands in for a beat that never came.
-    if (portCfg[i].wrap && !isSub) chaseBeat(i, now);
-    else if (fromAntifreeze)       chaseBeat(i, now);
+    //
+    // With wrap OFF there is NO beat action at all: the football is LEVEL-driven (the roll from
+    // Speed plus the bass kicks), so the antifreeze no longer nudges it either - the roll already
+    // keeps the display alive. The antifreeze still drives the wrap-ON metronome, where it stands
+    // in for a beat that never came.
+    if (portCfg[i].wrap && !isSub)              chaseBeat(i, now);
+    else if (portCfg[i].wrap && fromAntifreeze) chaseBeat(i, now);
     return;
   }
   if (!beatActionAllowed(i)) return;     // minimum sensitivity: the timer takes over
@@ -3222,7 +3385,7 @@ static void audioAnalyse() {
   if (bassTop < bassBottom + binW) bassTop = bassBottom + binW;
   bassBandLo = bassBottom;               // logged, so the band in use is visible
   bassBandHi = bassTop;
-  float bass = 0, mid = 0, treb = 0, all = 0;
+  float bass = 0, mid = 0, treb = 0, all = 0, blvl = 0;
   // Ten LOG-spaced EQ bands. Equal widths in Hz would put nine bars in the bass and
   // one across everything else, which is not what a spectrum looks like. This table
   // is each band's UPPER edge in Hz (40 Hz to 5 kHz).
@@ -3235,6 +3398,9 @@ static void audioAnalyse() {
     if (hz >= bassBottom && hz <= bassTop)      bass += m;
     else if (hz > bassTop && hz <= FFT_MID_MAX) mid  += m;
     else if (hz > FFT_MID_MAX)                  treb += m;
+    // BASS LEVEL (61-500 Hz). A SEPARATE accumulator, deliberately not part of the chain
+    // above, so the bass/mid/treble bands and everything that reads them are untouched.
+    if (hz > bassTop && hz <= FFT_BASSLEVEL_MAX) blvl += m;
     for (int e = 0; e < EQ_BANDS; e++) {
       if (hz <= eqEdge[e]) { eqSum[e] += m; break; }
     }
@@ -3245,11 +3411,35 @@ static void audioAnalyse() {
   float dbBass = 20.0f * log10f(bass + 1e-6f);
   float dbMid  = 20.0f * log10f(mid  + 1e-6f);
   float dbTreb = 20.0f * log10f(treb + 1e-6f);
+  float dbBassLvl = 20.0f * log10f(blvl + 1e-6f);
 
   audioLevel  = constrain((dbAll  - trackFloor(bandFloorAll,    dbAll )) / 24.0f, 0.0f, 1.0f);
   audioBass   = constrain((dbBass - trackFloor(bandFloorBass,   dbBass)) / 24.0f, 0.0f, 1.0f);
   audioMid    = constrain((dbMid  - trackFloor(bandFloorMid,    dbMid )) / 24.0f, 0.0f, 1.0f);
   audioTreble = constrain((dbTreb - trackFloor(bandFloorTreble, dbTreb)) / 24.0f, 0.0f, 1.0f);
+  // BASS LEVEL: the same dB + tracked-floor normalisation as every other level, so a quiet
+  // room reads 0 and music reads 0-1 without a separate calibration.
+  audioBassLvl = constrain((dbBassLvl - trackFloor(bandFloorBassLvl, dbBassLvl)) / 24.0f, 0.0f, 1.0f);
+
+  // THE BASS LEVEL ENVELOPE, smoothed HERE so it exists whether or not the display is running.
+  // One FFT window is ~59 ms, so the attack cannot be finer than that: 80 ms attack, 250 ms
+  // release. Every level-driven pattern (the Chase's football) reads this, never the raw figure.
+  {
+    float winSec = (float)FFT_SAMPLES / (audioFs > 1.0f ? audioFs : 8000.0f);
+    if (!(winSec > 0.001f) || winSec > 0.2f) winSec = 0.059f;
+    float src = audioBassLvl;
+    if (!(src >= 0.0f && src <= 1.0f)) src = 0.0f;                 // NaN guard
+    // 150 ms release: long enough to be stable, short enough that two fast bass notes are still
+    // two hits. At 250 ms drum-and-bass passages merged into one and beats were missed.
+    float tau = (src > g_bassLvlEnv) ? 0.080f : 0.150f;
+    g_bassLvlEnv += (src - g_bassLvlEnv) * (1.0f - expf(-winSec / tau));
+    if (!(g_bassLvlEnv >= 0.0f && g_bassLvlEnv <= 1.0f)) g_bassLvlEnv = 0.0f;
+    if (g_bassLvlEnv > g_bassPeak) g_bassPeak = g_bassLvlEnv;   // read and reset by /diag
+    // THE SLOW PEAK the Chase's gate is derived from: follow a rise immediately, fall over ~2.5 s.
+    if (g_bassLvlEnv > g_bassSlow) g_bassSlow = g_bassLvlEnv;
+    else g_bassSlow += (g_bassLvlEnv - g_bassSlow) * (1.0f - expf(-winSec / 2.5f));
+    if (!(g_bassSlow >= 0.0f && g_bassSlow <= 1.0f)) g_bassSlow = 0.0f;
+  }
 
   // The ten EQ bands: same dB + tracked-floor normalisation as the bands above.
   for (int e = 0; e < EQ_BANDS; e++) {
@@ -4000,8 +4190,9 @@ static void chaseBeat(int p, unsigned long now) {
     // the way it came if an extra beat slipped through; aiming at the opposite end cannot.
     ledDirArr[p] = (ledPosArr[p] > (maxPos / 2)) ? -1 : 1;
   } else {
-    // One beat's worth of travel, the full Speed value in LEDs. Only the antifreeze and the
-    // minimum-sensitivity timer reach here: with audio, the LEVEL moves it every frame.
+    // NOT REACHED any more for a wrap-OFF chase: the football in stepChase() is level-driven, so
+    // no beat or antifreeze trigger calls this branch on a wrap-OFF dot. It is left in place
+    // because chaseBeat() is also the entry point for the wrap-ON metronome.
     ledPosArr[p] += (int)chaseSpeed(p);
     if (ledPosArr[p] > maxPos) ledPosArr[p] = 0;   // wrap OFF: restart at the start
   }
@@ -4027,30 +4218,118 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     int np   = from + (int)(((long)(to - from) * (long)el) / (long)iv);
     ledPosArr[p] = (np < 0 || np > maxPos) ? 0 : np;      // clamped: see the note below
   } else {
-    // LEVEL-DRIVEN. Speed is the CAP and the level scales against it. At minimum
-    // sensitivity the level is ignored and Speed is used directly - the timer takes over.
-    // With Audio Detect OFF there is no level at all, so the antifreeze nudges it instead.
+    // THE FOOTBALL (see the kick block far above). The dot ROLLS at Speed so the display never
+    // stalls, and the BASS LEVEL kicks it: the level decides how hard, and the DISTANCE credit
+    // decides how far. Speed is no longer a CAP on a level-scaled rate - it is the floor.
     //
-    // The level goes through a SQUARE ROOT. The bass level sits low on most music (0.05-0.5),
-    // and used raw the dot barely moved on quiet passages - it looked as if it was not
-    // following the music at all. The curve lifts the quiet end without altering the loud
-    // end, where the Speed cap applies anyway.
-    float rate = 0.0f;
-    if (sensAtMin(c.beatSens) || sensAtMin(beatSens)) rate = chaseSpeed(p);
-    else if (audioEnabled)                            rate = sqrtf(audioBass) * chaseSpeed(p);
+    // The level goes through a SQUARE ROOT, as it always has. The bass level sits low on most
+    // music (0.05-0.5), and used raw the dot barely moved on quiet passages. Minimum beat
+    // sensitivity (or Audio Detect OFF) means the music has NO effect: no kick at all, just the
+    // roll - the same rule every other pattern follows.
+    float dtSec = (float)dtMs / 1000.0f;
+    float roll  = chaseSpeed(p);
+
+    // BASS LEVEL (61-500 Hz), smoothed by the envelope follower in the render loop, then GATED.
+    // This is the LOUDNESS of the beat, not its timing - the timing (Bass Beat) is what Wrap ON
+    // uses and it is untouched. The gate is this pattern's OWN control: the row is relabelled
+    // "Bass Level" on the Chase. Below the gate there is NO kick at all, so a silent room leaves
+    // the dot rolling at Speed and nothing else.
+    float gate = 0.0f;
+    float n    = 0.0f;                 // the level AFTER the gate and the reference, 0..1
+    float env  = g_bassLvlEnv;         // the smoothed Bass Level, before anything else
+    if (!(env >= 0.0f && env <= 1.0f)) env = 0.0f;                 // NaN guard
+    // The sensitivity is needed OUTSIDE the gate block: it also sets what counts as a HIT.
+    float sens = constrain(c.beatSens, 0.01f, 1.0f);
+    if (!sensAtMin(c.beatSens) && !sensAtMin(beatSens) && audioEnabled) {
+      // THE GATE IS AUTOMATIC, DERIVED FROM THE MUSIC (user, 19 Oct: "Bass Level set to max - all
+      // I see is a slow moving dot"). A HAND-SET gate cannot work: its maximum asked for 0.46
+      // while this music peaks at 0.38, so nothing could kick; at the other end it sat inside the
+      // room noise. The absolute scale of the band is simply not something a slider can express.
+      //
+      //   g_bassSlow  a slow peak of the envelope (rises at once, falls over ~2.5 s)
+      //   gate        a fraction of that peak, so it always sits INSIDE the music
+      //   ref         the peak itself, so a hit at full height is a FULL kick
+      //
+      // The slider is now a SENSITIVITY, which is what the user called it: higher = a lower gate
+      // = responds to quieter hits. It cannot be set to block everything, because the gate is
+      // always a fraction of what the music is doing.
+      float peak = g_bassSlow;
+      if (!(peak >= 0.0f && peak <= 1.0f)) peak = 0.0f;            // NaN guard
+      if (peak < 0.16f) peak = 0.16f;       // the room's own idle level measures ~0.15
+      gate = peak * (1.0f - 0.45f * sens);  // sens 1 -> 55% of peak; sens 0.2 -> 91%
+      if (gate < 0.16f) gate = 0.16f;
+      float ref = peak;
+      if (ref < gate + KICK_MIN_SPAN) ref = gate + KICK_MIN_SPAN;
+      // LINEAR above the gate (user's choice). No sqrt: that curve lifted the noise floor too.
+      if (env > gate) {
+        n = (env - gate) / (ref - gate);
+        if (!(n >= 0.0f && n <= 1.0f)) n = 0.0f;
+      }
+    }
+
+    int   dm   = constrain(portCfg[p].distance, 1, 50);
+    float kSpd = chaseKickSpeed(p);                                // EFFECT: the kick's speed
+    float tau  = chaseKickTau(p);                                  // MOMENTUM: the deceleration
+
+    // A RISING LEVEL IS A KICK, so the dot answers the bass at once instead of waiting for the
+    // credit to trickle back. The grant is the hit's own strength share of Distance, and the
+    // credit can never exceed Distance itself - that is what makes Distance a hard maximum.
+    //
+    // THE RISE IS MEASURED ON THE RAW ENVELOPE, not on `n`: after the gate and the reference a
+    // real hit is a small number, so a threshold on `n` would miss hits entirely.
+    bool wasFull = (chaseCredit[p] >= (float)dm - 0.001f);
+    // WHAT COUNTS AS A HIT - and the SENSITIVITY sets it. A FIXED threshold was why raising Bass
+    // Sensitivity did nothing once the gate was already below the music: the gate only decides
+    // which hits are big enough to matter, this decides what is a hit at all.
+    //   sens 1.0 -> 0.03  (almost every bass note)
+    //   sens 0.2 -> 0.12  (only firm hits)
+    // The 0.03 floor is still above the room's ~0.02 wobble, so silence stays still.
+    float riseNeeded = 0.12f * (1.2f - sens);
+    if (riseNeeded < 0.03f) riseNeeded = 0.03f;
+    bool rising = (env > chaseLvlLast[p] + riseNeeded);
+    chaseLvlLast[p] = env;
+    chaseNlast[p]   = n;
+    if (!(chaseCredit[p] >= 0.0f && chaseCredit[p] <= 1000.0f)) chaseCredit[p] = 0.0f;
+    if (!(chaseKickI[p]  >= 0.0f && chaseKickI[p]  <= 1.0f))    chaseKickI[p]  = 0.0f;
+    if (rising) chaseCredit[p] += (float)dm * n;
+    chaseCredit[p] += ((float)dm / KICK_REFILL) * dtSec;           // and a slow trickle back
+    bool nowFull = (chaseCredit[p] >= (float)dm - 0.001f);
+    if (chaseCredit[p] > (float)dm) chaseCredit[p] = (float)dm;    // DISTANCE IS THE MAXIMUM
+    // A RISING LEVEL OR A CREDIT THAT HAS REFILLED ARMS A FRESH KICK. Without the second half a
+    // steady loud passage would fade: the intensity decays while the credit is spent, so every
+    // new burst has to start from full again.
+    if (n > 0.0f && (rising || (!wasFull && nowFull))) { chaseKickI[p] = 1.0f; g_kickLED++; }
+
+    float rate = roll;
+    if (n > 0.0f && chaseCredit[p] > 0.0f && kSpd > roll) {
+      rate = roll + (kSpd - roll) * n * chaseKickI[p];
+      float spend = (rate - roll) * dtSec;                         // pixels the kick pays for
+      if (spend > chaseCredit[p]) {                                // the credit runs out mid-frame
+        float frac = (spend > 0.0f) ? (chaseCredit[p] / spend) : 0.0f;
+        rate  = roll + (rate - roll) * frac;
+        spend = chaseCredit[p];
+      }
+      chaseCredit[p] -= spend;
+      // MOMENTUM: the intensity decays while the credit is being spent, so a longer Momentum
+      // delivers the SAME pixels as a gentler slide instead of adding more of them. Zero holds
+      // full speed to the last pixel and then stops dead.
+      if (tau > 0.0f) chaseKickI[p] *= expf(-dtSec / tau);
+      else            chaseKickI[p]  = 1.0f;
+    }
+
     // SANITISE THE RATE. This is the crash: sqrtf() of a corrupt level is NaN, constrain()
     // passes NaN straight through because BOTH of its comparisons are false for NaN, and
     // (int)NaN is INT_MIN - so the position was thrown far negative, the renderer's `% N`
     // gave a negative index, and setLed() wrote outside the strip buffer. Anything that is
-    // not a sane positive rate is treated as no movement at all.
-    if (!(rate > 0.0f && rate <= 1000.0f)) rate = 0.0f;
-    chaseAcc[p] += rate * ((float)dtMs / 1000.0f);
+    // not a sane positive rate falls back to the roll, which is always 1-50 px/s.
+    if (!(rate > 0.0f && rate <= 1000.0f)) rate = roll;
+    chaseAcc[p] += rate * dtSec;
     if (!(chaseAcc[p] >= 0.0f && chaseAcc[p] <= 1000.0f)) chaseAcc[p] = 0.0f;
     if (chaseAcc[p] >= 1.0f) {
       int add = (int)chaseAcc[p];
       chaseAcc[p] -= (float)add;
-      int np = ledPosArr[p] + add;
-      ledPosArr[p] = (np < 0 || np > maxPos) ? 0 : np;    // clamped both ways
+      int np = ledPosArr[p] + add;                 // FORWARD only: the football never reverses
+      ledPosArr[p] = (np < 0 || np > maxPos) ? 0 : np;   // off the end: restart at the start
     }
   }
   return ledPosArr[p] != was;
@@ -4066,6 +4345,9 @@ void runLEDPattern() {
   // THE MOVING DOT EFFECT'S DEBRIS moves EVERY FRAME: it is a cloud, not a dot, so it must not
   // be tied to the dot's step timer.
   mdAdvanceAll(now);
+
+  // (The BASS LEVEL ENVELOPE is updated in the AUDIO path now - see audioAnalyse - so it exists
+  // whether or not the display is running.)
 
   // The EQ bars advance ONCE per frame, never once per port.
   for (int p = 0; p < NUM_PORTS; p++) {
@@ -4223,6 +4505,11 @@ void loadTimeline() {
     // Its LISTENING settings travel with it too.
     tlData[r][c].freqHz   = jsonNumI(it["frequency"], 0);
     tlData[r][c].beatSens = jsonNumF(it["beatSens"], -1.0f);
+    // The EFFECT travels with the pattern too, so a cell can give its strip its own shed
+    // debris while the next cell - or the page - uses another setting.
+    tlData[r][c].effect   = jsonNumI(it["effect"],   -1);
+    tlData[r][c].momentum = jsonNumF(it["momentum"], -1.0f);
+    tlData[r][c].distance = jsonNumI(it["distance"], -1);
     tlData[r][c].used   = true;
   }
   tlLoaded = true;
@@ -4242,7 +4529,23 @@ void applyTimelineRow(int row, bool force) {
   // resurrect a dead dot every time any control moved.
   {
     static int mdRow = -1;
-    if (force || row != mdRow) { mdRow = row; mdResetAll(); }
+    if (force || row != mdRow) {
+      mdRow = row; mdResetAll();
+      // WHAT EACH PORT WILL USE IN THIS ROW: "eff/dist/mom" per column, '-' when the cell
+      // carries none (so that port's pattern record is in force instead). Logged ONLY at a row
+      // change or PLAY - a tweak passes through here too, and logging there would flood.
+      char ef[NUM_PORTS * 16 + 1];
+      int en = 0;
+      for (int p = 0; p < NUM_PORTS && en < (int)sizeof(ef); p++) {
+        TlItem *cell = tlData[row][p + 1].used ? &tlData[row][p + 1] : nullptr;
+        if (cell && cell->effect >= 0)
+          en += snprintf(ef + en, sizeof(ef) - en, "%d/%d/%.2f ", cell->effect,
+                         constrain(cell->distance, 0, 100), (double)cell->momentum);
+        else
+          en += snprintf(ef + en, sizeof(ef) - en, "- ");
+      }
+      logAppend("row %d cells eff/dist/mom %s", row + 1, ef);
+    }
   }
   // NOTE: there is deliberately NO `!tlLoaded` early return any more. With no timeline
   // every port simply takes the page's settings - which is exactly what the
@@ -4304,6 +4607,18 @@ void applyTimelineRow(int row, bool force) {
     float wantSens     = (cell && cell->beatSens >= 0.0f)
                            ? constrain(cell->beatSens, 0.01f, 1.0f) : ledSel().beatSens;
     const uint32_t *wantRef = (cell && cell->hasColour) ? cell->colour : colourLED;
+    // THE EFFECT'S VALUES ARE THE CELL'S OWN (user, 19 Oct). A cell that carries NONE means the
+    // effect is OFF - NOT "inherit whatever the pattern happens to be set to". An item saved
+    // before the effect existed must not quietly adopt it: that is exactly the cross-pattern
+    // contamination the isolation rule forbids ("the playlist items adopted the effects of the
+    // pattern I was testing").
+    const LedPatParams &ownPat = ledPat(ledPatIndexOfEnum((int)wantPat));
+    int   wantEffect = cell ? constrain((cell->effect   < 0)    ? 0    : cell->effect, 0, 10)
+                            : (int)ownPat.effect;
+    float wantMom    = cell ? constrain((cell->momentum < 0.0f) ? 0.0f : cell->momentum, 0.0f, 0.5f)
+                            : ownPat.momentum;
+    int   wantDist   = cell ? constrain((cell->distance < 0)    ? 20   : cell->distance, 0, 100)
+                            : (int)ownPat.distance;
 
     // MOTION is compared SEPARATELY from the rest: changing a colour, a sensitivity or
     // the multiplier must NOT restart the pattern, or the dot visibly jumps every time
@@ -4319,6 +4634,9 @@ void applyTimelineRow(int row, bool force) {
                      portCfg[p].mult     != wantMult ||
                      portCfg[p].freqHz   != wantFreq ||
                      fabsf(portCfg[p].beatSens - wantSens) > 0.001f ||
+                     portCfg[p].effect   != wantEffect ||
+                     fabsf(portCfg[p].momentum - wantMom) > 0.001f ||
+                     portCfg[p].distance != wantDist ||
                      portCfg[p].colourRef[0] != wantRef[0] ||
                      portCfg[p].colourRef[1] != wantRef[1] ||
                      portCfg[p].colourRef[2] != wantRef[2] ||
@@ -4334,6 +4652,9 @@ void applyTimelineRow(int row, bool force) {
     portCfg[p].mult     = wantMult;
     portCfg[p].freqHz   = wantFreq;
     portCfg[p].beatSens = wantSens;
+    portCfg[p].effect   = wantEffect;
+    portCfg[p].momentum = wantMom;
+    portCfg[p].distance = wantDist;
     for (int i = 0; i < 4; i++) {
       portCfg[p].colourRef[i] = wantRef[i];
       CRGB v = resolveColourRef(wantRef[i]);      // a theme reference resolves LIVE
@@ -5038,13 +5359,13 @@ void loop() {
   static unsigned long lastLogHb = 0;
   if (millis() - lastLogHb >= 30000) {
     lastLogHb = millis();
-    logAppend("hb up=%us heap=%u min=%u shows=%lu display=%d out=%s fs=%.0f bass=%.2f mid=%.2f treb=%.2f lvl=%.2f",
+    logAppend("hb up=%us heap=%u min=%u shows=%lu display=%d out=%s fs=%.0f bass=%.2f blvl=%.2f env=%.2f mid=%.2f treb=%.2f lvl=%.2f",
               (unsigned)(millis() / 1000), (unsigned)ESP.getFreeHeap(),
               (unsigned)ESP.getMinFreeHeap(), (unsigned long)ledShowCount,
               displayActive ? 1 : 0,
               "fastled",
-              (double)audioFs, (double)audioBass, (double)audioMid,
-              (double)audioTreble, (double)audioLevel);
+              (double)audioFs, (double)audioBass, (double)audioBassLvl, (double)g_bassLvlEnv,
+              (double)audioMid, (double)audioTreble, (double)audioLevel);
 
     // ONE compact instrument. The others did their job and were removed; this is
     // the set that actually proved decisive, so it stays.
@@ -5120,12 +5441,12 @@ void loop() {
     char pats[NUM_PORTS + 1];
     for (int p = 0; p < NUM_PORTS; p++) pats[p] = (char)('0' + (int)portCfg[p].pat);
     pats[NUM_PORTS] = 0;
-    logAppend("beats onsets=%lu | acts real=%lu extra=%lu | flips led=%lu 240=%lu | pat led=%s 240=%s tl=%d ports=%s",
+    logAppend("beats onsets=%lu | acts real=%lu extra=%lu | flips led=%lu 240=%lu | kicks=%lu | pat led=%s 240=%s tl=%d ports=%s",
               (unsigned long)g_onsetReal, (unsigned long)g_beatReal, (unsigned long)g_beatExtra,
-              (unsigned long)g_flipLED, (unsigned long)g_flip240,
+              (unsigned long)g_flipLED, (unsigned long)g_flip240, (unsigned long)g_kickLED,
               activePatternLED.c_str(), activePattern240V.c_str(),
               tlLoaded ? 1 : 0, pats);
-    g_beatReal = g_beatExtra = g_flipLED = g_flip240 = g_onsetReal = 0;
+    g_beatReal = g_beatExtra = g_flipLED = g_flip240 = g_kickLED = g_onsetReal = 0;
 
     // LISTENERS. 'portchain' is the CHAIN each port listens on - 9 means "not a
     // listener" (a VU or EQ port, or a pattern that does not act on beats) - and
@@ -5194,6 +5515,20 @@ void loop() {
                           ledPosArr[p], ledDirArr[p] > 0 ? '>' : '<');
     }
     logAppend("motion play=%d pos=%s", tlPlaying ? 1 : 0, mot);
+
+    // THE CHASE KICK, so a kick can be verified from the log alone: the level driving it, the
+    // rolling speed, the kick speed EFFECT asks for, and how much of the DISTANCE credit is left.
+    // Printed for the FIRST wrap-OFF chase port - the one a single-strip test would use.
+    for (int p = 0; p < NUM_PORTS; p++) {
+      if (!isChaseKick(p)) continue;
+      logAppend("chase kick p=%d env=%.2f n=%.2f bs=%.2f roll=%.0f spd=%.0f eff=%d cr=%.1f/%d mom=%.2f i=%.2f",
+                p, (double)g_bassLvlEnv, (double)chaseNlast[p], (double)portCfg[p].beatSens,
+                (double)chaseSpeed(p), (double)chaseKickSpeed(p),
+                (int)portCfg[p].effect, (double)chaseCredit[p],
+                (int)constrain(portCfg[p].distance, 1, 50), (double)portCfg[p].momentum,
+                (double)chaseKickI[p]);
+      break;
+    }
 
     // THE MOVING DOT EFFECT, per port, in the same compact style: flips since the last whole
     // pixel / whole pixels lost / live debris pieces. An ERASED dot (lost == its Size) is

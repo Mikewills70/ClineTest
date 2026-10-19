@@ -6,7 +6,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Darren's Disco</title>
     <style>
         :root {
@@ -30,6 +30,31 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             align-items: center;
         }
         h1 { font-size: 1.5rem; margin-bottom: 10px; text-align: center; color: var(--primary-color); }
+
+        /* ---------------------------------------------------------------------
+           NO PAGE ZOOM (user, 19 Oct). An iPhone zooms the whole page whenever a
+           text-entry field is focused with a font-size BELOW 16px, and that was happening
+           constantly on this UI; a double-tap zooms it too. Both are stopped here:
+             - 16px on every field  -> iOS has no reason to zoom on focus
+             - touch-action: manipulation -> a double-tap cannot zoom
+           Zoom is therefore off in BOTH orientations, not portrait only: the reliable
+           mechanisms cannot tell the two apart, and a page that zooms without being asked
+           is worse than one that never zooms. (Android honours user-scalable=no in the
+           viewport tag; iOS ignores that tag, which is why the CSS does the real work.)
+           --------------------------------------------------------------------- */
+        html, body { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
+        button, select, label, .tab-btn, .timeline-cell, .timeline-block {
+            touch-action: manipulation;
+        }
+        input[type="number"], input[type="text"], input[type="date"], textarea, select {
+            font-size: 16px;
+        }
+        /* A GREYED CONTROL MUST LOOK GREYED: the timeline lock disables PLAY, SAVE and the
+           period slider while a show is running, and they have to read as unavailable. */
+        .btn:disabled, input[type="range"]:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
         /* (The circular-swatch CSS I added here was reverted: it changed the size and
            shape of the Colour page boxes, which was not wanted. The white ring for
            dark colours belongs on the NEW swatch row in Stage 2, not on these. */
@@ -951,21 +976,21 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                      values are page-side only), so moving them changes nothing on the strips.
                      Distance (0-100) is the intended replacement for Speed in the Chase. -->
                 <tr id="prowLED-effect">
-                    <td class="name-col">Effects</td>
+                    <td class="name-col" id="lblLED-effect">Effects</td>
                     <td>
                         <input type="range" id="paramEffectLED" min="0" max="10" step="1" value="0" oninput="liveParamChanged('LED')">
                         <span id="effectValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0</span>
                     </td>
                 </tr>
                 <tr id="prowLED-momentum">
-                    <td class="name-col">Momentum</td>
+                    <td class="name-col" id="lblLED-momentum">Momentum</td>
                     <td>
                         <input type="range" id="paramMomentumLED" min="0" max="0.5" step="0.01" value="0" oninput="liveParamChanged('LED')">
                         <span id="momentumValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.00s</span>
                     </td>
                 </tr>
                 <tr id="prowLED-distance">
-                    <td class="name-col">Distance</td>
+                    <td class="name-col" id="lblLED-distance">Distance</td>
                     <td>
                         <input type="range" id="paramDistanceLED" min="0" max="100" step="1" value="100" oninput="liveParamChanged('LED')">
                         <span id="distanceValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">100</span>
@@ -1001,7 +1026,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                     </td>
                 </tr>
                 <tr id="prowLED-beatSens">
-                    <td class="name-col">Beat Sensitivity</td>
+                    <td class="name-col" id="lblLED-beatSens">Beat Sensitivity</td>
                     <td>
                         <!-- LEFT = fewer, only strong kicks. RIGHT = more beats,
                              catches quieter/denser music. GLOBAL: one detector
@@ -1097,9 +1122,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
              to sit at the bottom of this tab has been removed.
              PLAY always restarts from the first slot. STOP makes the outputs DARK. -->
         <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
-            <button class="btn" style="flex:1; background-color: var(--primary-color); color:#000;" onclick="playTimeline()">&#9654; PLAY</button>
+            <button id="timelinePlayBtn" class="btn" style="flex:1; background-color: var(--primary-color); color:#000;" onclick="playTimeline()">&#9654; PLAY</button>
             <button class="btn" style="flex:1;" onclick="stopTimeline()">&#9632; STOP</button>
-            <button class="btn" style="flex:1;" onclick="saveTimelineData()">SAVE</button>
+            <button id="timelineSaveBtn" class="btn" style="flex:1;" onclick="saveTimelineData()">SAVE</button>
         </div>
         <!-- END OF DISPLAY: arms a marker that fills a WHOLE ROW when it is placed. Reaching
              that row restarts the show at slot 1, and it loops until STOP. -->
@@ -1756,6 +1781,13 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         updateParamLabels(section);
         updateColourBoxes(section);
 
+        // A PLAYING TIMELINE OWNS EVERY PORT - that is the agreed rule - so while it runs a page
+        // edit cannot reach the strips, which looks exactly like "the colour will not change".
+        // Say so, instead of leaving the controls looking live when they are not.
+        if (typeof tlHead !== 'undefined' && tlHead.playing && typeof note === 'function') {
+            note('Timeline is PLAYING - the strips follow the timeline. Press STOP to edit them.');
+        }
+
         // ONE TIMER PER SECTION. A single shared window.liveTimer meant choosePattern()'s two
         // calls (240V then LED, 100 ms apart) cancelled the FIRST - so the 240V section never
         // received its own values and only looked right because the firmware's LED branch also
@@ -2070,6 +2102,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                           visual: ['speed', 'quantity', 'size', 'invert', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'],
                           range:  { speed:    { min: 0.002, max: 0.1,  step: 0.001 },
+                                    // Distance belongs to THIS pattern's OWN effect (the shed/erode
+                                    // spec): 0-20, where 0 is the effect switched off. The Chase's
+                                    // 1-50 kick distance is a different parameter entirely.
                                     distance: { min: 0,     max: 20,   step: 1 } } },
         // ONE CHASE. Speed for it is LEDs per second (1-50), NOT seconds per step like the
         // dot patterns - hence its own range. Wrap selects the mode: OFF = band-driven move,
@@ -2077,7 +2112,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         'Chase':        { colour: ['colour'],
                           visual: ['speed', 'quantity', 'size', 'wrap', 'invert', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'],
-                          range:  { speed: { min: 1, max: 50, step: 1 } } },
+                          // Distance 1-50: how far ONE kick may carry the dot (Wrap OFF only).
+                          range:  { speed: { min: 1, max: 50, step: 1 },
+                                    distance: { min: 1, max: 50, step: 1 } } },
         'Chase 10 - 1': { colour: ['colour'],
                           visual: ['speed', 'quantity', 'size', 'wrap', 'invert', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'] },
@@ -2139,11 +2176,39 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     // on Explosion (whose Speed is seconds per step) would make it crawl.
     const PARAM_ROW_DEFAULTS = {
         speed:    { min: 0.002, max: 0.50, step: 0.001 },
-        // Distance is 0-100 by default and 0-20 for Moving Dot (its own range, in
-        // PATTERN_PARAMS). The defaults must be re-applied BEFORE a pattern's own ranges,
-        // otherwise Moving Dot's 20 would leak into the next pattern - the same trap Speed had.
+        // Distance is 0-100 by default, 0-20 for Moving Dot (its own shed/erode effect) and 1-50
+        // for the Chase (its kick). The defaults must be re-applied BEFORE a pattern's own ranges,
+        // otherwise one pattern's limits would leak into the next - the same trap Speed had.
         distance: { min: 0, max: 100, step: 1 }
     };
+
+    // PER-PATTERN ROW NAMES. "Effects" means DIFFERENT things per pattern and the two must never
+    // be confused (user, 19 Oct): on Moving Dot it is the shed/erode effect, on the Chase it is
+    // the SPEED of the kick. Nothing is shared, so the label follows the pattern - a greyed row
+    // is still the pattern's OWN row, with the pattern's own stored value.
+    const PARAM_ROW_LABELS = {
+        effect:   { id: 'lblLED-effect',   def: 'Effects'  },
+        momentum: { id: 'lblLED-momentum', def: 'Momentum' },
+        distance: { id: 'lblLED-distance', def: 'Distance' },
+        // The same row, and the same stored per-pattern value, but a DIFFERENT meaning per kind of
+        // pattern: a beat pattern uses it as its onset sensitivity, a LEVEL pattern (the Chase)
+        // as how sensitive the kick is to the bass. On the Chase the gate itself is derived from
+        // the music, so this only sets how far below the music's own peak a hit still counts.
+        beatSens: { id: 'lblLED-beatSens', def: 'Beat Sensitivity' }
+    };
+    const PATTERN_ROW_LABELS = {
+        'Chase':        { effect: 'Kick Speed', beatSens: 'Bass Sensitivity' },
+        'Chase 10 - 1': { effect: 'Kick Speed', beatSens: 'Bass Sensitivity' }
+    };
+
+    function applyParamRowLabels() {
+        let over = PATTERN_ROW_LABELS[selectedPatternNameLED] || {};
+        for (let key in PARAM_ROW_LABELS) {
+            let spec = PARAM_ROW_LABELS[key];
+            let el = document.getElementById(spec.id);
+            if (el) el.innerText = over[key] || spec.def;
+        }
+    }
 
     // WRAP ON turns the Chase into a metronome: the BEAT sets the pace, so Speed is not used
     // and is greyed rather than left looking live. (Momentum will be greyed here too when it
@@ -2228,6 +2293,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             if (r.max  !== undefined) ctl.max  = r.max;
             if (r.step !== undefined) ctl.step = r.step;
         }
+        applyParamRowLabels();    // the row names follow the pattern (Effects vs Kick Speed)
         updateChaseGreying();     // the pattern just applied may or may not use Speed
     }
 
@@ -2555,14 +2621,29 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     // Deferred in favour of the remaining patterns - it is not needed for the shows in use.
     let tlSavedDelaySec = 20;
 
-    function applyTimelineRowLabels() {
+    // THE TIMING THE GRID SHOWS IS THE SLIDER'S, LIVE (user, 19 Oct): moving the delay slider
+    // must re-time column 1 of every row AT ONCE. It used to draw from the SAVED delay, so the
+    // grid disagreed with the slider until the save landed - which read as the slider doing
+    // nothing at all.
+    function tlDraftDelaySec() {
         let s = document.getElementById('timelineDelaySlider');
-        let draft = s ? parseInt(s.value, 10) : tlSavedDelaySec;
-        if (isNaN(draft) || draft < 1) draft = tlSavedDelaySec;
+        let d = s ? parseInt(s.value, 10) : tlSavedDelaySec;
+        return (isNaN(d) || d < 1) ? tlSavedDelaySec : d;
+    }
+    // "45s" below a minute, "1m30s" past it - the recorded answer for long delays, so a 60 s
+    // slider reads "7m0s-8m0s" rather than "420-480s".
+    function fmtTlTime(sec) {
+        if (sec < 60) return sec + 's';
+        let m = Math.floor(sec / 60), ssh = sec % 60;
+        return ssh ? (m + 'm' + ssh + 's') : (m + 'm');
+    }
+
+    function applyTimelineRowLabels() {
+        let draft = tlDraftDelaySec();
         document.querySelectorAll('.timeline-row-label').forEach(l => {
             let r = parseInt(l.dataset.row, 10);
             if (isNaN(r)) return;
-            l.innerText = `${r * tlSavedDelaySec}-${(r + 1) * tlSavedDelaySec}s`;
+            l.innerText = fmtTlTime(r * draft) + '-' + fmtTlTime((r + 1) * draft);
         });
         // Say so when the slider is ahead of the board, so a mismatch can never be a mystery.
         let v = document.getElementById('timelineDelayVal');
@@ -2604,17 +2685,16 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         container.appendChild(th240);
 
         // Grid Rows
-        // The labels describe the slot windows the BOARD is playing, not the slider draft.
-        let delaySec = tlSavedDelaySec;
+        // The labels describe the slot windows the SLIDER is set to (the draft): moving it
+        // re-times every row at once, and the readout says "press SAVE" until the board agrees.
+        let delaySec = tlDraftDelaySec();
         tlNameScrollers = [];
 
         for (let r = 0; r < timelineRowsCount; r++) {
             let timeLabel = document.createElement('div');
             timeLabel.className = 'timeline-row-label';
             timeLabel.dataset.row = r;
-            let startT = r * delaySec;
-            let endT = (r + 1) * delaySec;
-            timeLabel.innerText = `${startT}-${endT}s`;
+            timeLabel.innerText = fmtTlTime(r * delaySec) + '-' + fmtTlTime((r + 1) * delaySec);
             container.appendChild(timeLabel);
 
             for (let c = 1; c <= 11; c++) {
@@ -2660,6 +2740,12 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                     // aside in that case.
                     block.onclick = (e) => {
                         e.stopPropagation();
+                        // THE LOCK COVERS CELLS TOO. They are divs, so disabling the controls is
+                        // not enough: a tap must not open the cell menu while a show is running.
+                        if (tlLockActive()) {
+                            timelineStatus('TIMELINE IS PLAYING - press STOP to edit the timeline.');
+                            return;
+                        }
                         if (activeArmedItem) return;
                         openCellDialog(cellKey, item);
                     };
@@ -2669,6 +2755,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
                 // Cell click / tap / push handler for universal placement
                 cell.onpointerup = (e) => {
+                    if (tlLockActive()) return;         // the lock covers cells too (see above)
                     if (activeArmedItem) {
                         let isPressureDrop = e.pressure && e.pressure > 0.5;
                         if (!timelineData[cellKey] || isPressureDrop) {
@@ -3018,7 +3105,10 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     function startTimelinePlayback() {
         fetch('/timeline-play', { cache: 'no-store' })
             .then(r => r.text())
-            .then(t => { timelineIsPlaying = true; timelineStatus(t); note('timeline-play OK'); })
+            .then(t => {
+                timelineIsPlaying = true; timelineStatus(t); note('timeline-play OK');
+                applyTimelineLock(true);     // lock at once; /diag re-asserts it every second
+            })
             .catch(e => timelineStatus('PLAY failed -> ' + e.message));
     }
 
@@ -3026,8 +3116,45 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     function stopTimeline() {
         fetch('/timeline-stop', { cache: 'no-store' })
             .then(r => r.text())
-            .then(t => { timelineIsPlaying = false; timelineStatus(t); note('timeline-stop OK'); })
+            .then(t => {
+                timelineIsPlaying = false; timelineStatus(t); note('timeline-stop OK');
+                applyTimelineLock(false);    // every control back EXACTLY as it was
+            })
             .catch(e => timelineStatus('STOP failed -> ' + e.message));
+    }
+
+    // =====================================================================
+    // WHILE THE TIMELINE IS ACTIVE, THE CONTROLS THAT COULD DISTURB IT ARE GREYED (user, 19 Oct):
+    // PLAY (it is already running), SAVE (it would re-time the show under itself) and the period
+    // slider. EVERYTHING ELSE - including the TAB BUTTONS - stays live, so the existing STOP
+    // button is always reachable and no extra banner is needed.
+    //
+    // Cell taps are still refused while it runs (see the timeline grid): the show is frozen in
+    // the playing state and it plays what is SAVED, so editing mid-show would only confuse.
+    //
+    // It is driven by the BOARD's own tlPlaying (via /diag), never by what this page believes, so
+    // a phone call, a minimised app or a full page RELOAD cannot leave it in the wrong state.
+    // =====================================================================
+    const TL_LOCK_IDS = ['timelinePlayBtn', 'timelineSaveBtn', 'timelineDelaySlider'];
+    let tlLockSaved = null;                        // null = unlocked, else the saved states
+    function tlLockActive() { return tlLockSaved !== null; }
+    function applyTimelineLock(on) {
+        if (on === tlLockActive()) return;         // no change: never disturb the saved states
+        let saved = [];
+        TL_LOCK_IDS.forEach(id => {
+            let el = document.getElementById(id);
+            if (!el) return;
+            if (on) {
+                saved.push([el, el.disabled]);
+                el.disabled = true;
+            } else if (tlLockSaved) {
+                let prev = tlLockSaved.find(p => p[0] === el);
+                if (prev) el.disabled = prev[1];   // exactly as it was before the lock
+            }
+        });
+        tlLockSaved = on ? saved : null;
+        note(on ? 'Timeline is PLAYING - PLAY, SAVE and the delay are locked.'
+                : 'Timeline STOPPED - controls released.');
     }
 
     // READ THE TIMELINE BACK FROM THE BOARD.
@@ -3449,6 +3576,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                     // of it has already gone. Everything else the line needs is interpolation.
                     if (j.tlElapsedMs !== undefined) {
                         tlHead.playing = tlIsPlaying;
+                        // THE LOCK FOLLOWS THE BOARD, not the page: a reload, a phone call or a
+                        // backgrounded app cannot leave a running show unlocked.
+                        applyTimelineLock(tlIsPlaying);
                         tlHead.row     = tlLiveRow - 1;
                         tlHead.elapsed = parseInt(j.tlElapsedMs, 10) || 0;
                         tlHead.delay   = parseInt(j.tlDelayMs, 10) || 20000;

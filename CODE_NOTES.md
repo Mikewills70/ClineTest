@@ -278,6 +278,14 @@ draws nothing. The live values are what settled "the debris is not moving" witho
   until the pattern is applied afresh (a timeline row, PLAY, or re-selecting it).
 - A dot that is already gone sheds nothing further and **cannot explode twice**
   (`mdShed` returns immediately once `Size - lost <= 0`).
+- **EVERY DOT SHEDS (19 Oct).** The debris used to spawn at `ledPosArr[p]` alone — dot 0's
+  position — so with Quantity > 1 only one dot of the three (or eight) broke up. `mdShed()` now
+  loops the port's dots and spawns the full Effects count at each, using **the same offset
+  arithmetic as `drawPortPattern()`** (`(pos + q*N)/qty % N`), and `mdExplode()` erupts from every
+  dot's position too (MD_BLAST split across them, at least 4 each). The pool is `MD_FRAGS` 64:
+  a burst is Quantity x Effects pieces, and past 64 the OLDEST are recycled rather than the newest
+  being dropped. Erosion still shrinks all the dots together, and a port still expires once.
+  **Trap:** any effect that acts "on the dot" must ask where EACH dot is, not where the port is.
 
 ### TRAP that cost a round: a per-frame step rounded to whole pixels freezes slow movement
 
@@ -296,8 +304,45 @@ seen, so the start speed is the dot's **only when that is slow enough**: capped 
 always takes at least ~0.5 s to cross the extent (`visCap = Distance / 0.5`). The log prints the
 raw and the capped figure (`effect speeds dot=… cap=…`).
 
-**Still to come (Step C):** Effects / Momentum / Distance in the playlist item and the timeline
-cell, so a cell can carry an effect per strip and a row change re-arms it.
+## 13. Timeline: column 1 follows the delay slider, live (19 Oct)
+
+The row labels in column 1 ("0-20s", "20-40s", …) were drawn from **`tlSavedDelaySec`** — the delay
+the BOARD had been given — so dragging the delay slider changed only the readout and the grid
+disagreed with the slider until the save landed, which read as the slider doing nothing. Both the
+per-row labels and a grid rebuild now use **`tlDraftDelaySec()`**: the slider's own value, live.
+The readout still shows `Xs - press SAVE` in amber while the draft differs from the board's, so the
+draft and what the board is actually running can never be confused.
+
+Labels are formatted by **`fmtTlTime()`**: `45s` below a minute, `1m30s` past it — the recorded
+answer for long delays — so a 60 s slider reads `7m0s-8m0s` instead of `420-480s`.
+
+Still open from that group (the answers are in the code comments above `tlSavedDelaySec`): a row's
+own duration in the playhead prediction, and the slider relabelled "Default Time Delay (Seconds)".
+
+## 12. Step C — the effect travels with the cell; and the rainbow drifts (17 Oct)
+
+**Effects / Momentum / Distance now travel all the way**: playlist item → playlist JSON →
+timeline cell → `TlItem.effect / momentum / distance` (**-1 = "the cell carries none"**) → parsed
+in `loadTimeline()` → `applyTimelineRow()` puts them on the **port**
+(`PortCfg.effect / momentum / distance`), falling back to the port's **OWN pattern's record** when
+the cell carries none. The effect code (`mdEffectOn`, `mdShed`, `mdAdvanceAll`, `mdDotLen`) reads
+the **port's** values now, not the selected pattern's — which is what lets one strip in a row have
+its own effect while the next strip does not. The page needed **no** change: `timelineDraftJson()`
+serialises the whole item object, and `collectCurrentParameters()` has carried the three values
+since Step A. A timeline row change / PLAY re-arms the effect, as before.
+
+**The dot restarts ITSELF (user, 19 Oct).** The rules are: **every port follows the timeline**, an
+**EMPTY cell is dark for that port**, and two consecutive rows holding the **same item simply
+continue** (no restart). The old "a dead dot waits for the next row" contradicted that third
+rule, so instead the dot comes back on its own: `MD_RESTART_MS` (3000) after the explosion it is
+restored at full size **where it already is and still travelling**, and `mdResetAll()` still
+clears any pending restart when a fresh cell is applied. Each port's expiry timer is its own
+(`mdExpiredAt[NUM_PORTS]`), so **one strip dying can never disturb another**. The EQ meter is the
+deliberate exception — it uses all strips and all LEDs — and will be handled separately.
+
+**Log lines added for exactly this question:** `effect EXPIRED port=… at=… size=…` (one per
+death), `effect RESTART port=…`, and `row N cells eff/dist/mom …` at every row change — the last
+one lists what each port will use in that row, `-` where the cell carries none (record in force).
 
 `dbgSub` inside `handleLiveTweak()`: 1 = JSON parsed, 2 = scalars read, 3 = section branch
 finished, 4 = per-port config rebuilt, 5 = reply about to go. A `prevReq=/live-tweak` with a
@@ -414,3 +459,138 @@ points at the supply/cable. The boot report is the instrument for it: 3 fast fla
 mean a real reboot, and the slow count after the marker is the reason (1 = power, 9 = brownout,
 4 = panic).
 
+---
+
+## 14. THE CHASE FOOTBALL (Wrap OFF) - and the Moving Dot revert (19 Oct)
+
+### The false lead, recorded so it is not repeated
+
+The user's first description of this effect said "Moving Dot with Wrap on is good, Wrap off
+is not working as expected". It was about the **CHASE**. Three builds went into Moving Dot
+(absolute-speed kick, then a speed-doubling kick) before the board's own log settled it:
+
+    pat led=moving_dot 240=moving_dot tl=1 ports=0000000000
+
+That log line says which pattern every port is REALLY running (`pat led=`/`ports=`), and it
+is the fastest way to catch a wrong-pattern assumption. **Read it before changing a
+pattern's behaviour.**
+
+Two other things that log taught us, both worth remembering:
+
+* **A kick whose speed is ABSOLUTE is invisible.** The first attempt set the kick's speed in
+  pixels/second (Distance / stopping time = ~18 px/s) against a drift already at 91 px/s -
+  so the "kick" was five times slower than the thing it was added to. Every kick speed must
+  be expressed RELATIVE to the current movement, or bounded by a measurable ceiling.
+* **`beats onsets=0 | acts real=0 | flips led=0 | taken 0 0 0 ...`** means no beat reached any
+  port, so nothing could move whatever the code did. Check that line before debugging motion.
+
+### The final model (user's words, 19 Oct)
+
+Chase with Wrap OFF is a **football driven by the BASS LEVEL**. Not beat-driven: the level
+drives it, which is what the user asked for first and confirmed they prefer.
+
+    Speed     the ROLLING speed - the floor the dot always moves at, so the display never
+              stalls. (Was previously a CAP that the level scaled against.)
+    Distance  the CREDIT's maximum: the furthest ONE kick may carry the dot (1-50 px).
+    Level     how much of that credit is on offer, and how hard the kick is applied.
+    Effect    the SPEED of the kicked movement: 1 = twice the roll, 10 = 500 px/s.
+    Momentum  the DECELERATION: 0 = full speed until the credit is spent then a dead stop;
+              0.5 = the SAME pixels as a gentler ~0.6 s slide.
+
+**The credit is what makes Distance a hard maximum.** Both the fast phase and Momentum's
+decay spend the SAME credit, so raising Momentum cannot make a kick travel further - it only
+changes how those pixels are delivered. A *rising* level grants `Distance x level` credit
+immediately (so the dot answers the bass at once); a spent credit also trickles back at
+`Distance / 0.5 s` so a sustained loud passage keeps kicking instead of kicking once.
+
+The ceiling, `KICK_CEIL = 500 px/s`, is the user's own definition of the fastest a dot may
+move without the display stepping: the Moving Dot display's minimum Speed of 0.002 s per
+step. Effect is stepped LOGARITHMICALLY from 2x roll to that ceiling, so every step is a
+similar jump. Effect 0 means no kick - just the roll.
+
+Traps in this code:
+
+* **Chase only.** `isChaseKick()` is `pat == LP_CHASE_1_10 && !wrap`. Chase Wrap ON (the
+  metronome) is untouched, and so is every other pattern.
+* **Moving Dot was reverted completely** (beat reversal, its own shed/erode effect, Distance
+  back to 0-20). If any Moving Dot behaviour looks different from before this session, that
+  is a bug, not a feature.
+* **The wrap-OFF antifreeze nudge was removed**: the rolling Speed keeps the display alive,
+  so the antifreeze's stand-in beat is no longer needed there. It still drives Wrap ON.
+* `chaseBeat()`'s wrap-OFF branch is now unreachable - left in place because `chaseBeat()` is
+  also the Wrap ON metronome's entry point.
+* The rate is still sanitised (a NaN rate once wrote outside the strip buffer); the fallback
+  is now `roll`, which is always 1-50 px/s, rather than 0.
+* `powf()` in `chaseKickSpeed()` costs about 4 KB of flash. Flash is at 95%; check the build
+  size if anything else large is added.
+
+### Effects are PATTERN SPECIFIC - they never collide
+
+The user was explicit: "When a moving dot is selected with effect, the moving dot effect is
+added. When the chase effect is requested, the chase effect is added. They are not the same
+effect." So:
+
+* `Effects` on **Moving Dot** = the shed/erode effect (distance 0-20, 0 = off).
+* `Effects` on the **Chase** = the SPEED of the kick (distance 1-50).
+* The two keep separate stored values (`ledPatAll`, per-pattern records) and separate ranges.
+* The row label follows the pattern: `PATTERN_ROW_LABELS` / `applyParamRowLabels()` rename it
+  to **"Kick Speed"** on the Chase. Any future pattern that reuses these three rows gets its
+  own entry in that map and its own `PATTERN_PARAMS` range - never another pattern's.
+
+### Verification (needs the PC on the board's Wi-Fi)
+
+    chase kick p=0 lvl=0.62 roll=20 spd=248 eff=5 cr=7.3/16 mom=0.28 i=0.71
+
+`lvl` should rise and fall with the bass, `spd` is what EFFECT asks for (2x `roll` at 1, 500
+at 10), `cr` is the remaining credit and can never exceed the Distance shown after it, and
+`i` is the kick's intensity (it decays while the credit is spent, which is Momentum at work).
+`kicks=N` in the `beats` line counts armed kicks. On the strips: Chase, Wrap **off**, Speed
+~20-50, Effect 3-5, Distance 10-20, Momentum ~0.25 - and remember the stored Chase record
+had Effect 0, which means NO kick until it is raised.
+
+
+
+### THE THREE AUDIO LEVELS (19 Oct) - and the Bass Level band that was missing
+
+The user's model, now implemented:
+
+| Level | Band | Used by |
+|---|---|---|
+| **Bass Beat** | 61-250 Hz, time-domain, every 10 ms (lower edge = the Frequency slider, top = `ODF_LP_HZ`) | Moving Dot, Chase Wrap ON. **Do not change - it is known to work.** |
+| **Bass Level** | **61-500 Hz** (lower edge = the Frequency slider, top = `FFT_BASSLEVEL_MAX`) | **Chase Wrap OFF**, and the **VU meters** |
+| **Full Level** | whole spectrum (`audioLevel`) | the EQ, to come |
+
+The FFT's own "bass" band is 17-61 Hz - **below what the MAX9814 can hear** (the code says so
+itself, where the VU meters fold in the mid band). That band is why the Chase "shot in
+silence": the level was noise, and `sqrt()` then lifted it (0.07 -> 0.26, i.e. a 26% kick at a
+10x speed range). **`audioBassLvl` is that missing band, added as a separate accumulator** so
+the bass/mid/treble bands and everything reading them stayed untouched.
+
+With the VU meters switched to `audioBassLvl`, the **mid and treble bands now have no consumer
+at all** (they are only logged; the EQ's ten bands are separate). They can be deleted whenever
+the user wants, leaving exactly the three levels above.
+
+### The Chase's gate
+
+The gate is `portCfg[p].beatSens * 0.5` - the same per-pattern field the beat threshold uses,
+re-used deliberately ("if you can repurpose an unused option then do"): in Chase Wrap OFF the
+beat drives nothing, so the field is free there. The row **relabels to "Bass Level"** on the
+Chase (higher = more level required). WATCH OUT: it is still the FIELD the Wrap ON metronome
+threshold uses (`L.thr = (1 - beatSens) * 60`), so a value chosen as a gate will also change
+the metronome's sensitivity when Wrap is switched ON. If that proves annoying, give the gate
+its own stored field in `ledPatAll` + the cell + a page row.
+
+The level is smoothed (a shared `g_bassLvlEnv`: 15 ms attack, 150 ms release) and LINEAR above
+the gate. The `sqrt()` is gone on purpose: it was for when the level drove the speed directly.
+
+**THE REFERENCE TRAP (found the same day, from "very little response").** The kick was normalised
+against a full-scale level of 1.0. **The microphone never produces 1.0** - so even a strong hit
+mapped to a small percentage, and the dot barely moved. A VU meter hides this (a bar moving a
+little is still visible); a *speed* does not. `KICK_LVL_REF = 0.25` is the level that counts as a
+FULL kick, and it is a constant precisely so it can be tuned from `blvl=` in the heartbeat. The
+hit detector's threshold also moved off the gated value onto the **raw envelope** (0.04): after
+the gate and the reference, a real hit is a small number, so a threshold there misses hits and
+the kick never re-arms.
+
+`hb ... bass=0.07 blvl=0.31 env=0.28 ...` now reports both the raw Bass Level and the smoothed
+figure the gate sees, so the gate default can be set from real music rather than a guess.
