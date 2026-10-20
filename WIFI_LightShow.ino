@@ -1312,7 +1312,7 @@ void ledClearAll() {
 #define TL_COLS 12
 
 struct TlItem {
-  char  id[24] = "";
+  char  id[32] = "";            // the playlist ITEM NAME - a reference, not a copy (Rules: the Build Process)
   float speed  = 0.2f;
   int   qty    = 1;
   int   size   = 1;
@@ -1385,7 +1385,12 @@ int   tlRow = 0;
 // STOP. The marker is placed by the page as a whole row, but each cell can then be moved
 // or deleted on its own like any other item, so the test is per CELL, not per row.
 static inline bool isEndOfDisplayId(const char *id) {
-  return id && strcmp(id, "END_OF_DISPLAY") == 0;
+  // ACCEPT BOTH SPELLINGS (20 Oct): a cell now stores the playlist item's NAME, and the marker's is
+  // "END OF DISPLAY" with a SPACE. patternIdFromName() used to store "END_OF_DISPLAY" with underscores
+  // for the same cell, so only the underscored form matched - which made the marker row invisible, so
+  // the show ran straight past it and the timeline never restarted. Both forms are accepted now, so
+  // old cells and new cells both restart the show.
+  return id && (strcmp(id, "END_OF_DISPLAY") == 0 || strcmp(id, "END OF DISPLAY") == 0);
 }
 static inline bool isEndOfDisplayRow(int r) {
   if (r < 0 || r >= TL_ROWS) return false;
@@ -5012,7 +5017,12 @@ static void loadPlaylist() {
     if (nm.isEmpty()) continue;
     PlItem &it = plItems[plCount];
     strlcpy(it.name, nm.c_str(), sizeof(it.name));
-    it.pat      = renderBranchFor(nm);                 // the NAME decides the pattern
+    // NAME -> PATTERN ID -> PATTERN (20 Oct). renderBranchFor() takes a PATTERN ID, not a playlist name:
+    // given a name it matches nothing and DEGRADES TO MOVING DOT. That is why the Moving Dot rows
+    // worked (the fallback happened to be correct) while "Chase yel"/"Chase yep r" ran as MOVING DOT
+    // and never responded to the audio. patternIdFromName() is the same two-step the old cell parse
+    // used, so the item's name reaches the pattern it names.
+    it.pat      = renderBranchFor(patternIdFromName(nm));
     it.p.speed     = jsonNumF(v["speed"],     0.02f);
     it.p.qty       = constrain(jsonNumI(v["quantity"], 1), 1, 8);
     it.p.size      = constrain(jsonNumI(v["size"],     1), 1, 10);
@@ -5097,8 +5107,12 @@ void loadTimeline() {
 
     JsonObject it = kv.value().as<JsonObject>();
     String nm = String((const char*)(it["name"] | ""));
-    String id = patternIdFromName(nm);
-    strlcpy(tlData[r][c].id, id.c_str(), sizeof(tlData[r][c].id));
+    // THE CELL KEEPS THE ITEM NAME - the reference the Build Process specifies (20 Oct). This used to
+    // store patternIdFromName(nm) - the PATTERN id, e.g. "moving_dot" - which can never match a
+    // playlist ITEM named "Moving Dot Red Fast". Every cell therefore resolved to nothing and every
+    // port went dark. The pattern now comes from the item (pit->pat), so the pattern id is not needed
+    // here at all - and "END OF DISPLAY" still matches, because that is a name too.
+    strlcpy(tlData[r][c].id, nm.c_str(), sizeof(tlData[r][c].id));
     tlData[r][c].speed  = jsonNumF(it["speed"],    0.2f);
     tlData[r][c].qty    = jsonNumI(it["quantity"], 1);
     tlData[r][c].size   = jsonNumI(it["size"],     1);
@@ -5258,7 +5272,7 @@ void applyTimelineRow(int row, bool force) {
     // to ignore a sensitivity, the ITEM needs re-saving: edit the pattern on the patterns page,
     // then save it into the playlist.
     float wantSens = (cell && cell->beatSens >= 0.0f)
-                       ? constrain(cell->beatSens, 0.01f, 1.0f) : ledSel().beatSens;
+                       ? constrain(cell->beatSens, 0.01f, 1.0f) : pit->p.beatSens;      // NEVER the page's selected pattern (20 Oct): the ITEM is the master
     const uint32_t *wantRef = (cell && cell->hasColour) ? cell->colour : colourLED;
     // THE EFFECT'S VALUES ARE THE CELL'S OWN (user, 19 Oct). A cell that carries NONE means the
     // effect is OFF - NOT "inherit whatever the pattern happens to be set to". An item saved
