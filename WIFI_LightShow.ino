@@ -880,7 +880,10 @@ static void mdShed(int p) {
   // MOMENTUM IS THE PIECES' SPEED AWAY FROM THE DOT (user, 17 Oct, second look): at MAXIMUM
   // they leave at the dot's OWN speed, at MINIMUM they "hit the wall" and stay exactly where
   // the dot turned. (The first build had this the wrong way round - heavy meant slow.)
-  float frac = constrain(portCfg[p].momentum, 0.0f, 0.5f) / 0.5f;  // 0 = wall, 1 = dot's speed
+  // MOMENTUM IS 0-0.5 HERE (Moving Dot). The Chase is the ONLY pattern with the short 0-0.1 range,
+    // and the page applies that for the Chase alone (user, 20 Oct) - so this normalises by 0.5
+    // exactly as it always did.
+    float frac = constrain(portCfg[p].momentum, 0.0f, 0.5f) / 0.5f;  // 0 = wall, 1 = dot's speed
   float dotPxS = 1.0f / ((portCfg[p].speed > 0.0005f) ? portCfg[p].speed : 0.0005f);
   if (dotPxS > 600.0f) dotPxS = 600.0f;
   if (dotPxS < 1.0f)   dotPxS = 1.0f;
@@ -933,6 +936,7 @@ void mdAdvanceAll(unsigned long now) {
     // MOMENTUM IS THE PIECES' SPEED AWAY FROM THE DOT (user, 17 Oct, second look) and
     // brightness is tied to it the SAME way round: a fast piece lasts, a stopped one dims out.
     // The values are the PORT's own: a timeline cell may set them for this strip alone.
+    // MOMENTUM IS 0-0.5 HERE (Moving Dot) - the Chase's short 0-0.1 range is the page's business.
     float frac = constrain(portCfg[p].momentum, 0.0f, 0.5f) / 0.5f;   // 0 = wall, 1 = dot speed
     // A piece still SLOWS as it goes, but the endpoints must read exactly as specified: at
     // maximum it streaks away keeping (nearly) the dot's speed, at minimum it never moved.
@@ -1084,6 +1088,19 @@ volatile int32_t  g_pairDiff = 0, g_pairA = 0, g_pairB = 0, g_pairRow = -1;
 // match but the positions differ, the difference came in through a parameter - which is data, not a
 // code fault. This is how "sync as a byproduct" gets verified instead of special-cased.
 volatile uint32_t g_steps[NUM_PORTS] = {0};
+// MOTION RESTARTS, per port (user, 20 Oct). Whenever the adoption loop decides a port's motion
+// changed, EVERY port is re-pinned to its start position and its step timer is zeroed. That is by
+// design - but a port re-pinned over and over cannot advance, and the symptom is a dot that looks
+// STOPPED even though the code is running normally. This counter makes that visible: a number
+// climbing while the dot stands still IS the fault. It is reported as the "fre=" field.
+volatile uint32_t g_framesRestart[NUM_PORTS] = {0};
+// WHEN EACH PORT'S POSITION LAST CHANGED (user, 20 Oct). The first /diag reading of the intermittent
+// Moving Dot stall showed something that cannot both be true: the step counter had climbed to ~56,000
+// (a step ~72 times a second) while the board's own staleness detector reported port 1's position
+// unchanged for 9.6 seconds - the whole row. So the POSITION is now published too, along with how
+// long it has been unchanged, its direction, and whether the strip is dark. Those four numbers say
+// whether the dot is moving-but-not-advancing, advancing-but-not-drawn, or genuinely pinned.
+volatile unsigned long g_lastMoveMs[NUM_PORTS] = {0};
 // FRAMES VISIBLE, per port. If two ports have identical parameters, their steps-per-visible-frame
 // must match; a difference in the raw step count can then only come from one port being DARK for
 // part of the time - which is DATA (an empty cell), not a code asymmetry. st0/st1 alone cannot tell
@@ -1126,6 +1143,10 @@ static float chaseKickSpeed(int p) {
 //
 // Nothing is drawn while a chase is still, so a silent strip does not re-transmit 500 times
 // a second. The step-timer patterns cannot avoid that, because they always step.
+// A beat that lands while the dot is still moving is DEFERRED, not dropped (user, 20 Oct): one
+// pending move per port, started the moment the current one finishes. A FLAG deliberately, not a
+// count - a run of beats must never stack into a longer move.
+static bool          chasePending[NUM_PORTS]  = {false};
 static float         chaseAcc[NUM_PORTS]      = {0};   // fractional LEDs (wrap OFF)
 static unsigned long chaseTrigAt[NUM_PORTS]   = {0};   // when the last trigger landed
 static unsigned long chaseInterval[NUM_PORTS] = {0};   // measured gap between triggers
@@ -2229,6 +2250,7 @@ void handleLiveTweak() {
     // The per-pattern EFFECT rows. Stored now so the values travel with the pattern; nothing
     // renders them until the Moving Dot effect build.
     if (doc.containsKey("effect"))   r.effect   = (uint8_t)constrain(jsonNumI(doc["effect"], 0), 0, 10);
+    // 0-0.5 is the GLOBAL maximum; the Chase's 0-0.1 range is a PAGE range for that pattern only.
     if (doc.containsKey("momentum")) r.momentum = constrain(jsonNumF(doc["momentum"], 0.0f), 0.0f, 0.5f);
     if (doc.containsKey("distance")) r.distance = (uint8_t)constrain(jsonNumI(doc["distance"], 0), 0, 100);
     // The LED section's sensitivity is THIS pattern's own. (The 240V section still writes the
@@ -3338,6 +3360,37 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["v0mo"] = (double)portCfg[0].momentum;   doc["v1mo"] = (double)portCfg[1].momentum;
   doc["v0bs"] = (double)portCfg[0].beatSens;   doc["v1bs"] = (double)portCfg[1].beatSens;
   doc["v0fq"] = portCfg[0].freqHz;             doc["v1fq"] = portCfg[1].freqHz;
+  // ---- MOVING DOT TELEMETRY, EVERY PORT (user, 20 Oct) ---------------------------------------
+  // The Moving Dot fault is INTERMITTENT: "the moving dots did not stall - I don't understand why
+  // the fault was there before but not now". A hand-timed poll cannot catch it, so every port
+  // reports on demand the numbers that decide it:
+  //   pat   the pattern that port is REALLY running (a port running the Chase stops between kicks)
+  //   sp    the live speed - the step interval is sp x 1000 ms, so 1.0 means one pixel a second
+  //   sz/ef/ds/mo   the values the port is actually holding
+  //   lost/dot      the EROSION STATE. mdLost is never cleared by the timeline, and dot is the
+  //                 length actually DRAWN - dot=0 is an invisible dot, which looks exactly like a
+  //                 stopped one, and the watchdog below flags it.
+  //   dead  mdExpiredAt: 1 = it exploded and is waiting for its 3 s restart
+  //   cell  the id of the cell that owns the port ("-" = the page owns it)
+  //   gs    the pixels that port has ADVANCED - two readings apart answer "is it moving?"
+  //   fre   how many times the motion restart has re-pinned this port
+  for (int p = 0; p < NUM_PORTS; p++) {
+    const TlItem &cc = tlData[tlRow][p + 1];
+    char k[8];  snprintf(k, sizeof(k), "m%d", p + 1);
+    char b[200];
+    snprintf(b, sizeof(b),
+             "pat=%d sp=%.4f sz=%d ef=%d ds=%d mo=%.2f lost=%d dot=%d dead=%d fre=%lu cell=%s gs=%lu pos=%d dir=%d dark=%d age=%lu",
+             portCfg[p].pat, (double)portCfg[p].speed, portCfg[p].size, portCfg[p].effect,
+             portCfg[p].distance, (double)portCfg[p].momentum,
+             (int)mdLost[p], mdDotLen(p), (mdExpiredAt[p] != 0) ? 1 : 0,
+             (unsigned long)g_framesRestart[p], cc.used ? cc.id : "-",
+             (unsigned long)g_steps[p],
+             ledPosArr[p], ledDirArr[p], portCfg[p].dark ? 1 : 0,
+             (unsigned long)(millis() - g_lastMoveMs[p]));
+    doc[k] = b;
+  }
+  doc["selPat"] = activePatternLED;
+  doc["tlRowCell0"] = tlData[tlRow][11].used ? tlData[tlRow][11].id : "-";
   // Deliberately NOT reset: see the note where they are declared. A transition stall is over in a
   // second and a hand-timed poll cannot catch it, so they persist until the board is reset.
 }
@@ -4511,22 +4564,30 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     int np   = from + (int)(((long)(to - from) * (long)el) / (long)iv);
     ledPosArr[p] = (np < 0 || np > maxPos) ? 0 : np;      // clamped: see the note below
   } else {
-    // THE FOOTBALL (see the kick block far above). The dot ROLLS at Speed so the display never
-    // stalls, and the BASS LEVEL kicks it: the level decides how hard, and the DISTANCE credit
-    // decides how far. Speed is no longer a CAP on a level-scaled rate - it is the floor.
+    // BASS BEAT DRIVES THE DOT (user, 20 Oct): every detected BASS BEAT advances the dot by DISTANCE
+    // pixels, covered in the KICK SPEED's time, and then the dot STOPS and waits for the next beat.
+    // One move per beat, always the same size, however loud or quiet that beat was.
     //
-    // The level goes through a SQUARE ROOT, as it always has. The bass level sits low on most
-    // music (0.05-0.5), and used raw the dot barely moved on quiet passages. Minimum beat
-    // sensitivity (or Audio Detect OFF) means the music has NO effect: no kick at all, just the
-    // roll - the same rule every other pattern follows.
+    // THE BASS LEVEL NO LONGER DECIDES ANYTHING ABOUT THE MOTION. It used to set both how far a
+    // kick went (Distance x the level's strength) and how fast it went (a speed blended from the
+    // level) - so a quiet beat barely moved the dot and a loud one flung it. That is the behaviour
+    // the user identified as the problem. The level is still measured and still logged, so a level
+    // that never rises remains diagnosable; it is simply not a motion input any more.
+    //
+    // Minimum beat sensitivity (or Audio Detect OFF) means the music has NO effect: the dot does not
+    // move at all - the same rule every other pattern follows. Sensitivity also sets this port's
+    // ONSET THRESHOLD (see rebuildListening), so it still decides HOW EASILY a beat counts.
     float dtSec = (float)dtMs / 1000.0f;
+    // THE QUIET SPEED (user, 20 Oct: "The speed should not be greyed in chase wrap off. It should be
+    // active and set the quiet speed so the dot still moves at that rate when there is no music").
+    // Speed is the ROLL - a slow creep, 1-10 seconds per pixel - and it is what the dot does when
+    // nothing is being detected: in silence the strip keeps drifting instead of looking dead, and
+    // between beats it adds only a fraction of a pixel, so a kick is still Distance pixels.
     float roll  = chaseSpeed(p);
 
     // BASS LEVEL (61-500 Hz), smoothed by the envelope follower in the render loop, then GATED.
-    // This is the LOUDNESS of the beat, not its timing - the timing (Bass Beat) is what Wrap ON
-    // uses and it is untouched. The gate is this pattern's OWN control: the row is relabelled
-    // "Bass Level" on the Chase. Below the gate there is NO kick at all, so a silent room leaves
-    // the dot rolling at Speed and nothing else.
+    // DIAGNOSTIC ONLY since 20 Oct - it grants and scales no travel. The gate, n and chaseNlast
+    // exist for the /diag log and for nothing else.
     float gate = 0.0f;
     float n    = 0.0f;                 // the level AFTER the gate and the reference, 0..1
     float env  = g_bassLvlEnv;         // the smoothed Bass Level, before anything else
@@ -4560,51 +4621,67 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
       }
     }
 
-    int   dm   = constrain(portCfg[p].distance, 1, 50);
-    float kSpd = chaseKickSpeed(p);                                // EFFECT: the kick's speed
-    // (Momentum is applied where the glide is set up, from the kick speed - see below.)
+    // DISTANCE IS THE PIXELS, KICK SPEED IS THE TIME (user, 20 Oct, correcting the change made just
+    // before): "when the size is set to 10 and the distance is set to 10 the dot moves swiftly at
+    // the kick speed 0.02 to 0.1 to the next position defined by the distance and waits there until
+    // the next beat occurs." So:
+    //   DISTANCE    how many pixels the dot advances on a beat (1-50).
+    //   KICK SPEED  how long that move takes, as the Effects row relabelled "Kick Speed" on the
+    //               Chase. 1-10 INVERTED: 1 is the SLOWEST at 1.0s and 10 the fastest at 0.1s (user,
+    //               20 Oct: "changed from 0.02 - 0.1 to 0.1 to 1.0 (yes that is inverted)").
+    //               0 means NO KICK AT ALL - the Effect row's own rule, minimum = the effect is off,
+    //               which is why the page greys Distance and Momentum at 0.
+    //   then it STOPS and waits for the next beat. There is no roll any more.
+    float dm      = (float)constrain(portCfg[p].distance, 1, 50);
+    int   eff     = constrain(portCfg[p].effect, 0, 10);
+    float kickSec  = (eff <= 0) ? 0.0f : ((11.0f - (float)eff) / 10.0f);
+    float kickRate = (kickSec > 0.0f) ? (dm / kickSec) : 0.0f;      // px/s: the traverse
+    // (Momentum is applied where the glide is set up, from the kick's pixels - see below.)
 
-    // A RISING LEVEL IS A KICK, so the dot answers the bass at once instead of waiting for the
-    // credit to trickle back. The grant is the hit's own strength share of Distance, and the
-    // credit can never exceed Distance itself - that is what makes Distance a hard maximum.
-    //
-    // THE RISE IS MEASURED ON THE RAW ENVELOPE, not on `n`: after the gate and the reference a
-    // real hit is a small number, so a threshold on `n` would miss hits entirely.
-    // WHAT COUNTS AS A HIT - and the SENSITIVITY sets it. A FIXED threshold was why raising Bass
-    // Sensitivity did nothing once the gate was already below the music: the gate only decides
-    // which hits are big enough to matter, this decides what is a hit at all.
-    //   sens 1.0 -> 0.03  (almost every bass note)
-    //   sens 0.2 -> 0.12  (only firm hits)
-    // The 0.03 floor is still above the room's ~0.02 wobble, so silence stays still.
-    float riseNeeded = 0.12f * (1.2f - sens);
-    if (riseNeeded < 0.03f) riseNeeded = 0.03f;
-    bool rising = (env > chaseLvlLast[p] + riseNeeded);
+    // THE LEVEL'S OWN RISE IS NO LONGER A KICK (user, 20 Oct). It used to be a fallback trigger, so
+    // a rising level could move the dot without any detected beat - the level driving the motion by
+    // the back door. It is measured for the log and nothing else now: the BASS BEAT alone triggers
+    // travel. Whether a beat is detected at all is set by this port's ONSET THRESHOLD, which Bass
+    // Sensitivity drives (see rebuildListening), so the slider still decides how easily it counts.
     chaseLvlLast[p] = env;
     chaseNlast[p]   = n;
 
-    // A HIT IS A BEAT OR A RISE - NEVER BOTH. The onset arms a timed grant, and the credit is
-    // taken from the level AT THAT MOMENT, which is the beat's centre (its peak) rather than its
-    // leading edge. The level's own rise is only a fallback, rate-limited so the rise that
-    // follows an onset cannot fire the same beat a second time.
-    // A HIT IS THE SHARED ONSET OR THE SHARED FALLBACK - never per-port state, so two identical
-    // cells always take exactly the same hits. The strength still comes from this port's n.
-    bool hit = (g_chaseOnsetHit || g_chaseFallback);
-    if (hit && !(n > 0.0f)) g_kickZero++;
+    // A HIT IS THE BASS BEAT - the SHARED onset, decided once per frame and never per port, so two
+    // identical cells always take exactly the same beats. One beat = one kick, and it is the same
+    // detector the wrap-ON metronome uses, so the two can never disagree about when music beats.
+    bool hit = g_chaseOnsetHit;
     if (!(chaseCredit[p] >= 0.0f && chaseCredit[p] <= 1000.0f)) chaseCredit[p] = 0.0f;
     if (!(chaseCoast[p] >= 0.0f && chaseCoast[p] <= 1000.0f)) chaseCoast[p] = 0.0f;
-    // A HIT GRANTS THE CREDIT - there is NO continuous top-up any more. That trickle was what
-    // stopped the coast from ever running: it kept the credit above zero, so the code stayed in
-    // the kick branch and the glide was cancelled within a frame of starting. That is why the
-    // user saw "an effect, but done in a fraction of a second" with momentum at maximum.
-    // Hits are frequent enough to keep it alive; the credit is Distance x the hit's strength.
-    if (hit) chaseCredit[p] += (float)dm * n;                      // ONE grant per beat
-    if (chaseCredit[p] > (float)dm) chaseCredit[p] = (float)dm;    // DISTANCE IS THE MAXIMUM
-    if (hit && n > 0.0f) { chaseCoast[p] = 0.0f; g_kickLED++; }
+    // ONE MOVE AT A TIME, AND ALWAYS EXACTLY DISTANCE PIXELS (user, 20 Oct: "all I get is a few
+    // moves that look like they are responding to the beat and then it moves a large distance in one
+    // go. That is incorrect but probably triggered by the music"). The credit used to ACCUMULATE, so
+    // several onsets landing inside one move stacked up to four times Distance and the dot shot off
+    // - exactly the jump the user saw, and exactly what the music could trigger with a bass run.
+    // A beat that lands while the dot is still moving is now IGNORED: one beat, one move of
+    // Distance, never more. Beats arriving faster than the move simply move the dot less often,
+    // which is the honest reading of "a set distance for each beat".
+    // A BEAT IS NEVER DROPPED, ONLY DEFERRED (user, 20 Oct: "I still get missed beats and then a
+    // large movement all at once ... I cannot get the dot to get kicked down the strip by the same
+    // amount each beat"). The previous rule IGNORED a beat that landed mid-move - that was the
+    // missed beats. It is REMEMBERED now (one pending move, never a count) and starts the moment the
+    // dot is still, so every beat still delivers exactly Distance - and no run of beats can stack
+    // into a longer move, which was the large one.
+    if (hit && kickRate > 0.0f) {
+      if (chaseCredit[p] <= 0.0f) { chaseCredit[p] = dm; chaseCoast[p] = 0.0f; g_kickLED++; }
+      else                        { chasePending[p] = true;  g_kickZero++; }   // remembered
+    }
+    // THE DEFERRED MOVE STARTS THE MOMENT THE DOT STOPS.
+    if (chasePending[p] && chaseCredit[p] <= 0.0f && kickRate > 0.0f) {
+      chaseCredit[p] = dm; chasePending[p] = false; chaseCoast[p] = 0.0f; g_kickLED++;
+    }
+    if (chaseCredit[p] > dm) chaseCredit[p] = dm;   // a stale credit can never cause a jump
 
     float rate = roll;
-    if (n > 0.0f && chaseCredit[p] > 0.0f && kSpd > roll) {
-      // THE KICK ITSELF: full kick speed until the credit (Distance x hit strength) is spent.
-      rate = roll + (kSpd - roll) * n;
+    if (chaseCredit[p] > 0.0f && kickRate > 0.0f) {
+      // THE KICK ITSELF, at the KICK SPEED's rate: the credit is Distance pixels and the rate is
+      // Distance divided by the Kick Speed's time, so the dot covers exactly Distance pixels in
+      // that time and then stops. Neither number involves the level.
+      rate = kickRate;
       float spend = (rate - roll) * dtSec;                         // pixels the kick pays for
       if (spend > chaseCredit[p]) {                                // the credit runs out mid-frame
         float frac = (spend > 0.0f) ? (chaseCredit[p] / spend) : 0.0f;
@@ -4612,15 +4689,16 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
         spend = chaseCredit[p];
       }
       chaseCredit[p] -= spend;
-      // THE GLIDE. MOMENTUM NOW SETS HOW FAR IT GOES: Distance x 6 x momentum - no glide at all
-      // at zero, 3 x Distance at maximum - and it starts at the KICK SPEED, so the dot
-      // decelerates smoothly instead of braking and then crawling. The decay time follows from
-      // the two: travel = coastV x tau, so tau = the glide's distance / its starting speed.
-      // (The previous version capped the SPEED at Distance/tau. That held the total under
-      // 2 x Distance, but it left Momentum able to change only a 10-pixel crawl - "momentum still
-      // has very little effect". Momentum is measured in DISTANCE now, which is what it does.)
+      // THE GLIDE. MOMENTUM SETS HOW FAR IT RUNS PAST THE KICK, measured in the kick's own pixels:
+      // 0 = no glide, so the dot stops dead at exactly Distance, and the maximum carries it
+      // 3 x Distance beyond. It starts at the KICK SPEED's rate, so the dot eases down instead of
+      // braking. This is the ONLY travel beyond Distance, and it is what Momentum is for.
       float coastV   = rate - roll;
-      float glideCap = (float)dm * 6.0f * constrain(portCfg[p].momentum, 0.0f, 0.5f);
+      // MOMENTUM IS 0-0.1 ON THE CHASE (Wrap OFF) AND 0-0.5 EVERYWHERE ELSE (user, 20 Oct). The PAGE
+      // sets that short range for this pattern alone, so the multiplier stays 6 and the formula is
+      // untouched: 0.1 gives the same 0.6 x Distance it always did. The clamp guards against a value
+      // saved under a different pattern; the Chase's own slider cannot exceed 0.1.
+      float glideCap = dm * 6.0f * constrain(portCfg[p].momentum, 0.0f, 0.1f);
       chaseCoast[p]    = coastV;
       chaseCoastTau[p] = (coastV > 0.5f && glideCap > 0.0f) ? (glideCap / coastV) : 0.0f;
     } else if (chaseCoastTau[p] > 0.0f && chaseCoast[p] > 0.5f) {
@@ -4630,7 +4708,7 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
       // Now the kick's own distance is covered at full kick speed and THEN the excess decays back
       // to the roll, so the whole dot visibly carries on and slows down.
       //   Momentum 0    -> tau 0    -> no coast at all: a dead stop exactly at Distance.
-      //   Momentum 0.5  -> tau 6s   -> a long glide that eases back into the roll over seconds.
+      //   Momentum 0.5  -> tau 6s   -> a long glide that eases past Distance over seconds.
       chaseCoast[p] *= expf(-dtSec / chaseCoastTau[p]);
       rate = roll + chaseCoast[p];
       if (chaseCoast[p] <= 0.5f) chaseCoast[p] = 0.0f;   // the glide is spent
@@ -4641,9 +4719,13 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     // SANITISE THE RATE. This is the crash: sqrtf() of a corrupt level is NaN, constrain()
     // passes NaN straight through because BOTH of its comparisons are false for NaN, and
     // (int)NaN is INT_MIN - so the position was thrown far negative, the renderer's `% N`
-    // gave a negative index, and setLed() wrote outside the strip buffer. Anything that is
-    // not a sane positive rate falls back to the roll, which is always 1-50 px/s.
-    if (!(rate > 0.0f && rate <= 1000.0f)) rate = roll;
+    // gave a negative index, and setLed() wrote outside the strip buffer. Anything not sane
+    // falls back to `roll`, which is ZERO for the Chase now - so a corrupt rate means "do not
+    // move" rather than a crawl.
+    // THE CEILING IS 20,000 px/s, NOT 1,000 (20 Oct): the fastest legal kick is Distance 50
+    // covered in the Kick Speed's minimum 0.02s = 2,500 px/s, and the old 1,000 ceiling rejected
+    // that as insane and froze the dot - one drag of Distance to the top silently stopped it.
+    if (!(rate > 0.0f && rate <= 20000.0f)) rate = roll;
     chaseAcc[p] += rate * dtSec;
     if (!(chaseAcc[p] >= 0.0f && chaseAcc[p] <= 1000.0f)) chaseAcc[p] = 0.0f;
     if (chaseAcc[p] >= 1.0f) {
@@ -4748,6 +4830,7 @@ void runLEDPattern() {
           g_staleRow   = tlRow + 1;         // 1-based, the same as the page shows
         }
       }
+      g_lastMoveMs[p] = posAtMs[p];   // published in /diag: for a dot the POSITION is the motion
     }
     // THE CHASE is not on the step timer: it is updated EVERY FRAME, because with wrap OFF
     // its movement follows the audio level and with wrap ON it interpolates a traverse
@@ -4813,9 +4896,60 @@ void runLEDPattern() {
     }
     dbgStage = 7;
   }
-  // (Nothing to clear here any more: the strips' reversal is applied in loop() the
-  // instant the onset is detected, rather than latched for the next step.)
+  // ---- STALL WATCHDOG (user, 20 Oct) ----------------------------------------------------------
+  // The Moving Dot stall is INTERMITTENT - "I don't understand why the fault was there before but
+  // not now" - and a fault like that cannot be caught by hand. So the board now watches itself:
+  // once a second, every port that is NOT dark and NOT level-driven must have advanced its step
+  // counter. Four still seconds writes ONE log line carrying every number that decides why:
+  // pattern, speed, size, effect, distance, the EROSION state (lost/dot - dot=0 is an INVISIBLE dot,
+  // which looks exactly like a stopped one), whether it has exploded, the owning cell, the pixels
+  // advanced and the motion-restart count. The log persists, so an unattended stall is diagnosable
+  // afterwards instead of being guessed at. Rate-limited to one line per port per 10 s.
+  {
+    static uint32_t      lastSt[NUM_PORTS]       = {0};
+    static unsigned long stillSince[NUM_PORTS]   = {0};
+    static unsigned long lastComplain[NUM_PORTS] = {0};
+    static unsigned long lastCheck = 0;
+    if ((unsigned long)(now - lastCheck) >= 1000) {
+      lastCheck = now;
+      for (int p = 0; p < NUM_PORTS; p++) {
+        uint32_t st = g_steps[p];
+        if (st != lastSt[p]) { lastSt[p] = st; stillSince[p] = now; continue; }
+        if (portCfg[p].dark || isLevelPat(portCfg[p].pat)) continue;
+        if ((unsigned long)(now - stillSince[p]) < 4000) continue;
+        if ((unsigned long)(now - lastComplain[p]) < 10000) continue;
+        lastComplain[p] = now;
+        const TlItem &wc = tlData[tlRow][p + 1];
+        logAppend("STALL p=%d pat=%d sp=%.4f sz=%d ef=%d ds=%d mo=%.2f or=%d lost=%d dot=%d dead=%d fre=%lu cell=%s pos=%d dir=%d dark=%d age=%lu gs=%lu",
+                  p + 1, portCfg[p].pat, (double)portCfg[p].speed, portCfg[p].size,
+                  portCfg[p].effect, portCfg[p].distance, (double)portCfg[p].momentum,
+                  portCfg[p].orient ? 1 : 0,
+                  (int)mdLost[p], mdDotLen(p), (mdExpiredAt[p] != 0) ? 1 : 0,
+                  (unsigned long)g_framesRestart[p], wc.used ? wc.id : "-",
+                  ledPosArr[p], ledDirArr[p], portCfg[p].dark ? 1 : 0,
+                  (unsigned long)(now - g_lastMoveMs[p]), (unsigned long)g_steps[p]);
+      }
+    }
+  }
+}
 
+// ---- THE SAME PICTURE, OVER USB (user, 20 Oct) ----------------------------------------------
+// The PC cannot stay joined to an access point with no internet - it has other work to do - so the
+// Wi-Fi route to /diag is not usable for watching an intermittent fault. This formats ONE port's
+// state exactly as the STALL watchdog does, so the USB serial port carries the same evidence with no
+// network involved. The 'D' serial command prints it for all ten ports.
+// NOTE: it deliberately does NOT call handleDiag(), which sends over HTTP from the web task; a
+// serial command runs in loop(), and mixing the two contexts is not safe.
+static void portStateLine(int p, char* b, size_t n) {
+  const TlItem &cc = tlData[tlRow][p + 1];
+  snprintf(b, n,
+           "p=%d pat=%d sp=%.4f sz=%d ef=%d ds=%d mo=%.2f or=%d lost=%d dot=%d dead=%d fre=%lu cell=%s pos=%d dir=%d dark=%d age=%lu gs=%lu",
+           p + 1, portCfg[p].pat, (double)portCfg[p].speed, portCfg[p].size, portCfg[p].effect,
+           portCfg[p].distance, (double)portCfg[p].momentum, portCfg[p].orient ? 1 : 0,
+           (int)mdLost[p], mdDotLen(p), (mdExpiredAt[p] != 0) ? 1 : 0,
+           (unsigned long)g_framesRestart[p], cc.used ? cc.id : "-",
+           ledPosArr[p], ledDirArr[p], portCfg[p].dark ? 1 : 0,
+           (unsigned long)(millis() - g_lastMoveMs[p]), (unsigned long)g_steps[p]);
 }
 
 // ==========================================
@@ -4868,8 +5002,14 @@ void loadTimeline() {
     tlData[r][c].qty    = jsonNumI(it["quantity"], 1);
     tlData[r][c].size   = jsonNumI(it["size"],     1);
     tlData[r][c].wrap   = it["wrap"] | false;
-    // ORIENTATION from the item: -1 means the cell carries none, so the port inherits the pattern's.
-    tlData[r][c].orient = jsonNumI(it["orient"], -1);
+    // ORIENTATION arrives from the page as a JSON BOOLEAN (the slider's .checked), and jsonNumI()
+    // only understands strings and numbers - so this used to read back as -1, "the cell carries
+    // none", and EVERY cell fell back to the PATTERN's orientation. That is why two Chase entries
+    // with different Orientation ticks both ran the same way (user, 20 Oct: "Regardless of the
+    // orientation checkmark, the patterns all went in the same direction"). SAME TRAP as the pattern
+    // record above, same fix: a real boolean first, the numeric form for anything old.
+    if (it["orient"].is<bool>()) tlData[r][c].orient = it["orient"].as<bool>() ? 1 : 0;
+    else                         tlData[r][c].orient = jsonNumI(it["orient"], -1);
     tlData[r][c].invert = it["invert"] | false;
     // Colour references travel WITH the pattern, so the timeline ADOPTS them rather
     // than offering colour controls of its own. A cell that has none (saved before
@@ -4986,9 +5126,14 @@ void applyTimelineRow(int row, bool force) {
     int   wantQty      = cell ? constrain(cell->qty, 1, 8)   : constrain(quantityLED, 1, 8);
     int   wantSize     = cell ? constrain(cell->size, 1, 10) : constrain(sizeLED, 1, 10);
     bool  wantWrap     = cell ? cell->wrap   : wrapLED;
-    // ORIENTATION: the cell's own if it carries one (-1 = none), else the pattern's.
-    bool  wantOrient   = cell ? ((cell->orient >= 0) ? (cell->orient != 0) : (ledSel().orient != 0))
-                              : (ledSel().orient != 0);
+    // ORIENTATION: THE CELL'S OWN, OR NONE (user, 20 Oct). This fell back to ledSel() - the pattern
+    // SELECTED ON THE PAGE - so a cell carrying no orientation inherited whatever the page's pattern
+    // was set to. With the Chase selected and its Orientation ticked, that pushed orient=1 onto the
+    // Moving Dot's ports, and orient=1 with Wrap OFF is what parked the dot at the end of its strip
+    // ("the moving dot is behaving like the chase with wrap on"). Rule 2: the timeline applies what
+    // the PLAYLIST stored, never what another pattern's page happens to be showing. A cell that
+    // carries no orientation of its own now means NO orientation, not "another pattern's".
+    bool  wantOrient   = cell ? (cell->orient > 0) : (ledSel().orient != 0);
     bool  wantInv      = cell ? cell->invert : invertLED;
     int   wantMult     = (cell && cell->mult > 0) ? ((cell->mult > 1) ? 2 : 1)
                                                   : ((multLED > 1) ? 2 : 1);
@@ -5087,6 +5232,7 @@ void applyTimelineRow(int row, bool force) {
       chaseAcc[p] = 0.0f; chaseCredit[p] = 0.0f; chaseCoast[p] = 0.0f;
       chaseLvlLast[p] = 0.0f; chaseNlast[p] = 0.0f;
       chaseCoastTau[p] = 0.0f;
+      g_framesRestart[p]++;      // the dot was re-pinned; a climbing count with a still dot IS the fault
     }
     g_restartMotion = false;
   }
@@ -5382,6 +5528,13 @@ void setup() {
   systemInit();
   Serial.begin(115200);
   delay(500);
+  // SILENCE THE WiFi LOG FLOOD (user, 20 Oct). The iPhone connects with a PRIVATE, ROTATING MAC
+  // address, and this access point then logs "CCMP replay detected" endlessly - hundreds of error
+  // lines that bury everything worth reading (the STALL watchdog, the tweaks, the display
+  // transitions) and make the serial Monitor look as though it is ignoring commands. The display is
+  // untouched by this; only the noise is suppressed. Restore by removing this line, or use
+  // ESP_LOG_ERROR to keep genuine errors and drop the rest.
+  esp_log_level_set("wifi", ESP_LOG_NONE);
   // Diagnostic: 1=power-on, 4=panic/crash, 5=WDT, 9=brownout/reset
   Serial.printf("Boot OK. Reset reason = %d (%s) | previous run: %lus stage=%u heap=%u"
                 " req=%s sub=%u\n",
@@ -5568,7 +5721,20 @@ void loop() {
   while (Serial.available()) {
     int c = Serial.read();
     if (c == 'L' || c == 'l') serialDumpFile(LOG_PATH);
-    else if (c == 'D' || c == 'd') Serial.print("use /diag for JSON\n");
+    else if (c == 'D' || c == 'd') {
+      // EVERY PORT'S STATE, OVER USB (user, 20 Oct): the same fields the /diag JSON and the STALL
+      // watchdog report. The PC cannot stay joined to an access point that has no internet - it has
+      // other work to do - so this is now the primary way to read the board during a fault: no
+      // network, no reset (the host de-asserts DTR/RTS before opening the port).
+      Serial.print("\n-----BEGIN-----\n");
+      Serial.printf("tlPlaying=%d tlRow=%d tlElapsedMs=%lu selPat=%s\n",
+                    tlPlaying ? 1 : 0, tlRow + 1,
+                    (unsigned long)(tlPlaying ? (millis() - tlRowStart) : 0),
+                    activePatternLED.c_str());
+      char b[260];
+      for (int i = 0; i < NUM_PORTS; i++) { portStateLine(i, b, sizeof(b)); Serial.println(b); }
+      Serial.print("\n-----END-----\n");
+    }
   }
 
   // --- HEAP FLOOR GUARD -----------------------------------------------------

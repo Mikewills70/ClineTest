@@ -764,6 +764,50 @@ the text, never change the column width.**
 redone with the file editor. A SINGLE-LINE literal replacement with no escapes is safe; anything
 multi-line is not. **Use the editor for source.**
 
+### THE MOVING DOT FREEZE, AND THE USB LOG PATH (20 Oct)
+
+**SYMPTOM:** with the timeline playing, the Moving Dot travelled to one end and HELD there - "more like the
+Chase with wrap on" - while its colour and every value stayed correct. Page preview was always fine, so it
+looked intermittent.
+
+**CAUSE (measured, not guessed):** the per-port `/diag` line showed `pat=0 sp=0.0020 dot=10 lost=0 dead=0
+cell=moving_dot gs` climbing ~196/s while **`pos` sat at 0 and `age` grew to 3 s**: the dot was stepping and
+the POSITION never changed. With `orient=1` and Wrap OFF, advancePort's end handling restarts the dot at
+pixel 0 and does **not** flip the direction, so it steps to -1 and is put back, for ever. That state needs
+`orient=1` (at orient=0 the restart end is the FAR end). So the precondition was an orientation reaching a
+Moving Dot port - and it arrived via `wantOrient`'s fallback to **`ledSel()`, the pattern SELECTED ON THE
+PAGE** (the Chase, whose Orientation was ticked). The timeline was applying another pattern's parameter.
+Fix: a cell with no orientation of its own now means NO orientation.
+
+**THE RULE THAT CAME OUT OF IT:** the AI may not change the behaviour of patterns without permission. (I
+had made the dot reverse at the ends - inventing a behaviour. The BASELINES were the answer: the dot never
+wraps, and reverses ONLY on a music beat.)
+
+**WHY SERIAL READINGS KEPT FAILING:** `USBMode=hwcdc` makes the sketch's `Serial` the hardware CDC, which
+resets/drops when a host asserts DTR - so a host reads the boot banner and then nothing, and a command
+looks ignored. The build script's own comment already said `USBMode=default   the USB-serial log path`:
+the knowledge existed and was lost between sessions. Both scripts now use `default`.
+
+**`CCMP replay detected` FLOOD:** an iPhone with Private Wi-Fi Address ON uses a rotating MAC, and this
+access point logs a replay error continuously - hundreds of lines that bury everything (and make the serial
+Monitor look dead). `esp_log_level_set("wifi", ESP_LOG_NONE)` in setup silences it; turning that iPhone
+setting off for this network fixes it at source. Unrelated to any pattern.
+
+**SERIAL COMMANDS (no Wi-Fi needed):** `D` prints every port's state - `pat sp sz ef ds mo or lost dot dead
+fre cell pos dir dark age gs` - and `L` dumps the log. The STALL watchdog writes the same fields whenever a
+non-dark port has not advanced for 4 s, so an unattended stall is recorded. read_board_log.ps1 needs the PC
+joined to the ESP32's own AP, which Windows will not hold while that AP has no internet; the Arduino Serial
+Monitor is the practical tool.
+
+**STILL OPEN (20 Oct):**
+- `wantSens` in applyTimelineRow still falls back to `ledSel()` - the SAME class of fault as the orientation
+  one, and the last place a port can take a parameter from the page's selected pattern.
+- A timeline cell does not carry every parameter: `attack`, `decay`, `peakDelay`, `peakSpeed`, `peakDir`,
+  `vuDir` and `layout` are in the playlist item's JSON but are NOT loaded into `TlItem`, so they still come
+  from the pattern's own record.
+- A cell is a COPY taken when the item is placed: editing the playlist item afterwards does NOT reach the
+  timeline. The intended model is that the playlist entry is the master.
+
 ### MEMORY, PARTITIONS AND THE BOARD OPTIONS (19 Oct)
 
 The board is an **ESP32-S3 N16R8**: 16 MB flash and 8 MB OCTAL PSRAM. The default board options

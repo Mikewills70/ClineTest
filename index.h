@@ -1718,8 +1718,27 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             let ps = val('paramPeakSpeedLED'); if (ps !== null) lbl('peakSpeedValLED', parseFloat(ps).toFixed(1));
             // Effects / Momentum / Distance read-outs. Page-side only for now: nothing is
             // sent to the board until each pattern's behaviour is defined.
-            let ef = val('paramEffectLED');   if (ef !== null && ef !== '') lbl('effectValLED', ef);
-            let mo = val('paramMomentumLED'); if (mo !== null && mo !== '') lbl('momentumValLED', parseFloat(mo).toFixed(2) + 's');
+            // On the CHASE the Effects row is labelled "Kick Speed" and its 1-10 is INVERTED SECONDS
+            // (user, 20 Oct): 1 is the SLOWEST at 1.00s and 10 the fastest at 0.10s, and 0 means NO
+            // KICK at all - at which point the row is greyed and this read-out is cleared anyway.
+            // Every other pattern's Effect read-out is unchanged.
+            let ef = val('paramEffectLED');
+            if (ef !== null && ef !== '') {
+                let chasePat = /^chase/i.test(String(selectedPatternNameLED || ''));
+                let efN = parseFloat(ef);
+                lbl('effectValLED', chasePat ? (efN <= 0 ? 'Off' : ((11 - efN) / 10).toFixed(2) + 's') : ef);
+            }
+            // MOMENTUM'S READ-OUT LOST ITS "s" (20 Oct): momentum is a FRACTION of Distance, not a
+            // time, so seconds were simply wrong. The firmware's coast is Distance x 6 x momentum,
+            // so the read-out shows the pixels that setting actually causes: 0.10 on the Chase (its
+            // own short range) gives 0.6 x Distance past the kick, and 0.50 elsewhere gives 3 x it.
+            let mo = val('paramMomentumLED');
+            if (mo !== null && mo !== '') {
+                let moN = parseFloat(mo);
+                let dN  = parseFloat(val('paramDistanceLED') || '0');
+                let px  = (moN > 0 && dN > 0) ? Math.round(moN * 6 * dN) : 0;
+                lbl('momentumValLED', px > 0 ? moN.toFixed(2) + ' (' + px + 'px)' : moN.toFixed(2));
+            }
             let di = val('paramDistanceLED'); if (di !== null && di !== '') lbl('distanceValLED', di);
         }
     }
@@ -2140,9 +2159,24 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         'Chase':        { colour: ['colour'],
                           visual: ['speed', 'quantity', 'size', 'wrap', 'invert', 'orient', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'],
-                          // Speed is SECONDS PER PIXEL for the Chase (1-10): it takes that long to
-                          // move one pixel. Distance 1-50 is how far ONE kick may carry the dot.
+                          // The Chase's motion is ONE MOVE PER BEAT (20 Oct):
+                          //   DISTANCE   1-50: how many pixels the dot advances on a beat.
+                          //   KICK SPEED 1-10 on the Effects row, INVERTED SECONDS (user, 20 Oct:
+                          //              "0.1 to 1.0 (yes that is inverted)"): 1 is the slowest at
+                          //              1.00s, 10 the fastest at 0.10s. Its range comes from
+                          //              PARAM_ROW_DEFAULTS and keeps 0, which means NO KICK - the
+                          //              minimum that greys Distance and Momentum, the Effect row's
+                          //              own rule ever since 17 Oct.
+                          // Speed is seconds per pixel: the QUIET SPEED, the slow creep the dot keeps
+                          // up while nothing is being detected (user, 20 Oct). LIVE with wrap OFF;
+                          // greyed only by the metronome, which never reads it.
+                          //   MOMENTUM 0-0.1 HERE, and only here (user, 20 Oct): this pattern gets a
+                          //              short range while every other pattern stays 0-0.5. The
+                          //              firmware's formula is unchanged, so 0.1 behaves exactly as
+                          //              0.1 always did - this is a re-ranging of the control, nothing
+                          //              more.
                           range:  { speed: { min: 1, max: 10, step: 0.1 },
+                                    momentum: { min: 0, max: 0.1, step: 0.01 },
                                     distance: { min: 1, max: 50, step: 1 } } },
         'Chase 10 - 1': { colour: ['colour'],
                           visual: ['speed', 'quantity', 'size', 'wrap', 'invert', 'orient', 'effect', 'momentum', 'distance'],
@@ -2206,6 +2240,15 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     // on Explosion (whose Speed is seconds per step) would make it crawl.
     const PARAM_ROW_DEFAULTS = {
         speed:    { min: 0.002, max: 0.50, step: 0.001 },
+        // Momentum is 0-0.5 by default and 0-0.1 FOR THE CHASE ONLY (user, 20 Oct). It MUST be here,
+        // or the Chase's short range would leak into Moving Dot - the same trap Speed and Distance
+        // had, where one pattern's limits silently clamped the next.
+        momentum: { min: 0, max: 0.5, step: 0.01 },
+        // Effects is 0-10 by default, but 2-10 for the Chase, where it is the "Kick Speed" - the
+        // time a kick takes, in hundredths of a second. It MUST be here: without a default, the
+        // Chase's min of 2 would leak into Moving Dot, whose Effect must still reach 0 - exactly the
+        // trap Speed and Distance had.
+        effect:   { min: 0, max: 10, step: 1 },
         // Distance is 0-100 by default, 0-20 for Moving Dot (its own shed/erode effect) and 1-50
         // for the Chase (its kick). The defaults must be re-applied BEFORE a pattern's own ranges,
         // otherwise one pattern's limits would leak into the next - the same trap Speed had.
@@ -2247,9 +2290,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         }
     }
 
-    // WRAP ON turns the Chase into a metronome: the BEAT sets the pace, so Speed is not used
-    // and is greyed rather than left looking live. (Momentum will be greyed here too when it
-    // arrives - it cannot exist with wrap on either.)
+    // WRAP ON turns the Chase into a metronome: the BEAT sets the pace, so Speed is not used and is
+    // greyed rather than left looking live. WITH WRAP OFF SPEED STAYS LIVE - it is the QUIET SPEED,
+    // the slow creep the dot keeps up while nothing is being detected (user, 20 Oct).
     // ORIENTATION GREYING (user, 19 Oct): greyed for MOVING DOT, and for the CHASE whenever Wrap is
     // ticked - the two cases where "the other end" has no meaning. Live for the Chase with Wrap OFF,
     // and live for Explosion, whose meaning for this row is still to be defined.
@@ -2267,7 +2310,10 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     }
 
     function updateChaseGreying() {
-        let chase = /^chase/i.test(selectedPatternNameLED || '');
+        // Speed stays LIVE with wrap OFF (user, 20 Oct) - it is the QUIET SPEED, the rate the dot
+        // creeps at while nothing is detected. It is greyed ONLY by the metronome, which takes its
+        // pace from the beat and never reads it.
+        let chase = /^chase/i.test(String(selectedPatternNameLED || ''));
         let wrap  = document.getElementById('paramWrapLED');
         let sp    = document.getElementById('paramSpeedLED');
         let row   = document.getElementById('prowLED-speed');
@@ -2289,6 +2335,10 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         let ef = document.getElementById('paramEffectLED');
         if (!ef) return;
         let spec = paramSpecForPattern(selectedPatternNameLED);
+        // THE EFFECT-AT-MINIMUM RULE APPLIES TO THE CHASE TOO (user, 20 Oct: "the rule of greying
+        // was correct. Do not change that"). They had the Effects row - "Kick Speed" on the Chase -
+        // set to 0, which means NO KICK AT ALL, so greying Distance and Momentum was right, not a
+        // bug. A revision in between exempted the Chase here; that exemption is GONE.
         let effectOff = parseFloat(ef.value) <= parseFloat(ef.min);
 
         [['prowLED-momentum', 'paramMomentumLED', 'momentumValLED', 'momentum'],
