@@ -996,9 +996,14 @@ static float    chaseCoastTau[NUM_PORTS];  // the glide's decay time, derived fr
 //
 // The level's own rise still triggers a kick as a FALLBACK, rate-limited so one beat cannot fire
 // twice (once from the onset, once from the rise that follows it).
-static bool     chaseHit[NUM_PORTS];       // kept for the log/state dump; the grant is timed below
-static unsigned long chaseGrantAt[NUM_PORTS];   // when this beat's credit is due (0 = none pending)
-static unsigned long chaseLastGrant[NUM_PORTS]; // when a kick was last granted (fallback limiter)
+// THE ONSET HIT IS SHARED, like the fallback below it. A beat is a property of the MUSIC, so it is
+// detected once and every Chase port takes it in the SAME frame. Per-port pending grants were the
+// last per-port asymmetry in the chain: a grant pending on one port and not the other got wiped by
+// a row change, so one port lost a kick the other kept - measured as identical parameters, a
+// 12-pixel difference over 8367, and accumulators 0.72 against 0.83.
+volatile unsigned long g_beatSeenAt    = 0;   // when listeningStep last saw a real onset
+volatile unsigned long g_beatDoneAt    = 0;   // the onset already turned into a hit
+volatile bool          g_chaseOnsetHit = false;
 static const unsigned long CHASE_BEAT_CENTRE_MS = 100;   // onset -> centre of the beat
 static const unsigned long CHASE_FALLBACK_GAP_MS = 200;  // min gap between fallback kicks
 // Set by the per-port adoption loop when ANY port's motion changed, and applied ONCE after the
@@ -1022,6 +1027,56 @@ volatile float   g_bassPeak   = 0.0f;   // peak of the ENVELOPE since the last /
 // a number the user has to guess. A hand-set gate is unworkable: the microphone's absolute scale
 // is nothing like 0-1, so any fixed number is either inside the room noise or above the music.
 volatile float   g_bassSlow   = 0.0f;
+// ---- FRAME HITCH INSTRUMENT ----------------------------------------------------------------
+// The cardinal rule: the display must never be disturbed. A row change happens inside
+// runTimelineSequencer(), a transmit inside runLEDPattern(), and a FLASH ERASE (which freezes
+// BOTH cores) shows up in the whole-pass figure - so all three are timed and /diag reports the
+// worst of each since the last read. The log cannot serve here: it stops flushing while a show
+// runs, and Serial cannot be watched without resetting the board.
+volatile uint32_t g_maxLoopUs = 0;   // worst complete pass
+volatile uint32_t g_maxSeqUs  = 0;   // worst runTimelineSequencer() - ROW CHANGES live here
+volatile uint32_t g_maxLedUs  = 0;   // worst runLEDPattern()
+volatile uint32_t g_hitchCount = 0;  // passes over 15 ms (a frame budget is about 5 ms)
+// PER-PORT STALENESS. A CPU hitch and a dot that simply STOPS look identical on the strips, and
+// these separate them: g_maxLoopUs catches the former, this catches the latter - and it names the
+// port. Worst case since the last read, in milliseconds.
+volatile uint32_t g_staleMaxMs = 0;
+// ---- WHY A KICK DID NOT LAND ----------------------------------------------------------------
+// A Chase kick needs an armed onset grant AND a level that clears the gate. The counters agree
+// with what the strips show (68 beats delivered, 4 kicks landed), so this counts the two halves
+// separately: armed but blocked by the level, versus never armed at all.
+volatile uint32_t g_kickArmed = 0;   // onsets that armed a grant
+volatile uint32_t g_kickZero  = 0;   // grants consumed while the level gave n == 0
+volatile uint32_t g_kickMiss  = 0;   // grants still pending when a row change wiped them
+// ---- PORT SYNC SNAPSHOT ---------------------------------------------------------------------
+// Two ports running the SAME playlist entry must stay in step. This exposes their raw motion state
+// (position, direction, chase accumulator and step age) for the first four ports, so "not in sync"
+// can be seen rather than guessed at.
+volatile int32_t  g_syncPos[NUM_PORTS] = {0};
+volatile int32_t  g_syncDir[NUM_PORTS] = {0};
+volatile int32_t  g_syncAcc[NUM_PORTS] = {0};   // the chase's fractional pixel accumulator
+volatile uint32_t g_syncAge[NUM_PORTS] = {0};   // ms since this port last STEPPED
+// THE SHARED FALLBACK HIT. The level's rise is a property of the MUSIC, so the decision to fire a
+// fallback kick is made ONCE per frame and taken by every Chase port in that frame. Deciding it per
+// port (each with its own 200 ms gate) let one port take a hit the other was still gated out of -
+// which is exactly "the chase on port 1 is a full dot length different to port 2".
+volatile bool     g_chaseFallback = false;
+static const float CHASE_FALLBACK_RISE = 0.04f;   // the SHARED rise needed for a fallback hit
+// PAIR DIVERGENCE: how far port 0 and port 1 have ever been apart in PIXELS (worst since boot),
+// with the two positions and the row it happened in. A whole dot length apart is a missed or extra
+// kick, not a sub-pixel drift, and this is what distinguishes them.
+volatile int32_t  g_pairDiff = 0, g_pairA = 0, g_pairB = 0, g_pairRow = -1;
+// STEP COUNTS, per port. Two ports fed identical parameters MUST take the same number of steps; if
+// they do not, the asymmetry is in the code somewhere between the cell and the step. If the counts
+// match but the positions differ, the difference came in through a parameter - which is data, not a
+// code fault. This is how "sync as a byproduct" gets verified instead of special-cased.
+volatile uint32_t g_steps[NUM_PORTS] = {0};
+volatile int32_t  g_stalePort  = -1;
+volatile int32_t  g_staleDark  = -1;   // was that port DARK at the time? (-1 = nothing recorded yet)
+volatile int32_t  g_staleRow   = -1;   // which timeline row it happened in (1-based, -1 = none)
+// These four are deliberately NOT cleared by reading /diag: a stall during a row TRANSITION is over
+// in a second and cannot be caught by a poll that has to be timed by hand. They persist until the
+// board is reset, so one reading after a test always shows whether it happened and to which port.
 
 static inline bool isChaseKick(int p) {
   return portCfg[p].pat == LP_CHASE_1_10 && !portCfg[p].wrap;
@@ -3202,6 +3257,55 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["c0id"]    = tlData[tlRow][1].id;
   doc["c1id"]    = tlData[tlRow][2].id;
   doc["c2id"]    = tlData[tlRow][3].id;
+  // FRAME HITCH FIGURES, in microseconds, worst case since the last read. Read these right after a
+  // timeline row change: fSeqUs names a row-change stall, fLedUs a transmit stall, and fLoopUs a
+  // stall that hit the whole pass - which is what a FLASH ERASE looks like (it freezes both cores).
+  doc["fLoopUs"] = g_maxLoopUs;
+  doc["fSeqUs"]  = g_maxSeqUs;
+  doc["fLedUs"]  = g_maxLedUs;
+  doc["fHitch"]  = g_hitchCount;
+  g_maxLoopUs = 0; g_maxSeqUs = 0; g_maxLedUs = 0; g_hitchCount = 0;
+  // THE STALENESS PAIR. fStaleMs is the worst case in ms and fStaleP names the port. A large
+  // fStaleMs with a small fLoopUs means the dot STOPPED rather than the CPU stalling - and if it
+  // is the Moving Dot that stops, the erode/death/restart path is the place to look, not the CPU.
+  doc["fStaleMs"] = g_staleMaxMs;
+  doc["fStaleP"]  = (int32_t)g_stalePort;
+  doc["fStaleDk"] = (int32_t)g_staleDark;   // 1 = that port was DARK: not a CPU stall at all
+  doc["fStaleRw"] = (int32_t)g_staleRow;    // which row the worst stall happened in (1-based)
+  // WHY A KICK DID NOT LAND: armed but blocked by the level, versus never armed.
+  doc["kArmed"] = g_kickArmed;
+  doc["kZero"]  = g_kickZero;
+  doc["kMiss"]  = g_kickMiss;
+  // PORT SYNC SNAPSHOT for ports 0-3: position, direction, chase accumulator (hundredths of a
+  // pixel) and ms since that port last stepped. Two ports on the SAME entry should agree on all
+  // four; comparing sA0 with sA1 and sG0 with sG1 shows a drift in the tenths of a pixel.
+  doc["sP0"] = g_syncPos[0]; doc["sP1"] = g_syncPos[1]; doc["sP2"] = g_syncPos[2]; doc["sP3"] = g_syncPos[3];
+  doc["sD0"] = g_syncDir[0]; doc["sD1"] = g_syncDir[1]; doc["sD2"] = g_syncDir[2]; doc["sD3"] = g_syncDir[3];
+  doc["sA0"] = g_syncAcc[0]; doc["sA1"] = g_syncAcc[1]; doc["sA2"] = g_syncAcc[2]; doc["sA3"] = g_syncAcc[3];
+  doc["sG0"] = g_syncAge[0]; doc["sG1"] = g_syncAge[1]; doc["sG2"] = g_syncAge[2]; doc["sG3"] = g_syncAge[3];
+  // PAIR DIVERGENCE (port 0 vs port 1), worst since boot. A value of roughly the dot's SIZE means
+  // one port took a kick the other did not; small values are just the fractional phase.
+  doc["pairDiff"] = g_pairDiff;
+  doc["pairA"]    = g_pairA;
+  doc["pairB"]    = g_pairB;
+  doc["pairRow"]  = g_pairRow;
+  // THE PROOF PAIR. st0/st1 are the pixels each port has advanced: two ports fed identical
+  // parameters MUST agree. v0xx/v1xx are the parameters that were actually APPLIED to each port, so
+  // "the cells are identical" can be checked rather than assumed - the difference between two
+  // identical cells should be nothing at all, and if a parameter differs the cause is the DATA, not
+  // a code exception.
+  doc["st0"] = g_steps[0]; doc["st1"] = g_steps[1];
+  doc["v0sp"] = (double)portCfg[0].speed;      doc["v1sp"] = (double)portCfg[1].speed;
+  doc["v0sz"] = portCfg[0].size;               doc["v1sz"] = portCfg[1].size;
+  doc["v0qt"] = portCfg[0].qty;                doc["v1qt"] = portCfg[1].qty;
+  doc["v0wr"] = portCfg[0].wrap ? 1 : 0;       doc["v1wr"] = portCfg[1].wrap ? 1 : 0;
+  doc["v0ef"] = portCfg[0].effect;             doc["v1ef"] = portCfg[1].effect;
+  doc["v0ds"] = portCfg[0].distance;           doc["v1ds"] = portCfg[1].distance;
+  doc["v0mo"] = (double)portCfg[0].momentum;   doc["v1mo"] = (double)portCfg[1].momentum;
+  doc["v0bs"] = (double)portCfg[0].beatSens;   doc["v1bs"] = (double)portCfg[1].beatSens;
+  doc["v0fq"] = portCfg[0].freqHz;             doc["v1fq"] = portCfg[1].freqHz;
+  // Deliberately NOT reset: see the note where they are declared. A transition stall is over in a
+  // second and a hand-timed poll cannot catch it, so they persist until the board is reset.
 }
 
 // The per-pattern ACTION - the only place a beat moves anything.
@@ -3239,16 +3343,8 @@ static void actOnBeat(int i, unsigned long now, bool fromAntifreeze, bool isSub)
     // in for a beat that never came.
     if (portCfg[i].wrap && !isSub)              chaseBeat(i, now);
     else if (portCfg[i].wrap && fromAntifreeze) chaseBeat(i, now);
-    // THE HYBRID, wrap OFF only: an ONSET (or an antifreeze pulse) arms a hit. It is not a beat
-    // action in the old sense - it adds no travel of its own. It just tells stepChase that a hit
-    // has landed, and the LEVEL decides how hard it was. This is what catches the beats the
-    // level's own rises miss.
-    else if (!portCfg[i].wrap && !isSub) {
-      // ARM THE GRANT FOR THE CENTRE OF THE BEAT - see the note at the trigger state. 0 means
-      // "none pending", so two onsets inside the same window cannot double-arm it.
-      if (chaseGrantAt[i] == 0) chaseGrantAt[i] = now + CHASE_BEAT_CENTRE_MS;
-      chaseHit[i] = true;
-    }
+    // THE HYBRID, wrap OFF only: the hit is SHARED now - see g_chaseOnsetHit in the render loop.
+    // Nothing is armed here any more, so no per-port state can be left behind or wiped unevenly.
     return;
   }
   if (!beatActionAllowed(i)) return;     // minimum sensitivity: the timer takes over
@@ -3283,6 +3379,7 @@ static void listeningStep() {
       L.lastSeq = ch.seq;
       if (ch.novelty > L.thr && (now - L.lastReal) >= ODF_MIN_GAP) {
         anyReal = true;
+        g_beatSeenAt = now;                     // the SHARED onset stamp (see g_chaseOnsetHit)
         L.prevReal = L.lastReal;
         L.lastReal = now;
         g_beatReal++;
@@ -4453,16 +4550,10 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     // taken from the level AT THAT MOMENT, which is the beat's centre (its peak) rather than its
     // leading edge. The level's own rise is only a fallback, rate-limited so the rise that
     // follows an onset cannot fire the same beat a second time.
-    bool hit = false;
-    if (chaseGrantAt[p] != 0 && (long)(now - chaseGrantAt[p]) >= 0) {
-      hit = true;
-      chaseGrantAt[p] = 0;
-    } else if (chaseGrantAt[p] == 0 && rising &&
-               (long)(now - chaseLastGrant[p]) > (long)CHASE_FALLBACK_GAP_MS) {
-      hit = true;
-    }
-    if (hit) chaseLastGrant[p] = now;
-    chaseHit[p] = hit;
+    // A HIT IS THE SHARED ONSET OR THE SHARED FALLBACK - never per-port state, so two identical
+    // cells always take exactly the same hits. The strength still comes from this port's n.
+    bool hit = (g_chaseOnsetHit || g_chaseFallback);
+    if (hit && !(n > 0.0f)) g_kickZero++;
     if (!(chaseCredit[p] >= 0.0f && chaseCredit[p] <= 1000.0f)) chaseCredit[p] = 0.0f;
     if (!(chaseCoast[p] >= 0.0f && chaseCoast[p] <= 1000.0f)) chaseCoast[p] = 0.0f;
     // A HIT GRANTS THE CREDIT - there is NO continuous top-up any more. That trickle was what
@@ -4522,6 +4613,7 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     if (chaseAcc[p] >= 1.0f) {
       int add = (int)chaseAcc[p];
       chaseAcc[p] -= (float)add;
+      g_steps[p] += (uint32_t)add;      // the pixels this port has ADVANCED (see g_steps)
       int np = ledPosArr[p] + add;                 // FORWARD only: the football never reverses
       ledPosArr[p] = (np < 0 || np > maxPos) ? 0 : np;   // off the end: restart at the start
     }
@@ -4543,6 +4635,30 @@ void runLEDPattern() {
   // (The BASS LEVEL ENVELOPE is updated in the AUDIO path now - see audioAnalyse - so it exists
   // whether or not the display is running.)
 
+  // THE FALLBACK HIT, DECIDED ONCE PER FRAME. The level's rise is a property of the MUSIC, so every
+  // Chase port must take a fallback kick in the same frame - a per-port decision (each with its own
+  // 200 ms gate) let one port take a hit the other was gated out of, putting it a whole kick ahead.
+  {
+    static float         envLast = 0.0f;
+    static unsigned long fbAt    = 0;
+    float envNow    = g_bassLvlEnv;
+    bool  risingNow = (envNow > envLast + CHASE_FALLBACK_RISE);
+    envLast = envNow;
+    g_chaseFallback = (risingNow && (now - fbAt) > CHASE_FALLBACK_GAP_MS);
+    if (g_chaseFallback) fbAt = now;
+
+    // THE SHARED ONSET HIT. The beat was stamped by listeningStep; CHASE_BEAT_CENTRE_MS later it
+    // becomes a hit for EVERY Chase port in that single frame - decided once, so two identical
+    // cells cannot take different hits. The level still sets the strength, per port, from n.
+    g_chaseOnsetHit = false;
+    if (g_beatSeenAt != 0 && g_beatSeenAt != g_beatDoneAt &&
+        (long)(now - g_beatSeenAt) >= (long)CHASE_BEAT_CENTRE_MS) {
+      g_chaseOnsetHit = true;
+      g_beatDoneAt    = g_beatSeenAt;
+      g_kickArmed++;
+    }
+  }
+
   // The EQ bars advance ONCE per frame, never once per port.
   for (int p = 0; p < NUM_PORTS; p++) {
     if (portCfg[p].pat == LP_EQ) { advanceEqBars(attackLED, decayLED); break; }
@@ -4560,6 +4676,35 @@ void runLEDPattern() {
     // A DARK port stays blank: skipping it here is what keeps its black buffer black. The
     // blank itself was written and transmitted once, at the moment the port went dark.
     if (c.dark) continue;
+    // PORT SYNC SNAPSHOT, so two ports on the same entry can be compared directly.
+    g_syncPos[p] = ledPosArr[p];
+    g_syncDir[p] = ledDirArr[p];
+    g_syncAcc[p] = (int32_t)(chaseAcc[p] * 100.0f);      // hundredths of a pixel
+    g_syncAge[p] = (uint32_t)(now - ledStepMs[p]);        // ms since this port last stepped
+    // PAIR DIVERGENCE, port 0 against port 1 - the two the user runs on the same entry.
+    if (p == 1) {
+      int32_t d = ledPosArr[0] - ledPosArr[1];
+      if (d < 0) d = -d;
+      if (d > g_pairDiff) { g_pairDiff = d; g_pairA = ledPosArr[0]; g_pairB = ledPosArr[1]; g_pairRow = tlRow + 1; }
+    }
+    // PER-PORT STALENESS, three compares per port per frame: how long has this port's POSITION been
+    // unchanged? A pause that shows on the strips is either a CPU hitch (see g_maxLoopUs) or a dot
+    // that has stopped - and this is the only instrument that can tell them apart.
+    {
+      static unsigned long posAtMs[NUM_PORTS] = {0};
+      static int           posPrev[NUM_PORTS] = {0};
+      if (posAtMs[p] == 0) posAtMs[p] = now;
+      if (ledPosArr[p] != posPrev[p]) { posPrev[p] = ledPosArr[p]; posAtMs[p] = now; }
+      else {
+        uint32_t st = (uint32_t)(now - posAtMs[p]);
+        if (st > g_staleMaxMs) {
+          g_staleMaxMs = st;
+          g_stalePort  = p;
+          g_staleDark  = c.dark ? 1 : 0;    // a DARK port looks exactly like a stopped dot
+          g_staleRow   = tlRow + 1;         // 1-based, the same as the page shows
+        }
+      }
+    }
     // THE CHASE is not on the step timer: it is updated EVERY FRAME, because with wrap OFF
     // its movement follows the audio level and with wrap ON it interpolates a traverse
     // between beats. It reports whether it moved, so a still chase transmits nothing.
@@ -4593,6 +4738,7 @@ void runLEDPattern() {
     if (interval < 2) interval = 2;
 
     drawPortPattern(p);
+    g_steps[p] += 1;                    // the pixels this port has ADVANCED (see g_steps)
     advancePort(p);
     anyDrew = true;
   }
@@ -4877,7 +5023,6 @@ void applyTimelineRow(int row, bool force) {
       ledPosArr[p] = 0; ledDirArr[p] = 1; ledExplArr[p] = 0; ledStepMs[p] = 0;
       chaseAcc[p] = 0.0f; chaseCredit[p] = 0.0f; chaseCoast[p] = 0.0f;
       chaseLvlLast[p] = 0.0f; chaseNlast[p] = 0.0f;
-      chaseHit[p] = false; chaseGrantAt[p] = 0; chaseLastGrant[p] = 0;
       chaseCoastTau[p] = 0.0f;
     }
     g_restartMotion = false;
@@ -5491,14 +5636,28 @@ void loop() {
     listeningStep();
     bool doBeat240 = beatFired240;
 
+    unsigned long tA = micros();
     runTimelineSequencer();
+    unsigned long tB = micros();
     dbgStage = 6;
     run240VDisplayPattern(doBeat240);
     dbgStage = 7;
+    unsigned long tC = micros();
     runLEDPattern();
+    unsigned long tD = micros();
+
+    // PER-STAGE WORST CASE. A row change happens INSIDE runTimelineSequencer, a transmit inside
+    // runLEDPattern, and a flash erase freezes both cores so it shows in the whole-pass figure.
+    // /diag reports the worst of each since the last read - the log cannot be read during a show.
+    uint32_t usSeq = (uint32_t)(tB - tA);
+    uint32_t usLed = (uint32_t)(tD - tC);
+    if (usSeq > g_maxSeqUs) g_maxSeqUs = usSeq;
+    if (usLed > g_maxLedUs) g_maxLedUs = usLed;
   }
   unsigned long dtUs = micros() - t0;
-  if (dtUs > 100000UL && Serial.availableForWrite() > 80)
+  if (dtUs > g_maxLoopUs) g_maxLoopUs = (uint32_t)dtUs;
+  if (dtUs > 15000UL) g_hitchCount++;
+  if (dtUs > 15000UL && Serial.availableForWrite() > 80)
     Serial.printf("[slow] render loop took %lu ms\n", dtUs / 1000UL);
 
   // Deferred NVS write for the brightness slider (see handleBrightness). The

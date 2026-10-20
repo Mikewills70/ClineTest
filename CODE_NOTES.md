@@ -729,6 +729,35 @@ pattern, never less. Nothing saved earlier can deafen a pattern again. (The unde
 fine: the flux and the threshold are both in ADC counts - the comment in the audio core says band
 peaks reach 5-40, which is why 54.6 blocks everything.)
 
+### TIMING: WHERE TWO IDENTICAL CELLS COULD STILL DIVERGE (19 Oct)
+
+Measured on hardware with two ports running the same playlist entry: the parameters applied to both
+were **IDENTICAL** - speed 1, size 10, qty 2, wrap 0, effect 10, distance 20, momentum 0.3,
+beatSens 1, freq 50, checked field by field in `/diag` - yet port 0 had advanced **8367** pixels
+against port 1's **8355**, with the chase accumulators 0.72 against 0.83.
+
+The cause was the last per-port asymmetry in the chain: the Chase's onset hit was held as **per-port
+pending state** (`chaseGrantAt[p]`), and a row change **wiped it per port**. A grant pending on one
+port and not the other cost that port a kick - a whole Distance - which showed as "the chase on port
+1 is a full dot length different to port 2". `kMiss` in `/diag` had recorded 44 such wipes.
+
+**THE RULE: a beat is a property of the MUSIC, so a hit is decided ONCE PER FRAME and every port
+that should take it takes it in that same frame.** There is now NO per-port hit state at all
+(`g_chaseOnsetHit`, `g_chaseFallback`), so nothing can be wiped unevenly. Strength stays per port
+(from `n`), so different parameters still behave differently - only identical cells are forced to
+agree, and only because they are fed identical data. The user's words: *"sync should just be a
+byproduct, not a written exception to the code"*.
+
+Diagnostics that proved it, all in `/diag`:
+
+* `st0`/`st1` - pixels advanced. **Must be EQUAL for identical cells.**
+* `v0xx`/`v1xx` - the parameters actually APPLIED, so "identical cells" is verified, not assumed.
+* `pairDiff`/`pairA`/`pairB`/`pairRow` - worst position divergence and the row it happened in.
+* `sP0..sG3` - per-port position, direction, chase accumulator and step age.
+
+A **full dot length** apart = a missed or extra kick. A few pixels (0-4) = the fractional phase, and
+normal. Do not "fix" a few pixels with an exception in the code; that was explicitly rejected.
+
 ### AN ITEM'S NAME DECIDED ITS PATTERN - AND EXTRA WORDS BROKE IT (19 Oct)
 
 "the chase is not moving as it should to music", while the SAME parameters on the page worked.
