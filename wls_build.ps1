@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Continue'
 $here   = $PSScriptRoot
 $cli    = 'C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe'
 $sketch = $here
-$fqbn   = 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,FlashMode=qio,USBMode=default'
+$fqbn   = 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,FlashMode=qio,USBMode=hwcdc'
 # BOARD OPTIONS FOR THIS HARDWARE: an ESP32-S3 **N16R8** - 16 MB flash, 8 MB OCTAL PSRAM.
 #   FlashSize=16M          the board has 16 MB, not the 4 MB the default assumes
 #   PartitionScheme=huge_app   "Huge APP (3MB No OTA/1MB SPIFFS)" - the app slot goes from 1.25 MB
@@ -26,7 +26,7 @@ $fqbn   = 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,FlashMode=
 #                          partition (far more than the 16 KB log needs) and OTA is unused.
 #   PSRAM=opi              8 MB of octal PSRAM, as this module has
 #   FlashMode=qio          QIO 80 MHz, the module's normal mode
-#   USBMode=default          the USB-serial log path
+#   USBMode=hwcdc          the USB-serial log path
 # CHANGING THE PARTITION SCHEME REFORMATS THE FILE SYSTEM AND MOVES NVS: the saved settings and the
 # timeline are wiped. /load-timeline, /load-playlist and /settings were backed up to board_*.json
 # before this was applied.

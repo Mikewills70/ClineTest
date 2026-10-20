@@ -1346,6 +1346,35 @@ struct TlItem {
   int      distance = -1;      // 0..100 pixels the effect may use
 };
 
+// ============================================================================
+// THE PLAYLIST ITEM - THE MASTER PARAMETER STORE (Rules: the Build Process, 20 Oct)
+// ----------------------------------------------------------------------------
+// The Build Process says the pattern page creates the playlist item "with all the parameter settings
+// stored at that time", the user names it (no duplicate names), adds it to the timeline, and then
+// "the timeline when playing comes across a cell with an entry, and finds the associated playlist
+// entry and obtains all the parameter data needed to display that pattern for that period".
+//
+// So the ITEM is the master and a CELL is only a NAME. While the timeline plays, NOTHING may fall
+// back to the pattern page or to a pattern's stored record: the page is volatile, and reaching into
+// it could change a running show. An empty cell, or a name with no item behind it, means that port
+// is DARK for that slot - it does not mean "carry on with something else".
+//
+// Old timeline files keep working: a cell carries the item's name among the fields it copied, and
+// only the name is read now.
+// ============================================================================
+#define PL_MAX_ITEMS 48
+struct PlItem {
+  char         name[32] = "";                 // the playlist name the cell references
+  LedPattern   pat      = LP_MOVING_DOT;      // resolved from the NAME (renderBranchFor)
+  LedPatParams p;                             // EVERY parameter the pattern page saved
+  bool         used     = false;
+};
+static PlItem plItems[PL_MAX_ITEMS];
+static int    plCount = 0;
+
+static void          loadPlaylist();          // parse the saved playlist into plItems[]
+static const PlItem* plFind(const char* nm);  // the item a cell names, or nullptr (-> DARK)
+
 TlItem tlData[TL_ROWS][TL_COLS];
 float tlDelaySec = 20.0f;
 int   tlRow = 0;
@@ -4962,7 +4991,79 @@ void applyMasterBrightness() {
   FastLED.setBrightness(s);        // used only by the FastLED fallback path
 }
 
+// ---- THE PLAYLIST: THE MASTER PARAMETER STORE (Rules: the Build Process) ---------------------
+// Every field the pattern page saved is read here, so a timeline cell needs nothing but the item's
+// name. This is the ONLY place a playing port gets its parameters from.
+static void loadPlaylist() {
+  for (int i = 0; i < PL_MAX_ITEMS; i++) { plItems[i].used = false; plItems[i].name[0] = 0; }
+  plCount = 0;
+  File pf = LittleFS.open("/playlist.json", "r");
+  if (!pf) { logAppend("playlist: /playlist.json not found - every timeline cell will be DARK"); return; }
+  JsonDocument pdoc;
+  DeserializationError pe = deserializeJson(pdoc, pf);
+  pf.close();
+  if (pe) { logAppend("playlist: parse failed (%s) - every timeline cell will be DARK", pe.c_str()); return; }
+  JsonArray arr = pdoc["items"].as<JsonArray>();
+  if (arr.isNull()) { logAppend("playlist: no items array - every timeline cell will be DARK"); return; }
+
+  for (JsonVariant v : arr) {
+    if (plCount >= PL_MAX_ITEMS) break;
+    String nm = String((const char*)(v["name"] | ""));
+    if (nm.isEmpty()) continue;
+    PlItem &it = plItems[plCount];
+    strlcpy(it.name, nm.c_str(), sizeof(it.name));
+    it.pat      = renderBranchFor(nm);                 // the NAME decides the pattern
+    it.p.speed     = jsonNumF(v["speed"],     0.02f);
+    it.p.qty       = constrain(jsonNumI(v["quantity"], 1), 1, 8);
+    it.p.size      = constrain(jsonNumI(v["size"],     1), 1, 10);
+    it.p.wrap      = v["wrap"]   | false;
+    it.p.invert    = v["invert"] | false;
+    it.p.orient    = v["orient"].is<bool>() ? (v["orient"].as<bool>() ? 1 : 0) : jsonNumI(v["orient"], 0);
+    it.p.freqHz    = jsonNumI(v["frequency"], 50);
+    it.p.mult      = (jsonNumI(v["beatMult"], 1) > 1) ? 2 : 1;
+    it.p.attack    = jsonNumF(v["attack"],    0.15f);
+    it.p.decay     = jsonNumF(v["decay"],     0.01f);
+    it.p.peakDelay = jsonNumF(v["peakDelay"], 0.5f);
+    it.p.peakSpeed = jsonNumF(v["peakSpeed"], 1.0f);
+    it.p.peakDir   = jsonNumI(v["peakDir"],   0);
+    it.p.beatSens  = jsonNumF(v["beatSens"],  0.2f);
+    it.p.effect    = constrain(jsonNumI(v["effect"], 0), 0, 10);
+    it.p.momentum  = constrain(jsonNumF(v["momentum"], 0.0f), 0.0f, 0.5f);
+    it.p.distance  = constrain(jsonNumI(v["distance"], 20), 0, 100);
+    String vd = String((const char*)(v["vuDir"] | "LEFT"));
+    vd.toUpperCase();
+    it.p.vuDir = (vd == "RIGHT") ? 1 : (vd == "CENTRE") ? 2 : (vd == "ENDS") ? 3 : 0;
+    JsonArray ca = v["colour"].as<JsonArray>();
+    if (!ca.isNull()) {
+      int ci = 0;
+      for (JsonVariant cv : ca) {
+        if (ci >= 4) break;
+        it.p.colour[ci] = parseColourRef(cv.as<const char*>(), it.p.colour[ci]);
+        ci++;
+      }
+    }
+    it.used = true;
+    plCount++;
+  }
+  logAppend("playlist: %d items loaded - timeline cells resolve against these", plCount);
+}
+
+// THE ITEM A CELL NAMES - case-insensitive, and nullptr when there is none. A nullptr means the port
+// goes DARK: never to the pattern page, never to a pattern's stored record.
+static const PlItem* plFind(const char* nm) {
+  if (!nm || !nm[0]) return nullptr;
+  for (int i = 0; i < PL_MAX_ITEMS; i++) {
+    if (!plItems[i].used) continue;
+    if (String(plItems[i].name).equalsIgnoreCase(nm)) return &plItems[i];
+  }
+  return nullptr;
+}
+
 void loadTimeline() {
+  // THE PLAYLIST IS THE MASTER (Rules: the Build Process): every cell names one of its items, so it
+  // must be loaded before any cell can resolve. Loading it here means it refreshes whenever the
+  // timeline is loaded - at boot, and after any save - with no separate hook to remember.
+  loadPlaylist();
   for (int r = 0; r < TL_ROWS; r++)
     for (int c = 0; c < TL_COLS; c++) tlData[r][c].used = false;
   tlLoaded = false;
@@ -5109,7 +5210,13 @@ void applyTimelineRow(int row, bool force) {
     //
     // Ownership is cleared when the timeline is (re)loaded, so deleting a cell and saving
     // reverts the port to the page.
-    bool wantDark = cellsOwn && (!cell || isEndOfDisplayId(cell->id));
+    // THE ITEM THIS CELL NAMES - the ONLY source of a playing port's parameters (Rules: the Build
+    // Process). plFind() is case-insensitive and returns nullptr when the name has no item behind it -
+    // and then the port is DARK. It never falls back to the page, and never to a pattern's stored
+    // record: the page is volatile and editing it must never be able to change a running show.
+    const PlItem *pit = cell ? plFind(cell->id) : nullptr;
+    // A cell naming nothing resolvable is DARK, exactly like an empty cell.
+    bool wantDark = cellsOwn && (!cell || !pit || isEndOfDisplayId(cell->id));
     if (wantDark != portCfg[p].dark) {
       portCfg[p].dark = wantDark;
       if (wantDark) {
@@ -5121,7 +5228,9 @@ void applyTimelineRow(int row, bool force) {
     if (wantDark) continue;
 
     // ---- what this port SHOULD be ----
-    LedPattern wantPat = cell ? renderBranchFor(String(cell->id)) : pagePat;
+    // THE PATTERN COMES FROM THE ITEM: the name decided it when the playlist was parsed, so while the
+    // timeline plays nothing is resolved from the page at all.
+    LedPattern wantPat = pit ? pit->pat : pagePat;
     float wantSpeed    = cell ? cell->speed : speedLED;
     int   wantQty      = cell ? constrain(cell->qty, 1, 8)   : constrain(quantityLED, 1, 8);
     int   wantSize     = cell ? constrain(cell->size, 1, 10) : constrain(sizeLED, 1, 10);
@@ -5714,6 +5823,15 @@ void loop() {
   // (webTask) so an HTTP request can never stall a frame - see webTask().
   unsigned long loopNow = millis();
   (void)loopNow;
+
+  // THE PLAYLIST MUST BE LOADED BEFORE ANY CELL CAN RESOLVE (Rules: the Build Process). loadTimeline()
+  // calls loadPlaylist() as well, but THIS retries until it succeeds, because LittleFS may not be
+  // mounted on the first pass - and while the store is empty every timeline cell resolves to nothing
+  // and its port goes DARK. It stops the moment items are loaded, so there is no ongoing flash access.
+  {
+    static unsigned long plRetryAt = 0;
+    if (plCount == 0 && (long)(millis() - plRetryAt) >= 0) { plRetryAt = millis() + 2000; loadPlaylist(); }
+  }
 
   // Serial command interface: 'L' dumps /log.txt over USB, 'D' prints /diag.
   // Lets a host read the diagnostics without the Wi-Fi AP (and without relying
