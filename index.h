@@ -309,6 +309,10 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             width: 100%;
         }
         .led-colour-row .led-swatch {
+            /* BACK TO THE ORIGINAL SIZING (user, 19 Oct). A percentage and a fixed pixel width were
+               both attempts to fix squashed swatches, when the real cause was the PARAMETER COLUMN
+               beside them being pushed too wide by an unwrappable label. With that fixed, this is
+               correct as it always was on the Moving Dot page. */
             flex: 1 1 0;
             min-width: 0;
             height: 34px;
@@ -413,7 +417,13 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         .param-table td.name-col {
             text-align: left;
             font-weight: bold;
-            white-space: nowrap;
+            /* WRAP THE TEXT, DO NOT WIDEN THE COLUMN (user, 19 Oct). This was `nowrap` with a 130px
+               width - and a table cell CANNOT be narrower than its unwrappable content, so the
+               long JS label "Cut Off Below Frequency" on the Chase page pushed this column out to
+               about 200px and squashed everything beside it, the colour swatches worst of all.
+               130px is the Moving Dot width and is now authoritative because the text can wrap. */
+            white-space: normal;
+            overflow-wrap: anywhere;
             width: 130px;
         }
         .param-table input[type="checkbox"] {
@@ -969,6 +979,12 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 <tr id="prowLED-invert">
                     <td class="name-col">Invert</td>
                     <td><input type="checkbox" id="paramInvertLED" onchange="liveParamChanged('LED')"></td>
+                </tr>
+                <!-- ORIENTATION: run the pattern from the OTHER END of the strip. Greyed for Moving
+                     Dot and for the Chase with Wrap ON; live for the Chase with Wrap OFF. -->
+                <tr id="prowLED-orient">
+                    <td class="name-col">Orientation</td>
+                    <td><input type="checkbox" id="paramOrientLED" onchange="liveParamChanged('LED'); updateOrientGreying();"></td>
                 </tr>
                 <!-- EFFECTS / MOMENTUM / DISTANCE - controls added 17 Oct, behaviour defined per
                      pattern later. ALL THREE read minimum as OFF, so a single slider both
@@ -1572,6 +1588,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             if (e) o[k] = e.value;
         });
         let w  = document.getElementById('paramWrapLED');     if (w)  o.wrap = w.checked;
+        let or = document.getElementById('paramOrientLED');   if (or) o.orient = or.checked;
         let iv = document.getElementById('paramInvertLED');   if (iv) o.invert = iv.checked;
         let bm = document.getElementById('paramBeatMultLED'); if (bm) o.beatMult = bm.checked ? '2' : '1';
         let pd = document.getElementById('paramPeakDirLED');  if (pd) o.peakDir = pd.value;
@@ -1590,7 +1607,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             if (e) e.value = o[k];
         });
         const chk = function (id, v) { let e = document.getElementById(id); if (e && v !== undefined) e.checked = !!v; };
-        chk('paramWrapLED', o.wrap); chk('paramInvertLED', o.invert);
+        chk('paramWrapLED', o.wrap); chk('paramInvertLED', o.invert); chk('paramOrientLED', o.orient);
         let bm = document.getElementById('paramBeatMultLED');
         if (bm && o.beatMult !== undefined) bm.checked = (String(o.beatMult) === '2');
         let pd = document.getElementById('paramPeakDirLED');
@@ -1825,6 +1842,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             quantity: document.getElementById('paramQuantity' + suffix).value,
             size: document.getElementById('paramSize' + suffix).value,
             wrap: document.getElementById('paramWrap' + suffix).checked,
+            // ORIENTATION travels with the item, so a saved playlist entry and a timeline cell each
+            // carry their own (user, 19 Oct). Only the LED section has the row.
+            orient: (document.getElementById('paramOrientLED') || {}).checked || false,
             invert: document.getElementById('paramInvert' + suffix).checked,
             attack: (section === '240V') ? document.getElementById('paramAttack240_240').value : document.getElementById('paramAttackLed_LED').value,
             decay: (section === '240V') ? document.getElementById('paramDecay240_240').value : document.getElementById('paramDecayLed_LED').value,
@@ -2107,7 +2127,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
     const PATTERN_PARAMS = {
         'Moving Dot':   { colour: ['colour'],
-                          visual: ['speed', 'quantity', 'size', 'invert', 'effect', 'momentum', 'distance'],
+                          visual: ['speed', 'quantity', 'size', 'invert', 'orient', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'],
                           range:  { speed:    { min: 0.002, max: 0.1,  step: 0.001 },
                                     // Distance belongs to THIS pattern's OWN effect (the shed/erode
@@ -2118,20 +2138,20 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         // dot patterns - hence its own range. Wrap selects the mode: OFF = band-driven move,
         // ON = the beat-synced metronome (where Speed is not used at all and is greyed).
         'Chase':        { colour: ['colour'],
-                          visual: ['speed', 'quantity', 'size', 'wrap', 'invert', 'effect', 'momentum', 'distance'],
+                          visual: ['speed', 'quantity', 'size', 'wrap', 'invert', 'orient', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'],
                           // Speed is SECONDS PER PIXEL for the Chase (1-10): it takes that long to
                           // move one pixel. Distance 1-50 is how far ONE kick may carry the dot.
                           range:  { speed: { min: 1, max: 10, step: 0.1 },
                                     distance: { min: 1, max: 50, step: 1 } } },
         'Chase 10 - 1': { colour: ['colour'],
-                          visual: ['speed', 'quantity', 'size', 'wrap', 'invert', 'effect', 'momentum', 'distance'],
+                          visual: ['speed', 'quantity', 'size', 'wrap', 'invert', 'orient', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'] },
         'Explosion':    { colour: ['colour'],
-                          visual: ['speed', 'quantity', 'size', 'invert', 'effect', 'momentum', 'distance'],
+                          visual: ['speed', 'quantity', 'size', 'invert', 'orient', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'] },
         'Knight Rider': { colour: ['colour'],
-                          visual: ['speed', 'quantity', 'size', 'invert', 'effect', 'momentum', 'distance'],
+                          visual: ['speed', 'quantity', 'size', 'invert', 'orient', 'effect', 'momentum', 'distance'],
                           audio:  ['frequency', 'beatMult', 'beatSens'] },
         // ONE entry covers the VU pattern names while several still exist in the
         // list; they all show the same LED rows.
@@ -2161,6 +2181,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         size:      { ctl: 'paramSizeLED',       val: 'sizeValLED' },
         wrap:      { ctl: 'paramWrapLED' },
         invert:    { ctl: 'paramInvertLED' },
+        orient:    { ctl: 'paramOrientLED' },
         frequency: { ctl: 'paramFrequencyLED',  val: 'freqValLED' },
         beatMult:  { ctl: 'paramBeatMultLED' },
         beatSens:  { ctl: 'paramBeatSens',      val: 'beatSensVal' },
@@ -2212,9 +2233,9 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     };
     const PATTERN_ROW_LABELS = {
         'Chase':        { effect: 'Kick Speed', beatSens: 'Bass Sensitivity',
-                          frequency: 'Cut Off Below Frequency', speed: 'Speed (sec/pixel)' },
+                          frequency: 'Cut Off Below Frequency' },
         'Chase 10 - 1': { effect: 'Kick Speed', beatSens: 'Bass Sensitivity',
-                          frequency: 'Cut Off Below Frequency', speed: 'Speed (sec/pixel)' }
+                          frequency: 'Cut Off Below Frequency' }
     };
 
     function applyParamRowLabels() {
@@ -2229,6 +2250,22 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     // WRAP ON turns the Chase into a metronome: the BEAT sets the pace, so Speed is not used
     // and is greyed rather than left looking live. (Momentum will be greyed here too when it
     // arrives - it cannot exist with wrap on either.)
+    // ORIENTATION GREYING (user, 19 Oct): greyed for MOVING DOT, and for the CHASE whenever Wrap is
+    // ticked - the two cases where "the other end" has no meaning. Live for the Chase with Wrap OFF,
+    // and live for Explosion, whose meaning for this row is still to be defined.
+    function updateOrientGreying() {
+        let ctl = document.getElementById('paramOrientLED');
+        if (!ctl) return;
+        let name = String(selectedPatternNameLED || '');
+        let wrap = document.getElementById('paramWrapLED');
+        let movingDot = /^moving/i.test(name);
+        let chase     = /^chase/i.test(name);
+        let off = movingDot || (chase && wrap && wrap.checked);
+        ctl.disabled = off;
+        let row = document.getElementById('prowLED-orient');
+        if (row) row.classList.toggle('param-greyed', off);
+    }
+
     function updateChaseGreying() {
         let chase = /^chase/i.test(selectedPatternNameLED || '');
         let wrap  = document.getElementById('paramWrapLED');
@@ -2311,6 +2348,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         }
         applyParamRowLabels();    // the row names follow the pattern (Effects vs Kick Speed)
         updateChaseGreying();     // the pattern just applied may or may not use Speed
+        updateOrientGreying();    // ...and whether Orientation applies to it at all
     }
 
     // Apply the blocks for the selected LED pattern: HIDE a block the pattern

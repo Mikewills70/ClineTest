@@ -400,6 +400,10 @@ struct LedPatParams {
   float    momentum;           // effect: weight of the shed debris (0 = off)
   int16_t  qty, size, mult, freqHz, peakDir;
   uint8_t  wrap, invert, vuDir, effect, distance;
+  // ORIENTATION (user, 19 Oct): run the pattern from the OTHER END of the strip. APPENDED at the
+  // very end on purpose, and forced to 0 after a load unless it is 0/1, so a record written before
+  // this existed (whose bytes stop short of it) can never come back as a random direction.
+  uint8_t  orient;
 };
 
 const char* const LED_PAT_IDS[LED_PAT_COUNT] = {
@@ -532,9 +536,13 @@ bool loadLedPatRecords() {
   int sel = ledPatIndex(activePatternLED);
   Preferences p; p.begin("lightshow", true);
   for (int i = 0; i < LED_PAT_COUNT; i++) {
-    LedPatParams tmp;
+    // ZEROED FIRST, and the size test is `<=`: a record saved BEFORE a new field was appended is
+    // shorter than the struct is now, and reading it into a zeroed struct leaves the new field at
+    // 0 - so appending ORIENTATION does not throw away every saved pattern. A blob of the wrong
+    // version is still rejected.
+    LedPatParams tmp{};
     size_t n = p.getBytes((String("lp") + String(i)).c_str(), &tmp, sizeof(tmp));
-    if (n == sizeof(tmp) && tmp.ver == LED_PAT_VER) { ledPats[i] = tmp; }
+    if (n > 0 && n <= sizeof(tmp) && tmp.ver == LED_PAT_VER) { ledPats[i] = tmp; }
     else {
       ledPats[i] = (i == sel) ? ledFromGlobals() : ledPatDefaultFor(i);
       if (i == sel) migrated = true;
@@ -558,7 +566,9 @@ void saveLedPatRecords() {
 // forced OFF here as well - so a Wrap ticked before per-pattern records existed (or set by an
 // old timeline cell) can never make the dot bounce at the ends of the strip.
 void ledPatNormalise(int i) {
-  if (i == 0) ledPats[0].wrap = 0;
+  if (i == 0) { ledPats[0].wrap = 0; ledPats[0].orient = 0; }  // Moving Dot: no wrap, no orientation
+  if (ledPats[i].orient > 1) ledPats[i].orient = 0;            // a pre-append record's padding bytes
+  if (ledPats[i].wrap) ledPats[i].orient = 0;                  // the control is greyed when Wrap is ON
 }
 
 struct PortCfg {
@@ -568,6 +578,9 @@ struct PortCfg {
   int   size   = 1;
   bool  wrap   = false;
   bool  invert = false;
+  // ORIENTATION: run this port's pattern from the OTHER END of the strip. Live for the Chase with
+  // Wrap OFF; greyed for Moving Dot and for the Chase with Wrap ON (user, 19 Oct).
+  bool  orient = false;
   // THE EFFECT, PER PORT. A timeline cell can give one strip its own Effect / Momentum /
   // Distance while the next strip keeps the pattern's own values: the effect is part of the
   // strip's configuration, exactly like speed and size.
@@ -1285,6 +1298,8 @@ struct TlItem {
   bool  wrap   = false;
   bool  invert = false;
   bool  used   = false;
+  // ORIENTATION, as saved with the item (-1 = the cell carries none, so it inherits the pattern).
+  int   orient = -1;
   // The colour REFERENCES the item was saved with on the pattern parameters page
   // ("T0".."T7" / "RB" / "#rrggbb"), ADOPTED when this cell plays.
   //
@@ -1902,7 +1917,8 @@ void handleGetSettings() {
       JsonObject o = all[LED_PAT_IDS[i]].to<JsonObject>();
       o["speed"] = ledPats[i].speed;      o["qty"] = ledPats[i].qty;
       o["size"] = ledPats[i].size;        o["wrap"] = ledPats[i].wrap;
-      o["invert"] = ledPats[i].invert;    o["mult"] = ledPats[i].mult;
+      o["invert"] = ledPats[i].invert;    o["orient"] = ledPats[i].orient;
+    o["mult"] = ledPats[i].mult;
       o["freq"] = ledPats[i].freqHz;      o["beatSens"] = ledPats[i].beatSens;
       o["atk"] = ledPats[i].attack;       o["dec"] = ledPats[i].decay;
       o["peakDelay"] = ledPats[i].peakDelay; o["peakSpeed"] = ledPats[i].peakSpeed;
@@ -2206,6 +2222,10 @@ void handleLiveTweak() {
     r.freqHz = frq; r.mult = (bm > 1) ? 2 : 1;   // checkbox: 1 or 2
     r.attack = atk; r.decay = dec;
     r.wrap = wrap; r.invert = inv;
+    // ORIENTATION arrives as a JSON BOOLEAN, and jsonNumI() only understands strings and numbers -
+    // a bool falls through to its default, so this read back as 0 every time and the toggle did
+    // nothing (user, 19 Oct). as<bool>() converts either form correctly.
+    if (doc.containsKey("orient")) r.orient = doc["orient"].as<bool>() ? 1 : 0;
     // The per-pattern EFFECT rows. Stored now so the values travel with the pattern; nothing
     // renders them until the Moving Dot effect build.
     if (doc.containsKey("effect"))   r.effect   = (uint8_t)constrain(jsonNumI(doc["effect"], 0), 0, 10);
@@ -3201,7 +3221,12 @@ void rebuildListening() {
     // What must remain constant is the THREE SOURCES - see the table at the LedPattern enum - not
     // the per-pattern band. The Frequency row is a real setting and must not be ignored.)
     L.chain = chainForBand((float)portCfg[p].freqHz);
-    L.thr   = (1.0f - constrain(portCfg[p].beatSens, 0.01f, 1.0f)) * 60.0f;   // per PATTERN
+    // THE THRESHOLD HAS A FLOOR (user, 19 Oct: "wrap on is still a mess of flashing lights in
+    // silence. it looks like its listening to noise rather than the bass beat"). At Bass
+    // Sensitivity maximum the formula gives ZERO, and a zero threshold fires on any novelty above
+    // zero - which in silence is the noise floor, so the metronome beat on nothing. Real band peaks
+    // measure 5-40 counts, so a floor of 5 still passes every musical beat while ignoring the room.
+    L.thr   = constrain((1.0f - constrain(portCfg[p].beatSens, 0.01f, 1.0f)) * 60.0f, 5.0f, 60.0f);
     L.mult  = (portCfg[p].mult > 1) ? 2 : 1;
     L.lastSeq = odfChain[L.chain].seq;      // never act on a STALE frame
   }
@@ -4427,10 +4452,12 @@ void advancePort(int port) {
 
   if (ledPosArr[port] > maxPos) {
     if (c.wrap) { ledPosArr[port] = maxPos; ledDirArr[port] = -ledDirArr[port]; }
-    else ledPosArr[port] = 0;
+    // ORIENTATION swaps which end the dot restarts at, so a dot running toward pixel 0 reappears
+    // at the far end rather than at 0.
+    else ledPosArr[port] = c.orient ? maxPos : 0;
   } else if (ledPosArr[port] < 0) {
     if (c.wrap) { ledPosArr[port] = 0; ledDirArr[port] = -ledDirArr[port]; }
-    else ledPosArr[port] = maxPos;
+    else ledPosArr[port] = c.orient ? 0 : maxPos;
   }
 }
 
@@ -4623,8 +4650,13 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
       int add = (int)chaseAcc[p];
       chaseAcc[p] -= (float)add;
       g_steps[p] += (uint32_t)add;      // the pixels this port has ADVANCED (see g_steps)
-      int np = ledPosArr[p] + add;                 // FORWARD only: the football never reverses
-      ledPosArr[p] = (np < 0 || np > maxPos) ? 0 : np;   // off the end: restart at the start
+      // ORIENTATION decides which way a kick carries the dot: toward the far end as before, or
+      // toward pixel 0 when it is ticked. The end test mirrors with it, so the dot restarts at the
+      // FAR end when it reaches 0 instead of at 0 when it reaches the far end.
+      int np = portCfg[p].orient ? (ledPosArr[p] - add) : (ledPosArr[p] + add);
+      if (np > maxPos)      ledPosArr[p] = portCfg[p].orient ? maxPos : 0;
+      else if (np < 0)      ledPosArr[p] = portCfg[p].orient ? maxPos : 0;
+      else                  ledPosArr[p] = np;
     }
   }
   return ledPosArr[p] != was;
@@ -4836,6 +4868,8 @@ void loadTimeline() {
     tlData[r][c].qty    = jsonNumI(it["quantity"], 1);
     tlData[r][c].size   = jsonNumI(it["size"],     1);
     tlData[r][c].wrap   = it["wrap"] | false;
+    // ORIENTATION from the item: -1 means the cell carries none, so the port inherits the pattern's.
+    tlData[r][c].orient = jsonNumI(it["orient"], -1);
     tlData[r][c].invert = it["invert"] | false;
     // Colour references travel WITH the pattern, so the timeline ADOPTS them rather
     // than offering colour controls of its own. A cell that has none (saved before
@@ -4952,6 +4986,9 @@ void applyTimelineRow(int row, bool force) {
     int   wantQty      = cell ? constrain(cell->qty, 1, 8)   : constrain(quantityLED, 1, 8);
     int   wantSize     = cell ? constrain(cell->size, 1, 10) : constrain(sizeLED, 1, 10);
     bool  wantWrap     = cell ? cell->wrap   : wrapLED;
+    // ORIENTATION: the cell's own if it carries one (-1 = none), else the pattern's.
+    bool  wantOrient   = cell ? ((cell->orient >= 0) ? (cell->orient != 0) : (ledSel().orient != 0))
+                              : (ledSel().orient != 0);
     bool  wantInv      = cell ? cell->invert : invertLED;
     int   wantMult     = (cell && cell->mult > 0) ? ((cell->mult > 1) ? 2 : 1)
                                                   : ((multLED > 1) ? 2 : 1);
@@ -4989,7 +5026,8 @@ void applyTimelineRow(int row, bool force) {
                       fabsf(portCfg[p].speed - wantSpeed) > 0.0001f ||
                       portCfg[p].qty  != wantQty ||
                       portCfg[p].size != wantSize ||
-                      portCfg[p].wrap != wantWrap;
+                      portCfg[p].wrap != wantWrap ||
+                      portCfg[p].orient != wantOrient;
 
     bool valueDiff = motionDiff ||
                      portCfg[p].invert   != wantInv ||
@@ -5010,6 +5048,7 @@ void applyTimelineRow(int row, bool force) {
     portCfg[p].qty      = wantQty;
     portCfg[p].size     = wantSize;
     portCfg[p].wrap     = wantWrap;
+    portCfg[p].orient   = wantOrient;
     portCfg[p].invert   = wantInv;
     portCfg[p].mult     = wantMult;
     portCfg[p].freqHz   = wantFreq;
@@ -5032,7 +5071,19 @@ void applyTimelineRow(int row, bool force) {
   // chase's own motion state is reset here too, so a restart is a real restart.
   if (g_restartMotion) {
     for (int p = 0; p < NUM_PORTS; p++) {
-      ledPosArr[p] = 0; ledDirArr[p] = 1; ledExplArr[p] = 0; ledStepMs[p] = 0;
+      // ORIENTATION: ticked, the pattern STARTS at the far end and travels toward pixel 0 (user,
+      // 19 Oct: "starts at the far end and travels toward pixel 0"). The far end is the CHASE's own
+      // limit (the strip less the dot), and for every other pattern the strip less its size.
+      int startAt = 0;
+      if (portCfg[p].orient) {
+        int m = (portCfg[p].pat == LP_CHASE_1_10)
+                  ? chaseMaxPos(p)
+                  : (NUM_LEDS_PER_STRIP - constrain(portCfg[p].size, 1, 10));
+        startAt = (m < 0) ? 0 : m;
+      }
+      ledPosArr[p] = startAt;
+      ledDirArr[p] = portCfg[p].orient ? -1 : 1;
+      ledExplArr[p] = 0; ledStepMs[p] = 0;
       chaseAcc[p] = 0.0f; chaseCredit[p] = 0.0f; chaseCoast[p] = 0.0f;
       chaseLvlLast[p] = 0.0f; chaseNlast[p] = 0.0f;
       chaseCoastTau[p] = 0.0f;

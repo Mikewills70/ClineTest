@@ -729,6 +729,41 @@ pattern, never less. Nothing saved earlier can deafen a pattern again. (The unde
 fine: the flux and the threshold are both in ADC counts - the comment in the audio core says band
 peaks reach 5-40, which is why 54.6 blocks everything.)
 
+### ORIENTATION, AND FOUR TRAPS UNDER IT (19 Oct)
+
+**Orientation** is a checkbox in the Visual block that runs a pattern from the OTHER END of the
+strip. For the Chase with Wrap OFF the dot STARTS at the far end and travels toward pixel 0; kicks
+push it that way; reaching 0 it restarts at the far end. It is stored with the pattern, with the
+playlist item, and in the timeline cell (the cell's own value wins; -1 = "carries none, inherit the
+pattern"). Greyed for Moving Dot and for the Chase with Wrap ON, and `ledPatNormalise` CLEARS the
+value in both cases, so a stale setting can never act on a greyed control. Explosion is live and
+inert - its meaning is still to be defined.
+
+**TRAP 1 - a JSON BOOLEAN is not a number.** `jsonNumI()` reads strings and numbers only. `orient`
+arrives from the page as a real boolean, fell through to its default, and read back as 0 for ever -
+the toggle did nothing at all. Use `.as<bool>()` for booleans.
+
+**TRAP 2 - a zero threshold listens to the room.** Bass Sensitivity at MAXIMUM gives
+`(1 - 1) x 60 = 0`, and a zero threshold fires on ANY novelty above zero, so the Wrap-ON metronome
+beat on the noise floor: "a mess of flashing lights in silence". The threshold now has a floor of
+**5 counts** - band peaks measure 5-40 - so every musical beat still passes and the room does not.
+That ONE FIELD serves two jobs though: the beat threshold (Wrap ON) and the level gate (Wrap OFF),
+where a HIGH value is wanted. Splitting it is the clean fix if they fight again.
+
+**TRAP 3 - `white-space: nowrap` beats a fixed column width.** `.param-table td.name-col` was
+`nowrap` WITH `width: 130px`. A table cell cannot be narrower than its unwrappable content, so the
+long JS label "Cut Off Below Frequency" widened that column to about 200px and squashed the colour
+swatches beside it - which looked exactly like "the swatches are the wrong size", and two attempts
+to fix the SWATCHES made it worse. The column is `white-space: normal` + `overflow-wrap: anywhere`
+now, so long labels WRAP and the width holds. The rule for this page, in the user's words: **wrap
+the text, never change the column width.**
+
+**TRAP 4 - shell text substitution on source files.** Two batches of edits were made with PowerShell
+`.Replace` and the escape sequences (`"+"\`r\`n`) were written LITERALLY into the .ino, corrupting
+`stepChase` and the timeline restart. The file was restored from `baseline-memory-2026-10-19` and
+redone with the file editor. A SINGLE-LINE literal replacement with no escapes is safe; anything
+multi-line is not. **Use the editor for source.**
+
 ### MEMORY, PARTITIONS AND THE BOARD OPTIONS (19 Oct)
 
 The board is an **ESP32-S3 N16R8**: 16 MB flash and 8 MB OCTAL PSRAM. The default board options
