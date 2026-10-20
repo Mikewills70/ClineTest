@@ -1101,6 +1101,12 @@ volatile uint32_t g_framesRestart[NUM_PORTS] = {0};
 // long it has been unchanged, its direction, and whether the strip is dark. Those four numbers say
 // whether the dot is moving-but-not-advancing, advancing-but-not-drawn, or genuinely pinned.
 volatile unsigned long g_lastMoveMs[NUM_PORTS] = {0};
+// WHEN A PAGE LAST SENT A LIVE TWEAK (20 Oct). The Build Process says the strips are live while the
+// user works on the patterns page - and that happens through /live-tweak, which sets the ports
+// directly. So a RECENT tweak means the page owns the output; with no recent tweak the timeline's
+// cells own it, and with the timeline stopped and no tweak at all, nothing does - which is DARK, per
+// the user's rule ("Go Dark") and the page's own note that STOP "makes the outputs DARK".
+volatile unsigned long g_lastTweakMs = 0;
 // FRAMES VISIBLE, per port. If two ports have identical parameters, their steps-per-visible-frame
 // must match; a difference in the raw step count can then only come from one port being DARK for
 // part of the time - which is DATA (an empty cell), not a code asymmetry. st0/st1 alone cannot tell
@@ -2270,6 +2276,8 @@ void handleLiveTweak() {
     // already allowed its one write); sliders still never touch flash.
     if (id.length() && id != activePatternLED) { saveLedPatRecords(); mdResetAll(); }
     if (id.length()) activePatternLED = id;
+    // THE PAGE IS BEING WORKED ON: it owns the strips until it goes quiet (see g_lastTweakMs).
+    g_lastTweakMs = millis();
     // THIS PATTERN'S OWN RECORD - never another pattern's. The globals are refreshed from it
     // by mirrorLedPat() below, which is what keeps every existing reader correct.
     LedPatParams& r = ledSel();
@@ -5230,7 +5238,19 @@ void applyTimelineRow(int row, bool force) {
     // record: the page is volatile and editing it must never be able to change a running show.
     const PlItem *pit = cell ? plFind(cell->id) : nullptr;
     // A cell naming nothing resolvable is DARK, exactly like an empty cell.
-    bool wantDark = cellsOwn && (!cell || !pit || isEndOfDisplayId(cell->id));
+    // THE PAGE OWNS THE OUTPUT WHILE IT IS BEING WORKED ON (Build Process step 3). A recent /live-tweak
+    // means the page is in charge, and the values below then come from the PAGE's settings - that is
+    // what the "else" branches are for. This used to `continue`, which left the port untouched: nothing
+    // wrote the page's values to the strips at all, and the display showed one white pixel that could
+    // not be changed. Three owners and no others: the page while editing, the cells while playing,
+    // and DARK otherwise.
+
+    // OtherwisE nothing owns the output, so it is DARK (user, 20 Oct: "Go Dark"; and the page's own
+    // note that STOP "makes the outputs DARK"). With the timeline stopped and no recent tweak the port
+    // goes dark, which also guarantees pit is non-null on every path below - the null dereference that
+    // boot-looped the board depended on this being reachable with no cell and no item.
+    bool wantDark = !cellsOwn ? ((millis() - g_lastTweakMs) > 5000)
+                              : (!cell || !pit || isEndOfDisplayId(cell->id));
     if (wantDark != portCfg[p].dark) {
       portCfg[p].dark = wantDark;
       if (wantDark) {
@@ -5245,47 +5265,27 @@ void applyTimelineRow(int row, bool force) {
     // THE PATTERN COMES FROM THE ITEM: the name decided it when the playlist was parsed, so while the
     // timeline plays nothing is resolved from the page at all.
     LedPattern wantPat = pit ? pit->pat : pagePat;
-    float wantSpeed    = cell ? cell->speed : speedLED;
-    int   wantQty      = cell ? constrain(cell->qty, 1, 8)   : constrain(quantityLED, 1, 8);
-    int   wantSize     = cell ? constrain(cell->size, 1, 10) : constrain(sizeLED, 1, 10);
-    bool  wantWrap     = cell ? cell->wrap   : wrapLED;
-    // ORIENTATION: THE CELL'S OWN, OR NONE (user, 20 Oct). This fell back to ledSel() - the pattern
-    // SELECTED ON THE PAGE - so a cell carrying no orientation inherited whatever the page's pattern
-    // was set to. With the Chase selected and its Orientation ticked, that pushed orient=1 onto the
-    // Moving Dot's ports, and orient=1 with Wrap OFF is what parked the dot at the end of its strip
-    // ("the moving dot is behaving like the chase with wrap on"). Rule 2: the timeline applies what
-    // the PLAYLIST stored, never what another pattern's page happens to be showing. A cell that
-    // carries no orientation of its own now means NO orientation, not "another pattern's".
-    bool  wantOrient   = cell ? (cell->orient > 0) : (ledSel().orient != 0);
-    bool  wantInv      = cell ? cell->invert : invertLED;
-    int   wantMult     = (cell && cell->mult > 0) ? ((cell->mult > 1) ? 2 : 1)
-                                                  : ((multLED > 1) ? 2 : 1);
-    int   wantFreq     = (cell && cell->freqHz > 0) ? constrain(cell->freqHz, 20, 100) : freqLED;
-    // THE CELL'S OWN SENSITIVITY, OR THE PATTERN'S WHEN THERE IS NO CELL (user, 19 Oct: "A timeline
-    // cell should not affect the sensitivity in any way shape or form. That is all handled in the
-    // patterns page and stored in the playlist. The timeline is a playback facility only").
-    //
-    // A cell IS the saved playlist item: it carries the parameters saved with it, and the timeline
-    // only decides WHEN it plays. So the cell's value is authoritative while it owns the port.
-    // (A "sensitivity floor" was added and removed on the same day - it made a cell's own value
-    // lose to the pattern's, which is not how the playlist is supposed to work.) If a cell seems
-    // to ignore a sensitivity, the ITEM needs re-saving: edit the pattern on the patterns page,
-    // then save it into the playlist.
-    float wantSens = (cell && cell->beatSens >= 0.0f)
-                       ? constrain(cell->beatSens, 0.01f, 1.0f) : pit->p.beatSens;      // NEVER the page's selected pattern (20 Oct): the ITEM is the master
-    const uint32_t *wantRef = (cell && cell->hasColour) ? cell->colour : colourLED;
-    // THE EFFECT'S VALUES ARE THE CELL'S OWN (user, 19 Oct). A cell that carries NONE means the
-    // effect is OFF - NOT "inherit whatever the pattern happens to be set to". An item saved
-    // before the effect existed must not quietly adopt it: that is exactly the cross-pattern
-    // contamination the isolation rule forbids ("the playlist items adopted the effects of the
-    // pattern I was testing").
-    const LedPatParams &ownPat = ledPat(ledPatIndexOfEnum((int)wantPat));
-    int   wantEffect = cell ? constrain((cell->effect   < 0)    ? 0    : cell->effect, 0, 10)
-                            : (int)ownPat.effect;
-    float wantMom    = cell ? constrain((cell->momentum < 0.0f) ? 0.0f : cell->momentum, 0.0f, 0.5f)
-                            : ownPat.momentum;
-    int   wantDist   = cell ? constrain((cell->distance < 0)    ? 20   : cell->distance, 0, 100)
-                            : (int)ownPat.distance;
+    // THE ITEM IS THE MASTER. THE PAGE VALUES ARE THE ONE FALLBACK, AND ONLY FOR THE CASE WHERE THE PAGE
+    // OWNS THE OUTPUT (Build Process step 3, 20 Oct). While the timeline plays, pit is always set and
+    // every value comes from the playlist item. While the user works on the patterns page there is no
+    // cell and no item, and the values must come from the PAGE's own settings - which the /live-tweak
+    // handler has just refreshed. Without that fallback a tweak updated the pattern's record and the
+    // globals and never reached a strip: the display showed one white pixel that could not be changed.
+    // There is no third case: stopped and quiet means dark, enforced above.
+    float wantSpeed    = pit ? pit->p.speed : speedLED;
+    int   wantQty      = pit ? constrain(pit->p.qty, 1, 8)   : constrain(quantityLED, 1, 8);
+    int   wantSize     = pit ? constrain(pit->p.size, 1, 10) : constrain(sizeLED, 1, 10);
+    bool  wantWrap     = pit ? pit->p.wrap   : wrapLED;
+    bool  wantOrient   = pit ? (pit->p.orient > 0) : (ledSel().orient != 0);
+    bool  wantInv      = pit ? pit->p.invert : invertLED;
+    int   wantMult     = pit ? ((pit->p.mult > 1) ? 2 : 1) : ((multLED > 1) ? 2 : 1);
+    int   wantFreq     = pit ? constrain(pit->p.freqHz, 20, 100) : freqLED;
+    float wantSens     = pit ? constrain(pit->p.beatSens, 0.01f, 1.0f) : ledSel().beatSens;
+    int   wantEffect   = pit ? constrain(pit->p.effect, 0, 10) : (int)ledSel().effect;
+    float wantMom      = pit ? constrain(pit->p.momentum, 0.0f, 0.5f) : ledSel().momentum;
+    int   wantDist     = pit ? constrain(pit->p.distance, 0, 100) : (int)ledSel().distance;
+    const uint32_t *wantRef = pit ? pit->p.colour : colourLED;
+    // (wantDist is declared above with the other item values - the duplicate here broke the build.)
 
     // MOTION is compared SEPARATELY from the rest: changing a colour, a sensitivity or
     // the multiplier must NOT restart the pattern, or the dot visibly jumps every time

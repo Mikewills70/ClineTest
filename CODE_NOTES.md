@@ -764,6 +764,37 @@ the text, never change the column width.**
 redone with the file editor. A SINGLE-LINE literal replacement with no escapes is safe; anything
 multi-line is not. **Use the editor for source.**
 
+### HOW THE AI REACHES THE HARDWARE (20 Oct)
+
+**Working channels, all verified today:**
+
+- **BUILD + FLASH over USB (COM5)** via `wls_build.ps1` / `wls_upload.ps1` (arduino-cli).
+  **Kill any Arduino IDE / arduino-cli / serial-monitor process FIRST** - it holds COM5 and the upload
+  then fails with "exit status 2" one second after a successful build, *silently*. That is what
+  happened for over an hour today and it looked like firmware faults; the board was running stale
+  code the whole time.
+- **READ over Wi-Fi from the PC**: `netsh wlan connect name="ESP32-LightShow"` (the profile is already
+  saved), then fetch the board's own endpoints - `/diag`, `/log.txt`, `/load-playlist`,
+  `/load-timeline`, `/timeline-stop`. **Short bursts only**: Windows drops an access point with no
+  internet, so each fetch needs a fresh join, and long retry loops exceed the command time limit.
+- **THE BOARD'S OWN LOGGING IS THE INSTRUMENT**: the STALL watchdog, the display ON/OFF transitions,
+  and the `playlist: N items loaded` line. Read it over the Wi-Fi path.
+- **USB SERIAL READING IS NOT DEPENDABLE** on this hardware. With `USBMode=hwcdc` the sketch's
+  `Serial` needs DTR asserted, and asserting it from a host resets/drops the port - the host then sees
+  the ROM banner and nothing else. Do not rely on it. Do not "fix" it with `USBMode=default` either:
+  that moves `Serial` onto a different USB interface the serial Monitor cannot reach.
+- **GIT** for baselines (on GitHub, per the Rules) and `wip/...` branches.
+
+**What the user is needed for, and nothing else:**
+- **playing music when asked** - music plays only on request, so never test for it unasked;
+- **reporting what the PHYSICAL strips are doing** - no reading gives that;
+- **deliberate data actions** - deleting/recreating playlist and timeline entries.
+- The Arduino IDE is not used at all, and **do not ask the user to read long values off a phone**.
+
+**A build that leaves the board's LED flashing three times is a BOOT LOOP.** Recover it without
+asking: `git checkout main -- WIFI_LightShow.ino index.h`, build, flash - the verified baseline - then
+report. The work in progress lives on its branch and must be committed before any restore.
+
 ### THE MOVING DOT FREEZE, AND THE USB LOG PATH (20 Oct)
 
 **SYMPTOM:** with the timeline playing, the Moving Dot travelled to one end and HELD there - "more like the

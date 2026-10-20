@@ -2555,17 +2555,58 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
     function handlePlaylistAction(section) {
         let patternConfig = collectCurrentParameters(section);
+        // BUILD PROCESS STEP 6: THE USER NAMES THE ITEM, AND DUPLICATE NAMES ARE NOT ALLOWED.
+        // A cell references its item BY NAME, so two items sharing a name would make that reference
+        // ambiguous - the timeline could not say which parameters a cell meant, and would silently
+        // pick one. The collected name is only the PATTERN's name ("Moving Dot"), so it is never
+        // unique on its own: this is where the item gets its own identity.
+        let name = prompt('Name this playlist item (must be unique):', patternConfig.name || 'Item');
+        if (name === null) return;                              // cancelled: add nothing
+        name = String(name).trim();
+        if (!name) { alert('A playlist item needs a name.'); return; }
+        let clash = playlistItems.some(function (it) {
+            return String(it.name || '').trim().toLowerCase() === name.toLowerCase();
+        });
+        if (clash) {
+            alert('"' + name + '" is already in the playlist. Names must be unique.');
+            return;
+        }
+        patternConfig.name = name;
         playlistItems.push(patternConfig);
-        alert(`"${patternConfig.name}" (${section}) added to playlist!`);
+        alert('"' + name + '" (' + section + ') added to playlist!');
         renderPlaylist();
         triggerSaveFlash();
     }
 
     function addPlaylistToTimeline(index) {
-        activeArmedItem = JSON.parse(JSON.stringify(playlistItems[index]));
+        // THE CELL IS A REFERENCE (Rules: the Build Process, 20 Oct). It carries the ITEM'S NAME and
+        // nothing else that matters: the timeline finds the playlist entry by that name and takes ALL
+        // its parameters from there. It used to deep-copy the whole item, which meant a cell held a
+        // stale parameter set of its own AND editing the item never reached the timeline - two of the
+        // ways the display could be driven by something other than the playlist. The layout travels
+        // too, because the grid draws its icon from it; nothing else does, and the firmware ignores it.
+        let it = playlistItems[index] || {};
+        activeArmedItem = { name: it.name, layout: it.layout || 'STAR' };
         showFloatingItem(activeArmedItem.name);
         switchTabByName('timeline');
     }
+
+    // KEEP THE STRIPS LIVE WHILE THE USER WORKS ON THE PATTERNS PAGE (Build Process step 3, 20 Oct).
+    // The firmware lets the PAGE own the output for 5 s after a tweak, so opening the page and not
+    // moving anything left the strips dark - "I cannot program them with anything because I cannot see
+    // what is happening". This re-sends the current parameters every 2 s while the PATTERNS or 240V
+    // page is the one on screen, so the window never lapses. It sends from those two tabs ONLY, never
+    // from the timeline, so it can never fight a running show: leave the page and the sends stop, and
+    // within 5 s the timeline's cells own the strips again (or they go dark if it is stopped).
+    setInterval(function () {
+        let patTab = document.getElementById('tab-patterns');
+        let v240Tab = document.getElementById('tab-240v');
+        let onPatterns = !!(patTab && patTab.classList.contains('active'));
+        let on240 = !!(v240Tab && v240Tab.classList.contains('active'));
+        if (!onPatterns && !on240) return;
+        if (onPatterns && selectedPatternNameLED) liveParamChanged('LED');
+        if (on240 && selectedPatternName240) liveParamChanged('240V');
+    }, 2000);
 
     function switchTabByName(tabId) {
         document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
