@@ -729,6 +729,39 @@ pattern, never less. Nothing saved earlier can deafen a pattern again. (The unde
 fine: the flux and the threshold are both in ADC counts - the comment in the audio core says band
 peaks reach 5-40, which is why 54.6 blocks everything.)
 
+### MEMORY, PARTITIONS AND THE BOARD OPTIONS (19 Oct)
+
+The board is an **ESP32-S3 N16R8**: 16 MB flash and 8 MB OCTAL PSRAM. The default board options
+assume 4 MB and no PSRAM, which is why the sketch sat at **96% of a 1.25 MB app slot with 47 KB to
+spare**. RAM was never the problem (30% static, ~150 KB free heap, minimum steady over ten minutes,
+no leak).
+
+Fixed in the fqbn, now in BOTH `wls_build.ps1` and `wls_upload.ps1` - and they MUST MATCH, because
+the partition scheme decides the flash layout:
+
+    esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi,FlashMode=qio,USBMode=hwcdc
+
+Result: a **3,145,728-byte app slot with the sketch at 40%, 1.88 MB free**. The same five settings
+belong in the IDE's Tools menu, or the IDE's builds will differ from these scripts'.
+
+**CHANGING THE PARTITION SCHEME REFORMATS LittleFS AND MOVES NVS** - the saved settings and the
+timeline are wiped. Back them up first via `/load-timeline`, `/load-playlist` and `/settings`
+(they land as `board_*.json`, which `board_timeline.json` / `board_playlist.json` already ignore).
+
+### THE TIMELINE LOCKS THE TABS (19 Oct)
+
+"The timeline must be stopped before the other tabs become available." `applyTimelineLock()`
+already disabled PLAY, SAVE and the delay; it now disables **every tab except Timeline** too.
+Timeline stays live BECAUSE STOP LIVES THERE - disabling it would trap the user inside a running
+show. The tab buttons carry `data-tab` attributes so the lock can find them; the existing
+save/restore returns each tab to its PREVIOUS state (the 240V and LED Display tabs are already
+disabled until a pattern is chosen, and must come back disabled); and `switchTab()` carries a hard
+guard so a click inside the one-poll window after PLAY is refused rather than silently ignored.
+
+**A LESSON ABOUT GREPS.** The lock was wrongly reported as missing because the search was truncated
+at 30 hits and `color-block` / `timeline-block` filled it, so it never reached the line that calls
+it. When something "does not exist", first check that the search was not cut off.
+
 ### TIMING: WHERE TWO IDENTICAL CELLS COULD STILL DIVERGE (19 Oct)
 
 Measured on hardware with two ports running the same playlist entry: the parameters applied to both

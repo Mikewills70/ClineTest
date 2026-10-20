@@ -1071,6 +1071,11 @@ volatile int32_t  g_pairDiff = 0, g_pairA = 0, g_pairB = 0, g_pairRow = -1;
 // match but the positions differ, the difference came in through a parameter - which is data, not a
 // code fault. This is how "sync as a byproduct" gets verified instead of special-cased.
 volatile uint32_t g_steps[NUM_PORTS] = {0};
+// FRAMES VISIBLE, per port. If two ports have identical parameters, their steps-per-visible-frame
+// must match; a difference in the raw step count can then only come from one port being DARK for
+// part of the time - which is DATA (an empty cell), not a code asymmetry. st0/st1 alone cannot tell
+// those apart; this pair can.
+volatile uint32_t g_framesVis[NUM_PORTS] = {0};
 volatile int32_t  g_stalePort  = -1;
 volatile int32_t  g_staleDark  = -1;   // was that port DARK at the time? (-1 = nothing recorded yet)
 volatile int32_t  g_staleRow   = -1;   // which timeline row it happened in (1-based, -1 = none)
@@ -3295,6 +3300,10 @@ static void diagBeatFields(JsonDocument &doc) {
   // identical cells should be nothing at all, and if a parameter differs the cause is the DATA, not
   // a code exception.
   doc["st0"] = g_steps[0]; doc["st1"] = g_steps[1];
+  // FRAMES VISIBLE per port: st/fv is the real comparison. If the RATIOS match, the two ports are
+  // behaving identically and any difference in the raw step count is time spent DARK (an empty
+  // cell), which is data. If the ratios differ, the asymmetry is in the code.
+  doc["fv0"] = g_framesVis[0]; doc["fv1"] = g_framesVis[1];
   doc["v0sp"] = (double)portCfg[0].speed;      doc["v1sp"] = (double)portCfg[1].speed;
   doc["v0sz"] = portCfg[0].size;               doc["v1sz"] = portCfg[1].size;
   doc["v0qt"] = portCfg[0].qty;                doc["v1qt"] = portCfg[1].qty;
@@ -4673,6 +4682,9 @@ void runLEDPattern() {
   lastChaseMs = now;
   for (int p = 0; p < NUM_PORTS; p++) {
     const PortCfg &c = portCfg[p];
+    // COUNT THE FRAMES THIS PORT WAS ACTUALLY VISIBLE, so the step counts can be compared fairly.
+    g_framesVis[p]++;
+
     // A DARK port stays blank: skipping it here is what keeps its black buffer black. The
     // blank itself was written and transmitted once, at the moment the port went dark.
     if (c.dark) continue;

@@ -12,7 +12,9 @@ $ErrorActionPreference = 'Continue'
 $here   = $PSScriptRoot
 $cli    = 'C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe'
 $sketch = $here
-$fqbn   = 'esp32:esp32:esp32s3'
+$fqbn   = 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi,FlashMode=qio,USBMode=hwcdc'
+# MUST MATCH wls_build.ps1 EXACTLY: the partition scheme decides the flash layout, so building with
+# one scheme and uploading with another writes the wrong map and the board will not boot.
 $port   = 'COM5'
 $log    = Join-Path $here 'wls_upload.log'
 

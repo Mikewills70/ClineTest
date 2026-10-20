@@ -682,13 +682,13 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     <h1>Darren's Disco</h1>
 
     <div class="nav-tabs">
-        <button class="tab-btn active" onclick="switchTab('master')">Master</button>
-        <button class="tab-btn" onclick="switchTab('calibrate')">Colours</button>
-        <button class="tab-btn" onclick="switchTab('patterns')">Patterns</button>
-        <button id="tabBtn240" class="tab-btn" onclick="switchTab('240v')" disabled>240V Display</button>
-        <button id="tabBtnLED" class="tab-btn" onclick="switchTab('ws2811')" disabled>LED Display</button>
-        <button class="tab-btn" onclick="switchTab('playlist')">Playlist</button>
-        <button class="tab-btn" onclick="switchTab('timeline')">Timeline</button>
+        <button class="tab-btn active" data-tab="master"    onclick="switchTab('master')">Master</button>
+        <button class="tab-btn"        data-tab="calibrate" onclick="switchTab('calibrate')">Colours</button>
+        <button class="tab-btn"        data-tab="patterns"  onclick="switchTab('patterns')">Patterns</button>
+        <button id="tabBtn240" class="tab-btn" data-tab="240v" onclick="switchTab('240v')" disabled>240V Display</button>
+        <button id="tabBtnLED" class="tab-btn" data-tab="ws2811" onclick="switchTab('ws2811')" disabled>LED Display</button>
+        <button class="tab-btn"        data-tab="playlist"  onclick="switchTab('playlist')">Playlist</button>
+        <button class="tab-btn"        data-tab="timeline"  onclick="switchTab('timeline')">Timeline</button>
     </div>
 
     <!-- MASTER TAB -->
@@ -1193,6 +1193,14 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     });
 
     function switchTab(tabId) {
+    // THE LOCK IS ENFORCED HERE AS WELL AS ON THE BUTTONS. The buttons are disabled by the status
+    // poll, so for up to one poll interval after PLAY they can still be clicked - this shuts that
+    // window. Timeline is always allowed through, because STOP lives on it.
+    if (tabId !== 'timeline' &&
+        ((typeof tlHead !== 'undefined' && tlHead.playing) || timelineIsPlaying)) {
+        if (typeof note === 'function') note('Timeline is PLAYING - press STOP on the Timeline tab first.');
+        return;
+    }
         // Leaving the PATTERNS tab returns the outputs to DARK. Choosing a pattern there
         // lights every port so it can be programmed, and that preview must not persist
         // once you have moved on. Suppressed while the TIMELINE is playing, so moving
@@ -3160,8 +3168,23 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 if (prev) el.disabled = prev[1];   // exactly as it was before the lock
             }
         });
+        // THE TABS TOO (user, 19 Oct: "The timeline must be stopped before the other tabs become
+        // available"). Every tab EXCEPT Timeline is disabled while a show runs, and Timeline stays
+        // live BECAUSE STOP LIVES THERE - disabling it would trap you with no way out. The saved /
+        // restore pattern above is reused, which matters because the 240V and LED Display tabs are
+        // already disabled until a pattern is chosen: they must come back disabled, not enabled.
+        document.querySelectorAll('.tab-btn[data-tab]').forEach(function (b) {
+            if (b.getAttribute('data-tab') === 'timeline') return;
+            if (on) {
+                saved.push([b, b.disabled]);
+                b.disabled = true;
+            } else if (tlLockSaved) {
+                let prev = tlLockSaved.find(p => p[0] === b);
+                if (prev) b.disabled = prev[1];
+            }
+        });
         tlLockSaved = on ? saved : null;
-        note(on ? 'Timeline is PLAYING - PLAY, SAVE and the delay are locked.'
+        note(on ? 'Timeline is PLAYING - the other tabs, PLAY, SAVE and the delay are locked until STOP.'
                 : 'Timeline STOPPED - controls released.');
     }
 

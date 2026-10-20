@@ -17,10 +17,22 @@ $ErrorActionPreference = 'Continue'
 $here   = $PSScriptRoot
 $cli    = 'C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe'
 $sketch = $here
-$fqbn   = 'esp32:esp32:esp32s3'
-# The sketchbook on THIS machine is D:\Dell 7720\Arduino, not the usual
-# Documents\Arduino, so the IDE's bundled CLI does not find its libraries by
-# itself ("ArduinoJson.h: No such file or directory"). This points it at them.
+$fqbn   = 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi,FlashMode=qio,USBMode=hwcdc'
+# BOARD OPTIONS FOR THIS HARDWARE: an ESP32-S3 **N16R8** - 16 MB flash, 8 MB OCTAL PSRAM.
+#   FlashSize=16M          the board has 16 MB, not the 4 MB the default assumes
+#   PartitionScheme=huge_app   "Huge APP (3MB No OTA/1MB SPIFFS)" - the app slot goes from 1.25 MB
+#                          to 3 MB, which is what stops us running out: the sketch was at 96% of
+#                          the default slot with 47 KB to spare. LittleFS lives in the 1 MB SPIFFS
+#                          partition (far more than the 16 KB log needs) and OTA is unused.
+#   PSRAM=opi              8 MB of octal PSRAM, as this module has
+#   FlashMode=qio          QIO 80 MHz, the module's normal mode
+#   USBMode=hwcdc          the USB-serial log path
+# CHANGING THE PARTITION SCHEME REFORMATS THE FILE SYSTEM AND MOVES NVS: the saved settings and the
+# timeline are wiped. /load-timeline, /load-playlist and /settings were backed up to board_*.json
+# before this was applied.
+# The sketchbook on THIS machine is D:\Dell 7720\Arduino, not the usual Documents\Arduino, so the
+# IDE's bundled CLI does not find its libraries by itself ("ArduinoJson.h: No such file or
+# directory"). --libraries below points it at them.
 $libs   = 'D:\Dell 7720\Arduino\libraries'
 $log    = Join-Path $here 'wls_build.log'
 
