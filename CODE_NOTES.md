@@ -806,6 +806,62 @@ so the user saw *"IO 48 is flashing like a clock to no music at all"*, which the
 forbids ("related to the audio signal only"). The flash is now gated on music actually being
 present, while the dot still moves in silence. Separately, the pulse was being cut to nothing by
 another writer in the same loop - `io48` counted every flash and the boot/error blinks (same pin,
+### THE BEAT MULTIPLIER NEEDED A PATH TO THE MOTION (21 Oct)
+
+User: *"I tried using the beat mulitplier that should have doubled the response but it did nothing."*
+
+**The cause was not plumbing - the multiplier wrote a value that NOTHING READ.** `beatMult` (a checkbox on the
+pattern page: off = 1, on = 2) only ever armed a **sub-beat**, and the wrap-ON branch of `actOnBeat` deliberately
+ignores sub-beats - *"it would reverse the traverse twice per beat"*. On top of that, once the clock had a period,
+even a REAL onset stopped triggering the traverse. So on the Chase metronome the multiplier had no path to the
+motion at all, however many times it was toggled.
+
+**Its meaning comes from the page's own label:** *"ON = 2: an extra change half way between beats, so the pattern
+reverses twice as often."* The nominal traverse is TWO beats (the four-count specification), so the multiplier
+**divides** it - 2 gives one crossing per beat:
+
+    g_travIv = (L.mult > 1) ? ((toNext + L.ivMs) / 2) : (toNext + L.ivMs);
+    travLen  = (mult > 1) ? per0 : 2UL * per0;      // g_travEnd uses the same length
+
+**MEASURED AGAINST MUSIC, BOTH STATES** (128 BPM track, 470 ms period):
+
+| state    | v0mu | p0iv (the music)          | travIv (the traverse)     | ratio | io48 vs p0clk |
+|----------|------|---------------------------|---------------------------|-------|---------------|
+| unticked | 1    | 470 / 480 / 470           | 940 / 960 / 940           | 2.00  | 1:1           |
+| ticked   | 2    | 470 / 480 / 472 / 470     | 470 / 480 / 472 / 470     | 1.00  | 1:1           |
+
+**THE DECISIVE COLUMN IS `p0iv`: identical in both states.** The multiplier changes the traverse rate and
+**nothing else** - the beat lock is the music and only the music. If a future change makes `p0iv` move when the
+multiplier is toggled, the multiplier has started interfering with the detector.
+
+New `/diag` fields so this cannot hide again: `v0mu`/`v1mu` (the multiplier actually applied per port), `travIv`
+(ms per crossing), `led48` (the pin's own state).
+
+**THE MULTIPLIER IS LIVE, NOT STORED.** It is RAM only, like the other page controls; pressing Save is what writes
+it to flash. That is why a reload re-syncs the checkbox FROM the board (`restoreParams`), and why a value changed
+live reverts to the stored one after a power cycle.
+
+**AN IO48 INVARIANT DIED, AND TWO COMMENTS HAD TO FOLLOW IT.** The flash is now gated on the detector actually
+hearing something, so `io48` no longer equals `p0clk`: measured **1122 against 4455 in silence**, and **1:1 while
+music played**. The two comments asserting "must match p0clk" were corrected - a gap there is the music gate
+WORKING, and it was misread as a fault until it was compared against the level.
+
+**TWO MEASUREMENT LESSONS, BOTH MINE.**
+
+* **A test through a SAVING endpoint changes the machine.** A colour check of mine posted `#00ff00` through
+  `/live-tweak` - the same path the page uses, which saves - so green was written into the board's settings and
+  survived reflashing while the page went on showing the user's red. Prefer read-only checks, and expect any tweak
+  to persist.
+* **A READING TAKEN AFTER A STATE CHANGE PROVES NOTHING.** Twice I asked for a state, then read `/diag` after the
+  user had already moved on (they had toggled several times and left the box ticked), and twice diagnosed a "lost
+  parameter" fault that did not exist. Pin the state, then read it. `/log.txt` is not a reliable witness either -
+  its newest entry was over an hour old, with no `tweak` lines, while dozens of `/diag` reads had happened, so
+  "no tweak in the log" proves nothing.
+
+**A LOADED TIMELINE ROW IS NOT OWNERSHIP.** At boot the board reports `tlLoaded=1`, `tlPlaying=0`, `tlRow=1` with
+cell names visible as `c0id`/`c1id` (and `cell=` in the `m*` lines). While it is STOPPED it does not own the
+multiplier - `v0mu` equalled `multLED`, not the cell's item. Worth knowing before blaming a loaded row for a value
+the page cannot move.
 same diode) were clearly visible, which is how the hardware was cleared and the fault found. The
 flash now **owns the pin** from its start until its own end time and re-asserts it every pass.
 300 ms, capped at 40% of the current beat so fast beats cannot merge.

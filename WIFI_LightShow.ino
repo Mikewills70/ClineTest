@@ -263,7 +263,11 @@ float         acScore    = 0.0f; // its correlation strength (logged)
 // transients - completely independently of what the lights are doing. The lights
 // follow the clock below, which only lets a STRONG detection steer it.
 volatile bool rawBeatFlag = false;
-volatile uint32_t g_io48Beats = 0;   // IO48 flashes since boot: must equal the beat count
+volatile uint32_t g_io48Beats = 0;   // IO48 flashes since boot: one per MUSIC beat
+// NOT one per clock beat. The flash is gated on the detector actually hearing something (21 Oct,
+// "flashing like a clock to no music at all"), so io48 TRAILS p0clk whenever the room is quiet -
+// measured 1122 against 4455 in silence, and 1:1 while music played. The old note here said it
+// "must equal the beat count", which is only true while the music gate is open.
 volatile unsigned long g_beatPeriodMs = 0;   // the shared beat period (listener 0 computes it)
 
 // Consecutive beats the clock has had to insert. After two, inserting stops: in
@@ -3618,7 +3622,11 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["p0frac"]  = (double)beatListen[0].sensFrac;
   doc["p0iv"]    = (uint32_t)beatListen[0].ivMs;      // the beat period the clock runs at
   doc["p0clk"]   = (uint32_t)beatListen[0].clkFires;   // beats the CLOCK delivered
-  doc["io48"]    = (uint32_t)g_io48Beats;        // IO48 flashes: must match p0clk
+  // ONE PER MUSIC BEAT, NOT ONE PER CLOCK BEAT (21 Oct). It matches p0clk only while music is
+  // present; in silence the clock keeps running by design (the dot must still cross the strip)
+  // but the flash is suppressed. A gap between io48 and p0clk is therefore the music gate
+  // working, not a fault - it was misread as one until it was measured against the level.
+  doc["io48"]    = (uint32_t)g_io48Beats;
   // THE PIN ITSELF, so "IO48 is dark" can be diagnosed from data: led48 = 1 means the pin is
   // being driven high right now (a flash is in progress), 0 means it is low.
   doc["led48"]   = (uint32_t)(digitalRead(POWER_LED_PIN) ? 1 : 0);
@@ -3674,6 +3682,10 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["v0mo"] = (double)portCfg[0].momentum;   doc["v1mo"] = (double)portCfg[1].momentum;
   doc["v0bs"] = (double)portCfg[0].beatSens;   doc["v1bs"] = (double)portCfg[1].beatSens;
   doc["v0fq"] = portCfg[0].freqHz;             doc["v1fq"] = portCfg[1].freqHz;
+  // The APPLIED multiplier and the traverse length the metronome is actually using, so a
+  // multiplier that reaches the board but not the motion (the old fault) cannot hide again.
+  doc["v0mu"] = portCfg[0].mult;                doc["v1mu"] = portCfg[1].mult;
+  doc["travIv"] = (uint32_t)g_travIv;           // ms per crossing: two beats, or one at 2x
   // ---- MOVING DOT TELEMETRY, EVERY PORT (user, 20 Oct) ---------------------------------------
   // The Moving Dot fault is INTERMITTENT: "the moving dots did not stall - I don't understand why
   // the fault was there before but not now". A hand-timed poll cannot catch it, so every port
@@ -4057,7 +4069,19 @@ static void listeningStep() {
           // THE LENGTH IS SHARED TOO. A length held per port is another way for two strips to
           // disagree, so the one number every wrap port follows is set here, once.
           if (toNext >= 120 && toNext <= 1200 && L.ivMs >= 120 && L.ivMs <= 1200) {
-            g_travIv = toNext + L.ivMs;      // to the next beat AND the one after it
+            // THE BEAT MULTIPLIER DOUBLES THE RESPONSE (21 Oct). It did NOTHING before, and the
+            // reason is worth recording: the multiplier only ever armed a SUB-beat, and a sub-beat
+            // is deliberately ignored by the wrap-ON branch of actOnBeat ("it would reverse the
+            // traverse twice per beat") - while, once the clock had a period, even a REAL onset
+            // stopped triggering the traverse. So the multiplier had no path whatsoever to the
+            // motion. User: "I tried using the beat mulitplier that should have doubled the
+            // response but it did nothing."
+            // The meaning is the obvious one: twice the response means the dot crosses the strip
+            // TWICE as often. The nominal traverse is two beats, so the multiplier divides it -
+            // 2 gives one crossing per beat, with the clock still restarting it on the beat so the
+            // landings stay on the music. The board clamps the checkbox to 1 or 2, so no more is
+            // needed; anything larger would need sub-beat triggers as well.
+            g_travIv = (L.mult > 1) ? ((toNext + L.ivMs) / 2) : (toNext + L.ivMs);
             for (int p = 0; p < NUM_PORTS; p++) {
               if (!portCfg[p].wrap) continue;
               chaseInterval[p] = g_travIv;   // mirror, so the logs and diagnostics stay readable
@@ -5200,9 +5224,12 @@ static void chaseTraverseStart(unsigned long now) {
   // path) the end is simply two periods from now.
   {
     unsigned long per0 = beatListen[0].ivMs ? beatListen[0].ivMs : 500;
+    // The same TWO-BEAT nominal divided by the multiplier, so the fixed end and the length the
+    // clock publishes can never disagree about how long a traverse lasts.
+    unsigned long travLen = (beatListen[0].mult > 1) ? (per0) : (2UL * per0);
     g_travEnd = (beatListen[0].clkNext != 0)
-                  ? (beatListen[0].clkNext + beatOffsetMs + 2UL * per0)
-                  : (now + 2UL * per0);
+                  ? (beatListen[0].clkNext + beatOffsetMs + travLen)
+                  : (now + travLen);
   }  // AIM FOR THE FAR END FROM WHERE PORT 0 IS. Port 0 is the reference for the shared decision, so
   // both strips turn round on the same beat even if one had been nudged by an odd extra onset.
   g_travDir = (ledPosArr[0] > (chaseMaxPos(0) / 2)) ? -1 : 1;
