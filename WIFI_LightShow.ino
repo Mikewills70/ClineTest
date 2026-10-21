@@ -89,6 +89,13 @@ uint32_t colourLED[4] = { 0xFFFFFF, 0xFFD000, 0xFF7000, 0xFF0000 };
 // GLOBAL: one detector drives both the strips and the 240V. Exposed in the UI as
 // "Beat Sensitivity" with the scale REVERSED so the slider's right-hand end is the
 // most sensitive (most beats), which is how such a control should read.
+// THE TUNED AUDIO DEFAULTS (21 Oct, MEASURED by the tuning session). These are the values the
+// metronome was tuned to - the sensitivity whose fraction (0.56) gave the exact beat rate
+// across sections, and the band low edge the microphone actually hears - and they are
+// exposed in /settings so the page has ONE source of truth for its slider marks, its snap
+// targets and its restore chips. Defined HERE, above every use.
+#define DEF_BEAT_SENS  0.08f    // -> fraction 0.5616 of the music novelty peak
+#define DEF_FREQ       61       // -> the 61-250 Hz band
 // thr = (1 - beatSens) * 60, so 0.2 is the equivalent of the old 0.8.
 float beatSens = 0.2f;
 
@@ -256,6 +263,8 @@ float         acScore    = 0.0f; // its correlation strength (logged)
 // transients - completely independently of what the lights are doing. The lights
 // follow the clock below, which only lets a STRONG detection steer it.
 volatile bool rawBeatFlag = false;
+volatile uint32_t g_io48Beats = 0;   // IO48 flashes since boot: must equal the beat count
+volatile unsigned long g_beatPeriodMs = 0;   // the shared beat period (listener 0 computes it)
 
 // Consecutive beats the clock has had to insert. After two, inserting stops: in
 // silence, or when the music is lost, the display simply chases one way until a
@@ -1156,8 +1165,29 @@ static float         chaseAcc[NUM_PORTS]      = {0};   // fractional LEDs (wrap 
 static unsigned long chaseTrigAt[NUM_PORTS]   = {0};   // when the last trigger landed
 static unsigned long chaseInterval[NUM_PORTS] = {0};   // measured gap between triggers
 static int           chaseFromPos[NUM_PORTS]  = {0};   // where this traverse started
-
-// THE CHASE is one pattern now: "Chase". chase_10_1 and knight_rider are still rendered if
+// THE SHARED TRAVERSE - ONE DECISION FOR EVERY WRAP-ON PORT (21 Oct, see chaseTraverseStart).
+// A beat is a property of the MUSIC, so the metronome has ONE traverse and every wrap port
+// renders it at its own scale. The per-port copies above are mirrors kept for the on-screen
+// diagnostics only. Declared HERE, with the rest of the chase state, because listeningStep()
+// reads g_travIv and the clock has to set the length the next traverse will use.
+static unsigned long g_travAt  = 0;      // when the current traverse started (0 = none yet)
+static unsigned long g_travIv  = 500;    // its length in ms
+static int           g_travDir = 1;      // +1 toward the far end, -1 toward pixel 0
+// WHERE THE TRAVERSE STARTS, AS A FRACTION OF THE STRIP. The per-port start position was the
+// last per-port residue in the metronome: each port began its traverse from its OWN position,
+// so a 1-3 pixel difference survived every beat and could grow. As a fraction, every port
+// starts at the same RELATIVE point, which forces them back into step on every beat - the
+// snap is at most a pixel or two and invisible, and the user requires it: "They MUST remain
+// in sync!"
+static float         g_travFromFrac = 0.0f;
+// WHEN THE CURRENT TRAVERSE ENDS, FIXED THE MOMENT IT STARTS (21 Oct). Recomputing the length
+// every frame as "the beat after the next" looked harmless and was not: clkNext advances by a
+// whole period on every clock tick, so mid-traverse the length grew from 2 beats to 3 - and
+// because the position is from + (to-from) * elapsed / length, the dot was thrown BACKWARDS
+// and then carried on in the same direction, skipping pixels. User: "The LED strips are
+// skipping LED s jumping backwards and then continuing in the same direction." A traverse has
+// one end time and it does not move.
+static unsigned long g_travEnd = 0;// THE CHASE is one pattern now: "Chase". chase_10_1 and knight_rider are still rendered if
 // an old playlist or timeline cell names them, but they are no longer listed and chase_10_1
 // now RESOLVES to this one, so old data plays the new behaviour.
 static inline bool isChasePat(int p) { return p == (int)LP_CHASE_1_10; }
@@ -1906,6 +1936,8 @@ void handleGetSettings() {
   doc["inv240"] = invert240V;     doc["invLED"] = invertLED;
   doc["music240"] = music240V;    // (musicLED removed: the LED source is fixed)
   doc["beatSens"] = beatSens;      // global: one detector drives both displays
+  doc["defBeatSens"] = DEF_BEAT_SENS;   // the tuned defaults (see the note at DEF_BEAT_SENS)
+  doc["defFreq"]     = DEF_FREQ;
   doc["vuDir"] = vuDirLED;         // the single VU pattern's direction row
   // Per-port colour calibration order (0=RGB 1=GRB 2=BRG 3=RBG 4=GBR 5=BGR).
   // Exposed so the UI can SHOW the stored order for the selected port instead of
@@ -3094,7 +3126,7 @@ static void fastBeatCheck() {
   if (envP2P > p2pThr && (now - fastLastBeatMs) >= 200) {
     fastLastBeatMs  = now;
     lastTrigMs      = now;
-    rawBeatFlag     = true;                // IO48: flash on every detection
+    // IO48 is NOT driven here any more: see actOnBeat. A raw detection is not a beat.
     beatLatch240    = true;                // latched so an onset falling between
                                            // 240V steps is never lost
     fastBeatFlag    = true;
@@ -3136,6 +3168,14 @@ static void fastBeatCheck() {
                                 // started (the leading-edge timestamp, see odfEvaluate)
 #define RISE_LOOKBACK  120UL    // ms: never stamp an onset further back than this
 #define ODF_RECOVER    0.5f     // the SECOND CHANCE bar: see listeningStep
+// THE PLAUSIBLE BEAT BAND: the clock may only run inside it (80-171 BPM). MEASURED on
+// Fisher - Losing It (125 BPM): the detector fires on the BEAT and on the OFF-BEAT, so
+// the onset intervals are a mix of about 480 and about 240 ms and the period is genuinely
+// ambiguous - the octave correction adopted 240 and the clock ran at twice the beat rate.
+// A band excludes BOTH ways the period can be wrong (half the beat, and twice the beat)
+// while covering every track here (121-138 BPM = 435-496 ms) with room at both ends.
+#define CLK_MIN_MS     350UL    // 171 BPM
+#define CLK_MAX_MS     750UL    // 80 BPM
 #define SENS_FRAC_MAX  0.60f    // sens 0.01 (strictest): 60% of the music novelty peak
 #define SENS_FRAC_MIN  0.12f    // sens 1.00 (most sensitive): 12%
 
@@ -3233,6 +3273,10 @@ struct BeatListener {
   unsigned long lastReal = 0, prevReal = 0;
   unsigned long ivMs     = 0;      // the beat period the clock runs at (smoothed)
   unsigned long ivAlt    = 0;      // a candidate half/double period, awaiting agreement
+  unsigned long recent[24];        // the last 24 onset stamps: the period search needs them
+  uint8_t       recentN = 0, recentIdx = 0;
+  unsigned long pHist[3];          // the last 3 comb results: the period is their MEDIAN
+  uint8_t       pN = 0, pIdx = 0;
   unsigned long clkNext  = 0;      // the NEXT beat the clock will fire (see listeningStep)
   uint32_t      clkFires = 0;      // beats the CLOCK delivered (diagnostic)
   bool          realPend = false;  unsigned long realAt = 0;
@@ -3574,6 +3618,10 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["p0frac"]  = (double)beatListen[0].sensFrac;
   doc["p0iv"]    = (uint32_t)beatListen[0].ivMs;      // the beat period the clock runs at
   doc["p0clk"]   = (uint32_t)beatListen[0].clkFires;   // beats the CLOCK delivered
+  doc["io48"]    = (uint32_t)g_io48Beats;        // IO48 flashes: must match p0clk
+  // THE PIN ITSELF, so "IO48 is dark" can be diagnosed from data: led48 = 1 means the pin is
+  // being driven high right now (a flash is in progress), 0 means it is low.
+  doc["led48"]   = (uint32_t)(digitalRead(POWER_LED_PIN) ? 1 : 0);
   doc["odfFr"]   = (uint32_t)g_odfFrames;
   doc["odfLo"]   = (double)odfChain[0].hpHz;      // the ODF band in use ...
   doc["odfHi"]   = (double)ODF_LP_HZ;             // ... its top edge is a code constant
@@ -3686,6 +3734,13 @@ static void actForListener(int i) {
 // ONE PLACE decides what a beat DOES, because two rules cut across the patterns: the Chase
 // is timed rather than flipped, and a minimum sensitivity means the music has no effect.
 static void actOnBeat(int i, unsigned long now, bool fromAntifreeze, bool isSub) {
+  // IO48 FOLLOWS THE BEAT THAT IS ACTED ON (user, 21 Oct): "make IO48 flash for each
+  // beat detected (and acted upon), so for chase this would be each time it reaches the
+  // end of the strip". The flash is therefore driven by the ACTION, and because the action
+  // is the MUSIC beat rather than any pattern timer, every pattern shows the same thing:
+  // one flash per beat that actually moves the lights. A SUB-beat and an antifreeze pulse
+  // do not count, because the music did not produce them.
+  // (the IO48 flash moved down to the ACTION: see the note in actForListener below)
   if (i < NUM_PORTS && isChasePat(portCfg[i].pat)) {
     // A REAL beat times the metronome. A SUB-beat (the half-way one) is NOT a beat for this
     // purpose - it would reverse the traverse twice per beat - so it is ignored here.
@@ -3706,12 +3761,56 @@ static void actOnBeat(int i, unsigned long now, bool fromAntifreeze, bool isSub)
     return;
   }
   if (!beatActionAllowed(i)) return;     // minimum sensitivity: the timer takes over
+  // IO48 is NOT driven here: it comes from the CLOCK beat only. Set here, it flashed for
+  // every pattern action - and the always-listening 240V listener acts on every ONSET, so
+  // the LED ran at four times the beat rate (measured: io48 630 against p0clk 158).
   actForListener(i);
 }
 
 // THE LISTENING STEP, once per render pass. Each listener compares its OWN chain's
 // published novelty against its OWN threshold, with its own minimum gap, and then
 // acts on its own pattern after the display offset.
+// THE BEAT PERIOD BY COMB SEARCH. MEASURED (Fisher - Losing It, 125 BPM): the onset
+// stream carries THREE spacings at once - 0-199 ms (the kick firing on its own body),
+// 200-299 (the OFF-BEAT) and 400-619 (the beat) - and their strengths do not reliably
+// separate them (one run gave 132 for the beat against 69 for the off-beat, another gave
+// 69 against 72). No single-gap statistic survives that: the median swung between 252
+// and 572 ms. So the period is FOUND, not averaged: every plausible period in a musical
+// band is scored by how many of the recent onsets land on a grid of that period, and the
+// best-scoring one wins (the shortest, on a tie). Confining the search to 350-750 ms
+// (80-171 BPM) is what makes it robust, because ALL THREE artefacts fall outside it: the
+// off-beat at about half, the double-fire below 200 ms, and a two-beat lock at about
+// double. The true beat sits in the middle of the band and scores highest.
+static unsigned long beatPeriodComb(const unsigned long *r, uint8_t n) {
+  if (n < 5) return 0;      // 5, not 8: a new track locks in about 2 s
+  unsigned long oldest = r[0], newest = r[n - 1];
+  unsigned long bestP = 0;
+  uint16_t best = 0;
+  // TWO STAGES: a coarse 10 ms sweep to find the region, then a 2 ms sweep around the
+  // winner. MEASURED: a single 2 ms sweep of all 201 candidates, run once per listener, cost
+  // 17-33 ms per render pass (fLoopUs 33,428 us, fHitch 9) - a visible stall, and one that
+  // corrupted the very period it was computing (p0iv read 456 against a true 461.5). 41 + 11
+  // candidates cost about a tenth of that, and the answer is still exact to 2 ms.
+  for (int stage = 0; stage < 2; stage++) {
+    unsigned long from = (stage == 0) ? 350UL : (bestP > 10UL ? bestP - 10UL : 350UL);
+    unsigned long to   = (stage == 0) ? 750UL : (bestP + 10UL < 750UL ? bestP + 10UL : 750UL);
+    unsigned long step = (stage == 0) ? 10UL : 2UL;
+    for (unsigned long P = from; P <= to; P += step) {
+      uint16_t s = 0;
+      for (unsigned long g = newest; (g + P) > oldest; g -= P) {   // grid back from the newest
+        for (uint8_t i = 0; i < n; i++) {
+          unsigned long d = (r[i] > g) ? (r[i] - g) : (g - r[i]);
+          if (d <= (P / 10)) s++;
+        }
+        if ((newest - g) > 4000UL) break;                          // never look further back
+      }
+      if (s > best) { best = s; bestP = P; }
+    }
+    if (bestP == 0) return 0;
+  }
+  return (best >= 4) ? bestP : 0;
+}
+
 static void listeningStep() {
   unsigned long now = millis();
   beatFired240 = false;
@@ -3789,20 +3888,47 @@ static void listeningStep() {
         // required before adopting, so a single odd gap cannot flip the tempo. The first
         // period still has to be 300 ms or more (200 BPM or slower), which keeps a
         // beat-plus-off-beat pair (about 248 ms for this music) from seeding it.
-        if (gapNow >= 250 && gapNow <= 2000) {
-          if (L.ivMs == 0) { if (gapNow >= 300) L.ivMs = gapNow; L.ivAlt = 0; }
-          else if (gapNow >= (L.ivMs * 4 / 5) && gapNow <= (L.ivMs * 6 / 5)) {
-            L.ivMs = (L.ivMs * 7 + gapNow * 3) / 10;    // smoothed: the clock must not
-            L.ivAlt = 0;                                // jitter with every onset
-          } else {
-            unsigned long cand = 0;
-            if (gapNow >= (L.ivMs * 2 / 5) && gapNow <= (L.ivMs * 3 / 5))       cand = gapNow;
-            else if (gapNow >= (L.ivMs * 8 / 5) && gapNow <= (L.ivMs * 12 / 5)) cand = gapNow / 2;
-            if (cand != 0) {
-              unsigned long diff = (cand > L.ivAlt) ? (cand - L.ivAlt) : (L.ivAlt - cand);
-              if (L.ivAlt != 0 && diff < 80) { L.ivMs = cand; L.ivAlt = 0; }   // agreed: adopt
-              else L.ivAlt = cand;
-            } else L.ivAlt = 0;
+        // THE PERIOD COMES FROM THE COMB SEARCH over the recent onsets (see
+        // beatPeriodComb). It re-runs on every onset, so it follows a tempo change - or a
+        // switch to another track - within about four beats.
+        L.recent[L.recentIdx] = stamp;
+        L.recentIdx = (uint8_t)((L.recentIdx + 1) % 24);
+        if (L.recentN < 24) L.recentN++;
+        if (L.recentN >= 5) {
+          unsigned long lin[24];
+          uint8_t cnt = 0;
+          for (uint8_t k = 0; k < L.recentN; k++) {
+            uint8_t ix = (uint8_t)((L.recentIdx + 24 - L.recentN + k) % 24);
+            lin[cnt++] = L.recent[ix];
+          }
+          // ONCE PER ONSET, NOT ONCE PER LISTENER: the period is a property of the MUSIC,
+          // so listener 0 computes it and the others copy it. Running the search eleven
+          // times per onset is what stalled the display (see the note in beatPeriodComb).
+          unsigned long p = 0;
+          if (i == 0) { p = beatPeriodComb(lin, cnt); }   // the shared value is set AFTER the median
+          else if (g_beatPeriodMs >= 200) { L.ivMs = g_beatPeriodMs; }
+          if (p >= 200) {
+            // A MEDIAN OVER THE LAST 3 COMB RESULTS. The comb occasionally returns a wrong
+            // value for a single window (measured outliers of 350, 370 and 660 ms against a
+            // true 480-490), and adopting one of those would speed the clock up or slow it
+            // down for a beat. A median of three ignores a lone outlier and still follows a
+            // real tempo change within three beats.
+            L.pHist[L.pIdx] = p;
+            L.pIdx = (uint8_t)((L.pIdx + 1) % 3);
+            if (L.pN < 3) L.pN++;
+            if (L.pN < 3) L.ivMs = p;
+            else {
+              unsigned long a = L.pHist[0], b = L.pHist[1], c2 = L.pHist[2], mid;
+              if (a > b) mid = (b > c2) ? b : ((a > c2) ? c2 : a);
+              else       mid = (a > c2) ? a : ((b > c2) ? c2 : b);
+              L.ivMs = mid;
+            }
+            // THE SHARED PERIOD IS THE FINAL, SMOOTHED ONE - not the raw comb output. It was
+            // published BEFORE the 3-value median, so listener 0 ran at one period and the other
+            // ten listeners at another: the ports then drifted apart on the strip (user, 21 Oct:
+            // "ports 1 and 2 went out of sync"). MEASURED: sP0..sP3 were equal (44/44/44/44) until
+            // the clock locked, then spread to 11/51/51/51.
+            if (i == 0) g_beatPeriodMs = L.ivMs;
           }
         }
         // THE ONSET STEERS THE CLOCK, IT DOES NOT TRIGGER THE METRONOME (21 Oct).
@@ -3817,14 +3943,22 @@ static void listeningStep() {
         //   * an onset near the prediction pulls the grid a quarter of the way towards it;
         //   * an onset 0.25-0.75 of a period late RE-PHASES the grid from itself;
         //   * an onset near the half-period (the off-beat) cannot move the grid at all.
-        if (L.ivMs >= 250) {
+        if (L.ivMs >= 200) {
           if (L.clkNext == 0) L.clkNext = stamp + L.ivMs;
           else {
             long err = (long)stamp - (long)L.clkNext;
-            if (err >= -(long)(L.ivMs / 4) && err <= (long)(L.ivMs / 4))
-              L.clkNext = (unsigned long)((long)L.clkNext + err / 4);
-            else if (err > (long)(L.ivMs / 4) && err <= (long)(L.ivMs * 3 / 4))
-              L.clkNext = stamp + L.ivMs;
+            long q   = (long)(L.ivMs / 3);      // +-1/3 of a beat: wider than before, and
+                                                // still clear of the off-beat at 1/2
+            if (err >= -q && err <= q)
+              L.clkNext = (unsigned long)((long)L.clkNext + err / 4);      // pull a quarter
+            else if (err > (long)(L.ivMs * 2 / 3) && err <= (long)(L.ivMs * 5 / 4))
+              L.clkNext = stamp + L.ivMs;     // the predicted beat was MISSED: re-phase here
+            // THE 0.25-0.75 WINDOW IS THE OFF-BEAT AND MUST NOT MOVE THE GRID (21 Oct).
+            // MEASURED: an off-beat onset lands 0.5 of a period after the prediction, and
+            // treating it as a late beat RE-PHASED the clock onto it - then the real beats,
+            // now 0.5 late of the new grid, flipped it back, so the grid bounced between the
+            // beat and the off-beat and the dot reversed mid-traverse. That is exactly what
+            // the user reported: "the dot trying to respond to the double timing".
           }
         }
         g_beatReal++;
@@ -3839,7 +3973,7 @@ static void listeningStep() {
           onsStamp = stamp;
         }
         onsMask |= (uint16_t)(1u << i);
-        rawBeatFlag = true;                    // IO48: one flash per detection
+        // IO48 is NOT driven here any more: see actOnBeat. The flash follows the beat
         lastTrigMs  = now;
         // The 240V's own pattern uses the beat AT THE INSTANT it is heard, exactly as
         // it always has; every direction change still waits for the display offset.
@@ -3854,18 +3988,82 @@ static void listeningStep() {
       }
     }
 
+    // NO MUSIC, NO METRONOME: SLOW TO A GENTLE PACE. This has to sit BEFORE the clock guard
+    // below, because that guard needs a period to exist - so in silence, where there are no
+    // onsets and therefore no period, the old placement could never run at all and the dot
+    // fell back to the antifreeze. Now the clock starts at 1 s and keeps going at 1 s until
+    // the music returns (user: "the dot should slow to a gentle pace of around 1 sec").
+    if (L.active && (L.lastReal == 0 || (now - L.lastReal) > 1500UL)) {
+      L.ivMs = 1000;
+      if (L.clkNext == 0) L.clkNext = now + 1000;
+    }
+    // IO48 IS THE MUSIC ONLY (21 Oct). User: "IO 48 is flashing like a clock to no music at all."
+    // The flash was driven from the CLOCK tick, and in silence that clock keeps running at its gentle
+    // pace BY DESIGN (the dot must still cross the strip) - so the flash was following a timer rather
+    // than the audio, which is exactly what the original requirement forbids: "IO48 should be related
+    // to the audio signal only (not related to a pattern)". The DOT still moves in silence; only the
+    // FLASH is gated on the music actually being present.
+    bool musicNow = !(L.lastReal == 0 || (now - L.lastReal) > 1500UL);
+
     // THE CLOCK TICK. Fires the beat when it is DUE, whatever the detector did - so a
     // missed onset can no longer stall the metronome and an off-beat cannot reverse it.
     // Until the clock has a period (no onsets yet) the onset path below still triggers.
-    if (L.active && L.ivMs >= 250 && L.clkNext != 0) {
+    if (L.active && L.ivMs >= 200 && L.clkNext != 0) {
+      // NO MUSIC, NO METRONOME: SLOW TO A GENTLE PACE (user, 21 Oct: "when there is no music
+      // playing, the dot should slow to a gentle pace of around 1 sec to traverse the length of
+      // the strip rather than keep time without music"). A beat overdue by more than 1.5 s means
+      // the music has stopped, so the clock relaxes to ONE TRAVERSE PER SECOND; the comb re-locks
+      // within about five onsets when the music comes back.
       unsigned long due = L.clkNext + beatOffsetMs;
       if ((long)(now - due) >= 0) {
-        if (i < NUM_PORTS && isChasePat(portCfg[i].pat) && portCfg[i].wrap) {
-          chaseBeat(i, now);            // ONE TRAVERSE PER CLOCK BEAT
-          L.clkFires++;
+        // IO48 FLASHES ONCE ON THE CLOCK BEAT, FOR EVERY PATTERN (21 Oct): "IO48 should be
+        // related to the audio signal only (not related to a pattern)". This is the music
+        // beat as the display receives it, so it is one flash per beat whatever is running.
+        if (i == 0) {
+          // ONE BEAT, ONE FLASH, ALL THE CHASE PORTS (21 Oct). Each listener used to keep its
+          // OWN clock and fire its own traverse - and those drifted apart on screen no matter
+          // how carefully the period was shared (measured: sP0 = 37 against sP1..sP3 = 2, and
+          // before that 11/51/51/51). A beat is a property of the MUSIC, not of a port, so it is
+          // fired ONCE here and applied to every Chase port in this same pass: they cannot
+          // diverge, because there is only one number to follow.
+          if (musicNow) rawBeatFlag = true;   // the FLASH is music only; the traverse is not
+          chaseTraverseStart(now);      // ONE TRAVERSE PER CLOCK BEAT, SHARED BY EVERY WRAP PORT
+          for (int p = 0; p < NUM_PORTS; p++) {
+            if (!portCfg[p].wrap) continue;
+            beatListen[p].clkFires++;
+          }
         }
         L.clkNext += L.ivMs;
         if ((long)(now - L.clkNext) > (long)L.ivMs) L.clkNext = now + L.ivMs;  // never flood
+        // THE TRAVERSE LASTS EXACTLY UNTIL THE NEXT CLOCK BEAT (21 Oct). It used to take
+        // the gap to the PREVIOUS trigger, which is not the same number: the phase steering
+        // moves clkNext, so the next beat can arrive sooner or later than the last one, and
+        // the traverse was then cut off mid-strip instead of landing - user: "the beat seems
+        // to land in the middle of the strip rather than at the ends". MEASURED on Donna
+        // Summer: the period was rock steady at 470 ms, so the fault was this lag, not the
+        // period. The dot is now given exactly the time that remains to the next beat.
+        if (i == 0) {
+          unsigned long toNext = (L.clkNext + beatOffsetMs > now)
+                                   ? (L.clkNext + beatOffsetMs - now) : L.ivMs;
+          // THE TRAVERSE IS TWO BEATS LONG (21 Oct). The user's four-count specification, in their
+          // own words: "It needs to fix 1 and 3 to the end of the strip and 2 & 4 to the middle of
+          // the strip." With ONE traverse per beat the dot is AT an end on every count, so a count
+          // can only ever be met by correcting the speed mid-strip - and those corrections alternated
+          // between the two landing points: "it is swapping between counts 1 & 3 and 2 & 4".
+          // Over TWO beats the dot crosses the strip exactly once, so it is AT an end on counts 1
+          // and 3 and AT the middle on counts 2 and 4 because the arithmetic puts it there. The
+          // per-frame recomputation in stepChase keeps it exact to the beat AFTER the next one, even
+          // though the phase steering moves the beats.
+          // THE LENGTH IS SHARED TOO. A length held per port is another way for two strips to
+          // disagree, so the one number every wrap port follows is set here, once.
+          if (toNext >= 120 && toNext <= 1200 && L.ivMs >= 120 && L.ivMs <= 1200) {
+            g_travIv = toNext + L.ivMs;      // to the next beat AND the one after it
+            for (int p = 0; p < NUM_PORTS; p++) {
+              if (!portCfg[p].wrap) continue;
+              chaseInterval[p] = g_travIv;   // mirror, so the logs and diagnostics stay readable
+            }
+          }
+        }
       }
     }
 
@@ -4955,37 +5153,79 @@ void advancePort(int port) {
   }
 }
 
+// ============================================================================================
+// THE SHARED TRAVERSE - ONE DECISION FOR EVERY WRAP-ON PORT (21 Oct).
+// user: "The led strips are drifting out of time still!" and "They MUST remain in sync!"
+// THE FAULT, and it took three instrumented rounds to corner: ONE clock fired the beats, but the
+// TRAVERSE was still decided per port in THREE separate places - the onset action (actOnBeat), the
+// clock (listeningStep) and the overdue/antifreeze re-arm (stepChase) - and each of them wrote that
+// one port's chaseTrigAt, chaseInterval, chaseFromPos and ledDirArr. Worse, the 45% debounce read
+// that port's OWN interval, so one port could count a beat the other threw away. Two identical
+// ports therefore took different trigger times (measured: sP0 37 against sP1..sP3 2, and 11/51/51/51
+// before that), slid out of step, and later slid back - "in sync for a while and then broke out of
+// sync again, and then got back into sync again".
+// THE FIX follows the rule already used for the shared onset hit (g_chaseOnsetHit, in the render
+// loop): decide ONCE per beat, and let every port render that one decision at its own scale. All
+// three sources now call chaseTraverseStart(); the call means "a beat happened", not "this port
+// moves".
+// The three numbers themselves are declared with the other chase state at the top of the
+// file, because listeningStep() reads g_travIv long before this point.
+
+// THE ONE PLACE A TRAVERSE BEGINS, for every wrap-ON port at once. Calling it twice within the
+// same millisecond is harmless and ignored, so the three sources cannot count one beat twice or
+// start two traverses - and the debounce below is shared, so no port can swallow a beat alone.
+static void chaseTraverseStart(unsigned long now) {
+  if (g_travAt != 0 && now == g_travAt) return;         // already started this millisecond
+  if (g_travAt != 0) {
+    unsigned long gap = now - g_travAt;
+    // THE SHARED DEBOUNCE, MEASURED AGAINST THE TRAVERSE (21 Oct). It was 45% - correct when a
+    // traverse was ONE beat, because 45% of 1 beat rejected a noise onset without rejecting the
+    // next real beat. With a TWO-beat traverse 45% is 0.9 of a beat, so a beat arriving a full beat
+    // later PASSED, every single beat started a new traverse, and the dot only ever covered the
+    // first half of its journey: user, "the led strips are only bouncing in the middle now and not
+    // extending to the edges ... only using 50% of the strip". Three quarters of a traverse (1.5
+    // beats) swallows the intermediate beat and lets the next real one through, so the dot gets its
+    // full crossing and lands on the true ends.
+    if (gap < (unsigned long)((g_travIv ? g_travIv : 500) * 75 / 100)) {
+      g_chaseSwallow++;
+      beatListen[0].nSwal++;                            // counted ONCE, on the reference port
+      return;
+    }
+    if (gap >= 150 && gap <= 4000) g_travIv = gap;
+  }
+  if (g_travIv == 0) g_travIv = 500;
+  g_travAt = now;
+  // The clock fires the traverse, so clkNext here is the beat that just became due: two
+  // periods on from it is the beat this traverse must land on. Without a clock yet (the onset
+  // path) the end is simply two periods from now.
+  {
+    unsigned long per0 = beatListen[0].ivMs ? beatListen[0].ivMs : 500;
+    g_travEnd = (beatListen[0].clkNext != 0)
+                  ? (beatListen[0].clkNext + beatOffsetMs + 2UL * per0)
+                  : (now + 2UL * per0);
+  }  // AIM FOR THE FAR END FROM WHERE PORT 0 IS. Port 0 is the reference for the shared decision, so
+  // both strips turn round on the same beat even if one had been nudged by an odd extra onset.
+  g_travDir = (ledPosArr[0] > (chaseMaxPos(0) / 2)) ? -1 : 1;
+  g_travFromFrac = (chaseMaxPos(0) > 0) ? ((float)ledPosArr[0] / (float)chaseMaxPos(0)) : 0.0f;
+  for (int p = 0; p < NUM_PORTS; p++) {
+    if (!portCfg[p].wrap) continue;
+    chaseTrigAt[p]   = now;                             // mirrored per port for the diagnostics
+    chaseInterval[p] = g_travIv;
+    chaseFromPos[p]  = ledPosArr[p];
+    ledDirArr[p]     = g_travDir;
+  }
+}
+
 // A CHASE TRIGGER - a real beat, a half-way beat, or an antifreeze pulse. This is the only
 // place a chase moves because of an EVENT; the level-driven movement is in stepChase().
 static void chaseBeat(int p, unsigned long now) {
   const int maxPos = chaseMaxPos(p);
   if (portCfg[p].wrap) {
-    // METRONOME. One reversal per beat, and the dot travels to the far end over the gap
-    // measured to the previous beat, so it lands as the next one arrives.
-    unsigned long gap = (chaseTrigAt[p] == 0) ? 0 : (now - chaseTrigAt[p]);
-    // DEBOUNCE. An extra onset part-way through a traverse used to reverse it, so the dot
-    // went back to the end it had come from - the "many times it moves back the same way"
-    // report. A trigger arriving before a FRACTION of the last measured beat is treated as
-    // noise and ignored, and an ignored trigger does NOT touch the timing.
-    // THE FRACTION IS 45 PERCENT, NOT 60 (21 Oct). MEASURED by simulating this exact rule
-    // over the onset records of four separate runs: at 0.60 the bad-beat rate (missed plus
-    // duplicated, per 100 beats) was 15.6, 23.0, 46.3 and 49.4; at 0.45 it was 7.8, 7.9,
-    // 12.8 and 16.0. 60 percent threw away 32 of 179 triggers in a 95 s section and nearly
-    // doubled the misses, because the onset stream is not perfectly spaced and 60 percent
-    // rejected legitimate beats. 0.45 was best across 0.35/0.40/0.45/0.50/0.55/0.60/0.65.
-    unsigned long minGap = chaseInterval[p] ? (chaseInterval[p] * 45 / 100) : 150;
-    if (chaseTrigAt[p] != 0 && gap < minGap) {   // INSTRUMENT: count it. The DECISION   // INSTRUMENT: count it. The DECISION
-      if (p < NUM_PORTS) beatListen[p].nSwal++;  // itself is unchanged - only the
-      g_chaseSwallow++;                          // counter is new.
-      return;
-    }
-    if (gap >= 150 && gap <= 4000) chaseInterval[p] = gap;
-    if (chaseInterval[p] == 0)     chaseInterval[p] = 500;
-    chaseTrigAt[p]  = now;
-    chaseFromPos[p] = ledPosArr[p];
-    // AIM FOR THE FAR END FROM WHEREVER THE DOT IS. Blindly alternating would send it back
-    // the way it came if an extra beat slipped through; aiming at the opposite end cannot.
-    ledDirArr[p] = (ledPosArr[p] > (maxPos / 2)) ? -1 : 1;
+    // THE SHARED TRAVERSE. Everything that used to live here was per-port - its own trigger
+    // time, its own length, its own start position and its own direction - and that is exactly
+    // what let two strips drift apart and back together. `p` is accepted and ignored: a wrap-ON
+    // beat is a property of the MUSIC, so every port renders the one shared decision.
+    chaseTraverseStart(now);
   } else {
     // NOT REACHED any more for a wrap-OFF chase: the football in stepChase() is level-driven, so
     // no beat or antifreeze trigger calls this branch on a wrap-OFF dot. It is left in place
@@ -5010,15 +5250,37 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     // used to clamp its progress at one interval, so a late beat left the dot sitting at the
     // far end waiting. A traverse overdue by more than 1.25 of its own interval now STARTS A
     // NEW ONE from wherever the dot is. The antifreeze re-arm remains the last resort.
-    unsigned long ivNow = chaseInterval[p] ? chaseInterval[p] : 500;
-    if (chaseTrigAt[p] == 0 ||
-        (now - chaseTrigAt[p]) > (ivNow + ivNow / 4) ||
-        (now - chaseTrigAt[p]) > (unsigned long)(antifreeze * 1000)) chaseBeat(p, now);
-    unsigned long iv = chaseInterval[p] ? chaseInterval[p] : 500;
-    unsigned long el = now - chaseTrigAt[p];
+    // THE RE-ARM IS SHARED, LIKE THE TRIGGER. Every port used to decide this for itself from its
+    // OWN interval, so a port whose interval was stale (a longer beat arriving) re-armed early and
+    // started a traverse of its own - the drift. One decision now, and the second call in the same
+    // frame is ignored by chaseTraverseStart().
+    unsigned long ivNow = g_travIv ? g_travIv : 500;
+    if (g_travAt == 0 ||
+        (now - g_travAt) > (ivNow + ivNow / 4) ||
+        (now - g_travAt) > (unsigned long)(antifreeze * 1000)) chaseTraverseStart(now);
+    unsigned long iv = g_travIv ? g_travIv : 500;
+    // TIMED TO THE NEXT CLOCK BEAT, RECOMPUTED EVERY FRAME. The phase steering pulls that
+    // beat earlier or later AFTER the trigger has happened, so a length fixed at the trigger
+    // is still cut short and the dot turns round mid-strip - user, 21 Oct: "beats still
+    // landing in the middle of the strip instead of at the ends". Taking the remaining time
+    // to the next beat each frame means the dot lands ON it however the beat moved.
+    // THE SHARED CLOCK, NOT THIS PORT OWN ONE (21 Oct). Reading beatListen[p] here gave each
+    // port a slightly different traverse length even though ONE clock fired them all, so the
+    // strips drifted apart and then came back together - user: "they remained in sync for a
+    // while and then broke out of sync again, and then got back into sync again". Listener 0
+    // owns the beat; every Chase port follows that one number.
+    // THE TRAVERSE'S OWN END TIME (21 Oct), fixed when it began - see g_travEnd. This USED to be
+    // recomputed here every frame, which is what produced the backward jumps: the length grew by a
+    // period mid-traverse and the position was recalculated behind the dot.
+    if (g_travEnd > g_travAt && (g_travEnd - g_travAt) <= 3000UL) iv = g_travEnd - g_travAt;
+    // THE PHASE COMES FROM THE SHARED TRAVERSE ONLY. Two ports can differ in LENGTH (different
+    // pixel counts) but never in PHASE, which is what "in sync" means on the strips.
+    unsigned long el = now - g_travAt;
     if (el > iv) el = iv;
-    int from = chaseFromPos[p];
-    int to   = (ledDirArr[p] > 0) ? maxPos : 0;
+    // FROM THE SHARED FRACTION, not this port's own remembered position. Scaled to this port's own
+    // length, so two ports of different size still start at the same point of the traverse.
+    int from = (int)(g_travFromFrac * (float)maxPos + 0.5f);
+    int to   = (g_travDir > 0) ? maxPos : 0;
     int np   = from + (int)(((long)(to - from) * (long)el) / (long)iv);
     ledPosArr[p] = (np < 0 || np > maxPos) ? 0 : np;      // clamped: see the note below
   } else {
@@ -5265,12 +5527,10 @@ void runLEDPattern() {
     g_syncDir[p] = ledDirArr[p];
     g_syncAcc[p] = (int32_t)(chaseAcc[p] * 100.0f);      // hundredths of a pixel
     g_syncAge[p] = (uint32_t)(now - ledStepMs[p]);        // ms since this port last stepped
-    // PAIR DIVERGENCE, port 0 against port 1 - the two the user runs on the same entry.
-    if (p == 1) {
-      int32_t d = ledPosArr[0] - ledPosArr[1];
-      if (d < 0) d = -d;
-      if (d > g_pairDiff) { g_pairDiff = d; g_pairA = ledPosArr[0]; g_pairB = ledPosArr[1]; g_pairRow = tlRow + 1; }
-    }
+    // PAIR DIVERGENCE IS MEASURED AFTER THIS LOOP, NOT HERE (21 Oct). Running it here compared port
+    // 0 - already stepped for this pass - against port 1, still holding the PREVIOUS pass's position,
+    // so it reported ONE FRAME'S MOVEMENT (4 with the strips provably together) and sent me chasing a
+    // divergence that was a measurement artefact. See the same-instant check after the loop.
     // PER-PORT STALENESS, three compares per port per frame: how long has this port's POSITION been
     // unchanged? A pause that shows on the strips is either a CPU hitch (see g_maxLoopUs) or a dot
     // that has stopped - and this is the only instrument that can tell them apart.
@@ -5326,6 +5586,17 @@ void runLEDPattern() {
     g_steps[p] += 1;                    // the pixels this port has ADVANCED (see g_steps)
     advancePort(p);
     anyDrew = true;
+  }
+
+  // PAIR DIVERGENCE, AT ONE INSTANT (21 Oct). Every port has been stepped by the time this runs, so
+  // a non-zero value is a REAL difference between the strips and not a frame delta. Reported against
+  // port 0, for every port, so a swap between any pair shows up here.
+  if (displayActive) {
+    for (int p = 1; p < NUM_PORTS; p++) {
+      int32_t d = ledPosArr[0] - ledPosArr[p];
+      if (d < 0) d = -d;
+      if (d > g_pairDiff) { g_pairDiff = d; g_pairA = ledPosArr[0]; g_pairB = ledPosArr[p]; g_pairRow = tlRow + 1; }
+    }
   }
 
   // One show per frame, never one per port.
@@ -6385,13 +6656,44 @@ void loop() {
     // 240V is NOT latched from the clock any more. The same detected onset drives
     // both displays (see the odfDisplayBeat block below), which also removes the
     // clock's sub-beat insertion - the reason the 240V had run so fast it blurred.
-    // IO48 is the RAW DETECTOR INDICATOR: flash on every detection, so the
-    // detector's behaviour can be judged directly (claps, transients, misses).
-    // The lights below follow the CLOCK, not these detections.
+    // IO48 IS THE BEAT INDICATOR (user, 21 Oct): one flash per beat that is ACTED ON - for
+    // the Chase metronome that is each traverse, i.e. each time the dot reaches the end of
+    // the strip; for the dot patterns, each reversal. It is a picture of the MUSIC beat as
+    // the lights receive it - driven from actOnBeat and the clock tick, never by a pattern
+    // timer, and never by a raw detection the lights did not act on.
     if (rawBeatFlag) {
       rawBeatFlag = false;
       digitalWrite(POWER_LED_PIN, HIGH);
-      powerLedOffAt = millis() + 60;
+      // VISIBLE AT LAST (21 Oct). 100 ms was too short to see: user, "it still barely flashes at
+      // all" - while the power-up and error blinks (500 ms, the same pin, the same diode) are
+      // clearly visible, which proves the hardware and puts the fault here. 300 ms registers, and
+      // it is capped at 40 percent of the CURRENT beat so two fast beats can never merge into one
+      // steady glow. In silence (the 1 s pace) that is the full 300 ms.
+      unsigned long per = beatListen[0].ivMs;
+      unsigned long fl  = 300;
+      if (per >= 120 && (per * 40 / 100) < fl) fl = per * 40 / 100;
+      if (fl < 60) fl = 60;
+      powerLedOffAt = millis() + fl;
+      g_io48Beats++;
+    }
+    // THE FLASH IS TURNED OFF HERE (21 Oct). It used to be turned off ONLY inside the 240V
+    // engine step (executePatternStep), so with the 240V display OFF - the normal case for
+    // these tests - nothing ever turned it off, and after the first beat IO48 stayed lit at
+    // its idle brightness. That is exactly the user report: "IO48 flashing very dimly, and
+    // still not on beat" - it was not flashing at all, it was permanently on.
+    // HOLD THE BEAT FLASH HIGH UNTIL ITS OWN END TIME (21 Oct). io48 counts every flash, and the
+    // power-up and error blinks (the same pin, the same diode) are clearly visible - so the hardware
+    // is proven and the pulse was instead being CUT SHORT by something else writing the pin in the
+    // same loop. The user saw a DARK led while /diag showed io48 == p0clk and climbing. From the
+    // moment a flash starts it OWNS the pin until the end time it set for itself: re-asserting here
+    // makes that true whatever else writes the pin, and it is still switched off exactly on time.
+    if (powerLedOffAt != 0) {
+      if ((long)(millis() - powerLedOffAt) < 0) {
+        if (digitalRead(POWER_LED_PIN) == LOW) digitalWrite(POWER_LED_PIN, HIGH);
+      } else {
+        digitalWrite(POWER_LED_PIN, LOW);
+        powerLedOffAt = 0;
+      }
     }
 
     // Hold the display event back by beatOffsetMs so the change lands in the
@@ -6492,7 +6794,11 @@ void loop() {
     statusOn = !statusOn;
     digitalWrite(POWER_LED_PIN, statusOn ? HIGH : LOW);
     statusBlinks--;
-    if (statusBlinks == 0) digitalWrite(POWER_LED_PIN, LOW);
+    // DO NOT BLANK THE BEAT FLASH (21 Oct). This runs on EVERY pass, so clearing the pin here
+  // turned the beat flash off in the same pass that set it, and IO48 was DARK however many
+  // beats were delivered - the user reported exactly that while io48 and p0clk in /diag were
+  // equal and climbing. Only blank when no beat flash is in progress.
+  if (statusBlinks == 0 && powerLedOffAt == 0) digitalWrite(POWER_LED_PIN, LOW);
   }
 
   // --- diagnostics ---

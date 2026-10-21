@@ -685,6 +685,39 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
             display: none;
             transform: translate(-50%, -50%);
         }
+    /* THE TUNED-DEFAULT LINE, SNAP AND RESTORE (21 Oct, user's own specification):
+       * the SAME COLOUR as the parameter box borders (var(--border-color)), not yellow;
+       * taller than the 30 px dot and spanning the whole 44 px slider, so it covers the
+         top and the bottom of it;
+       * drawn BEHIND the dot, not over it. A sibling drawn over a native slider always
+         covers the thumb, so the native track is made TRANSPARENT and the wrapper redraws
+         an identical track UNDERNEATH; the input is raised above the line, which puts the
+         line above the track and below the thumb - exactly the order asked for.
+       * its position is set from the DOT'S GEOMETRY (script), not from the fraction of
+         the width, because the thumb centre travels between width/2 and width-thumb/2 -
+         so at the default the line crosses the CENTRE of the dot.
+       Dragging near the line SNAPS to it, and the symbol restores it outright. */
+    .def-wrap { position: relative; display: block; }
+    .def-wrap::before {
+        content: ''; position: absolute; left: 0; right: 0; top: 50%; height: 8px;
+        margin-top: -4px; background: #2c2c2c; border: 1px solid var(--border-color);
+        border-radius: 4px; z-index: 0;
+    }
+    .def-mark {
+        position: absolute; top: 0; height: 44px; width: 4px; margin-left: -2px;
+        background: var(--border-color); border-radius: 1px;
+        pointer-events: none; z-index: 0;
+    }
+    .def-wrap input[type="range"] { position: relative; z-index: 1; }
+    .def-wrap input[type="range"]::-webkit-slider-runnable-track {
+        background: transparent; border-color: transparent;
+    }
+    .def-wrap input[type="range"]::-moz-range-track { background: transparent; }
+    .def-chip {
+        margin-top: 2px; padding: 0 6px; font-size: 0.9rem; line-height: 1.5;
+        border: 1px solid var(--border-color); border-radius: 8px;
+        background: transparent; color: var(--secondary-color);
+    }
     </style>
 </head>
 <body>
@@ -1028,8 +1061,12 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                         <!-- Lower edge of the band the beat detector listens to
                              (upper edge fixed at 250 Hz): raise it to reject
                              rumble and tighten onto the kick. -->
-                        <input type="range" id="paramFrequencyLED" min="20" max="100" step="1" value="60" oninput="liveParamChanged('LED')">
+                        <span class="def-wrap">
+                        <input type="range" id="paramFrequencyLED" min="20" max="100" step="1" value="60" oninput="audioSnapAndSend('LED')" onpointerdown="audioDragging=true" onpointerup="audioDragging=false">
+                        <i class="def-mark" id="defMarkFreqLED"></i>
+                        </span>
                         <span id="freqValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">60Hz</span>
+                        <button type="button" class="def-chip" onclick="audioRestoreDefault('freq')" title="restore the default">&#8634;</button>
                     </td>
                 </tr>
                 <tr id="prowLED-beatMult">
@@ -1047,8 +1084,12 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                         <!-- LEFT = fewer, only strong kicks. RIGHT = more beats,
                              catches quieter/denser music. GLOBAL: one detector
                              drives both the strips and the 240V display. -->
-                        <input type="range" id="paramBeatSens" min="0.01" max="1.00" step="0.01" value="0.20" oninput="liveParamChanged('LED')">
+                        <span class="def-wrap">
+                        <input type="range" id="paramBeatSens" min="0.01" max="1.00" step="0.01" value="0.20" oninput="audioSnapAndSend('LED')" onpointerdown="audioDragging=true" onpointerup="audioDragging=false">
+                        <i class="def-mark" id="defMarkBeatSens"></i>
+                        </span>
                         <span id="beatSensVal" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.20</span>
+                        <button type="button" class="def-chip" onclick="audioRestoreDefault('sens')" title="restore the default">&#8634;</button>
                     </td>
                 </tr>
             </tbody>
@@ -3587,7 +3628,12 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         fetch('/settings', { cache: 'no-store' })
             .then(r => r.json())
             .then(cfg => {
-                let savedTheme = (cfg.theme && themePresets[cfg.theme]) ? cfg.theme : 'Disco';
+                // THE STORED TUNED DEFAULTS, from the board: one source of truth for the slider marks,
+  // the snap targets and the chips. Applied before anything draws them.
+  if (cfg.defBeatSens !== undefined) AUDIO_DEF.beatSens = parseFloat(cfg.defBeatSens);
+  if (cfg.defFreq !== undefined)     AUDIO_DEF.freq     = parseInt(cfg.defFreq, 10);
+  audioDrawMarks();
+  let savedTheme = (cfg.theme && themePresets[cfg.theme]) ? cfg.theme : 'Disco';
                 // ALL FOUR THEMES adopt the device's stored colours. The device is the
                 // master on startup, so every theme must be loaded from it - otherwise
                 // the three it does not report keep stale browser values which are then
@@ -3702,6 +3748,83 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     // Crash diagnostics. Reports WHY the ESP32's previous run ended, how long it
     // survived and where it was when it died - read from /diag so the serial
     // port never has to be opened (opening it resets the board).
+    // ---- THE TUNED AUDIO DEFAULTS: mark, snap, restore, and FOLLOW THE BOARD ----
+    // MEASURED BY THE TUNING SESSION (21 Oct): Bass Sensitivity 0.08 (the fraction 0.5616
+    // of the music own novelty peak) and Frequency 61 Hz (the 61-250 Hz band the microphone
+    // actually hears). The values come from the board /settings as defBeatSens / defFreq,
+    // so the default lives in ONE place; the fallbacks here are only for older firmware.
+    let AUDIO_DEF = { freq: 61, beatSens: 0.08 };
+    let audioDragging = false;
+    // THE DOT IS 30 px WIDE AND 44 px TALL (see the CSS). Its CENTRE travels between half a
+    // dot from each end of the slider, so the line is placed from the DOT GEOMETRY, in
+    // pixels - not from the fraction of the width, which would leave it offset by up to
+    // half a dot at the ends. That is what puts the line through the CENTRE of the dot at
+    // the default value. Re-measured on every /diag poll, so a rotation stays correct.
+    const AUDIO_DOT_PX = 30;
+    function audioMarkPos(el, def) {
+        const lo = parseFloat(el.min), hi = parseFloat(el.max);
+        if (!(hi > lo)) return 0;
+        const w = el.clientWidth || 240;
+        const usable = (w > AUDIO_DOT_PX) ? (w - AUDIO_DOT_PX) : w;
+        return (AUDIO_DOT_PX / 2) + ((def - lo) / (hi - lo)) * usable;
+    }
+    function audioDrawMarks() {
+        const f = document.getElementById('paramFrequencyLED');
+        const mf = document.getElementById('defMarkFreqLED');
+        if (f && mf) mf.style.left = Math.round(audioMarkPos(f, AUDIO_DEF.freq)) + 'px';
+        const s = document.getElementById('paramBeatSens');
+        const ms = document.getElementById('defMarkBeatSens');
+        if (s && ms) ms.style.left = Math.round(audioMarkPos(s, AUDIO_DEF.beatSens)) + 'px';
+    }
+    // A STRONGER SNAP (user, 21 Oct: "I can just about feel the slider snapping to the default
+    // position, but it needs to be a little stronger please"): two steps on the sensitivity
+    // (0.02) and three on the frequency (3 Hz) - wide enough to feel, narrow enough to leave.
+    function audioSnap(el, def, steps) {
+        if (!el) return false;
+        const v = parseFloat(el.value);
+        const step = parseFloat(el.step) || 1;
+        if (Math.abs(v - def) <= Math.abs(step) * (steps || 2)) {
+            el.value = String(def);
+            return true;
+        }
+        return false;
+    }
+    function audioSnapAndSend(section) {
+        audioSnap(document.getElementById('paramBeatSens'), AUDIO_DEF.beatSens, 2);
+        audioSnap(document.getElementById('paramFrequencyLED'), AUDIO_DEF.freq, 3);
+        liveParamChanged(section);
+    }
+    function audioRestoreDefault(which) {
+        if (which === 'freq') {
+            const el = document.getElementById('paramFrequencyLED');
+            if (el) { el.value = String(AUDIO_DEF.freq); liveParamChanged('LED'); }
+        } else {
+            const el = document.getElementById('paramBeatSens');
+            if (el) { el.value = String(AUDIO_DEF.beatSens); liveParamChanged('LED'); }
+        }
+    }
+    function audioFollowBoard(j) {
+        if (!j || audioDragging) return;
+        audioDrawMarks();       // re-measure: a rotation or a resize moves the dot centre
+        const s = document.getElementById('paramBeatSens');
+        if (s && j.p0sens !== undefined) {
+            const want = parseFloat(j.p0sens);
+            if (isFinite(want) && Math.abs(parseFloat(s.value) - want) > 0.004) {
+                s.value = want.toFixed(2);
+                const v = document.getElementById('beatSensVal');
+                if (v) v.innerText = parseFloat(s.value).toFixed(2);
+            }
+        }
+        const f = document.getElementById('paramFrequencyLED');
+        if (f && j.v0fq !== undefined) {
+            const want = parseInt(j.v0fq, 10);
+            if (want > 0 && parseInt(f.value, 10) !== want) {
+                f.value = String(want);
+                const v = document.getElementById('freqValLED');
+                if (v) v.innerText = want + 'Hz';
+            }
+        }
+    }
     function fetchDiag() {
         fetch('/diag', { cache: 'no-store' })
             .then(r => r.json())
@@ -3716,7 +3839,8 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                 let msg = last + ' | UP ' + j.uptimeSec + 's, heap ' + j.freeHeap +
                           ', MIN ' + j.minFreeHeap + ', boots ' + j.boots +
                           ', nvsErase ' + j.erases + ', nvsFree ' + j.nvsFreeEntries + lk;
-                let e = document.getElementById('diagInfo');
+                audioFollowBoard(j);   // the sliders follow the BOARD, so a change made elsewhere shows
+  let e = document.getElementById('diagInfo');
                 if (e) e.innerText = msg;
                 note(msg);
 

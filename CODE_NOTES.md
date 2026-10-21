@@ -752,6 +752,68 @@ where a HIGH value is wanted. Splitting it is the clean fix if they fight again.
 
 **TRAP 3 - `white-space: nowrap` beats a fixed column width.** `.param-table td.name-col` was
 `nowrap` WITH `width: 130px`. A table cell cannot be narrower than its unwrappable content, so the
+### THE SWEEP IS ONE SHARED TRAVERSE, TWO BEATS LONG (21 Oct)
+
+The user's verdicts were "the led strips are drifting out of time still" and "They MUST remain in
+sync", and it took several rounds to reach the real cause. The instrumented lesson is worth more
+than the fix.
+
+**THE FAULT WAS THREE PER-PORT TRIGGER SOURCES, NOT THE CLOCK.** One clock had already been made to
+fire all the Chase ports, and the ports STILL drifted apart and back - "in sync for a while and then
+broke out of sync again, and then got back into sync again". Because the *beat* was shared but the
+*traverse* was not: the onset action (`actOnBeat`), the clock (`listeningStep`) and the overdue /
+antifreeze re-arm inside `stepChase` each wrote that one port's `chaseTrigAt`, `chaseInterval`,
+`chaseFromPos` and `ledDirArr`. Worse, the 45% debounce read that port's **own** interval, so one
+port could count a beat the other threw away. That is a guaranteed disagreement, whatever the clock
+does. Measured before: `sP0` 37 against `sP1..sP3` 2, and `11/51/51/51`.
+
+**THE RULE, and it is the same rule as the shared onset hit:** a beat is a property of the MUSIC,
+so there is ONE traverse and every wrap-ON port renders it at its own scale. All three sources now
+call `chaseTraverseStart()`, which is idempotent within a millisecond, and the trigger time, length,
+direction, debounce and start position are all decided once. Nothing per-port remains except the
+mirrors kept for the on-screen diagnostics.
+
+**THE TRAVERSE IS TWO BEATS LONG, which is the user's own four-count specification:** *"It needs to
+fix 1 and 3 to the end of the strip and 2 & 4 to the middle of the strip."* With ONE traverse per
+beat the dot is AT an end on every count, so a count can only ever be met by correcting the speed
+mid-strip - and those corrections alternated between the landing points, which the user saw as *"it
+is swapping between counts 1 & 3 and 2 & 4"*. Over two beats the dot crosses the strip exactly once,
+so the ends and the middle fall where the arithmetic puts them and no correction is needed.
+
+**THREE FAULTS FOLLOWED FROM THE TWO-BEAT CHANGE, ALL MINE, ALL MEASURED:**
+
+* **The debounce must be measured against the TRAVERSE.** 45% was right for a one-beat traverse; at
+  two beats it is 0.9 of a beat, so a beat arriving a full beat later **passed**, every beat started
+  a new traverse, and the dot only covered the first half of its journey - the user: *"only bouncing
+  in the middle now and not extending to the edges ... only using 50% of the strip"*. It is now 75%.
+  Proof in `/diag`: the position spread was 34-48 (middle only) and became 14-86 (the whole strip).
+* **A traverse has ONE end time, fixed when it starts.** Recomputing the length every frame as "the
+  beat after the next" looked harmless and was not: `clkNext` advances a whole period on every tick,
+  so mid-traverse the length grew from 2 beats to 3, and since position is
+  `from + (to - from) * elapsed / length`, the dot was thrown BACKWARDS and then carried on -
+  *"skipping LED s jumping backwards and then continuing in the same direction"*. With a fixed
+  divisor the position can only advance, so a backward step is impossible rather than unlikely.
+* **The instrument was lying about divergence.** `g_pairDiff` was computed INSIDE the port loop -
+  port 0 already stepped that pass, port 1 still holding the previous pass's position - so it
+  measured ONE FRAME'S MOVEMENT (4) and sent a whole round chasing a divergence that did not exist.
+  It is now computed after the loop, when every port has been stepped, and reads **0**. A torn read
+  is still visible in the per-port `sP0..sP3` because the web core samples them mid-write; the
+  trustworthy figure is `pairDiff`.
+
+**IO48: IT BELONGS TO THE AUDIO, AND THE FLASH OWNS THE PIN.** Two separate faults. It was flashed
+from the CLOCK tick, which keeps running in silence by design (the dot must still cross the strip) -
+so the user saw *"IO 48 is flashing like a clock to no music at all"*, which the original requirement
+forbids ("related to the audio signal only"). The flash is now gated on music actually being
+present, while the dot still moves in silence. Separately, the pulse was being cut to nothing by
+another writer in the same loop - `io48` counted every flash and the boot/error blinks (same pin,
+same diode) were clearly visible, which is how the hardware was cleared and the fault found. The
+flash now **owns the pin** from its start until its own end time and re-asserts it every pass.
+300 ms, capped at 40% of the current beat so fast beats cannot merge.
+
+**A LESSON ABOUT MY OWN TOOLING.** A colour test I ran posted `#00ff00` through `/live-tweak` - the
+same path the page uses, which SAVES - so green was written into the board's settings and survived
+reflashing, while the page went on showing the user's red. Nothing else in the tooling sends a
+colour. **Any test that goes through a saving endpoint changes the machine, not just the session.**
 long JS label "Cut Off Below Frequency" widened that column to about 200px and squashed the colour
 swatches beside it - which looked exactly like "the swatches are the wrong size", and two attempts
 to fix the SWATCHES made it worse. The column is `white-space: normal` + `overflow-wrap: anywhere`
