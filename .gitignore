@@ -1,4 +1,4 @@
-tmp_*.txt
+﻿tmp_*.txt
 *.zip
 *.bak
 board_log.txt
@@ -8,3 +8,10 @@ board_tail.txt
 board_settings.txt
 board_timeline.json
 board_playlist.json
+beat_t*_diag.csv
+beat_t*_onsets.txt
+beat_t*_trace.txt
+beat_t*_score.txt
+beat_t*_sweep.log
+beat_t*_sampler.log
+beat_t*.stop
