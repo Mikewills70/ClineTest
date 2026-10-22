@@ -36,6 +36,44 @@ Add-Type -Namespace W32 -Name Btn -MemberDefinition @'
 
 function NowMs { return [int]([Environment]::TickCount -band 0x7FFFFFFF) }
 
+# THE PRESS LOG AND THE CLOCK SYNC (22 Oct). The press log records EVERY press the moment it happens, on
+# the LAPTOP's clock - that is the whole point: the late reply on screen cannot corrupt it. The sync asks
+# the board for its own millis() and notes the laptop's time either side of the request, which is the
+# shared reference the two logs are aligned by afterwards.
+$script:logCsv  = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'beat1_taps_LABEL.csv'
+$script:syncCsv = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'beat1_sync_LABEL.csv'
+$script:syncN   = 0
+
+function SyncAt {
+  $w1 = [DateTime]::Now
+  try {
+    $raw = (Invoke-WebRequest ("http://" + $Board + "/now") -UseBasicParsing -TimeoutSec 12).Content.Trim()
+    $w2 = [DateTime]::Now
+    $board = [int]$raw
+    # NOTE: this board's web server is slow to REPLY (measured 70-1300 ms), and that delay is one-sided -
+    # it is the server reaching the request, not the network. So the board's millis() is best matched to
+    # the moment the REPLY arrived (w2), not the midpoint. Averaging several samples takes the worst of it
+    # out; the remaining bias is roughly half the typical delay, well inside the quarter beat the
+    # alignment needs.
+    Add-Content -Path $script:syncCsv -Value ("{0},{1}" -f $board, $w2.ToString('yyyy-MM-dd HH:mm:ss.fff'))
+    return $board
+  } catch {
+    return -1
+  }
+}
+
+# Several samples, so one slow reply cannot set the reference on its own.
+function Sync-Once {
+  $done = 0
+  for ($k = 0; $k -lt 5; $k++) {
+    if ((SyncAt) -ge 0) { $done++ }
+    Start-Sleep -Milliseconds 150
+  }
+  $script:syncN = $done
+  if ($done -eq 0) { return -1 }
+  return 0
+}
+
 function Send-Tap([int]$tMs) {
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   try {
@@ -81,7 +119,7 @@ if (-not $probe.ok) {
   Write-Host ''
 }
 
-$down = $false
+
 $n = 0
 $agree = 0
 $dis = 0
@@ -95,7 +133,12 @@ while ($true) {
   $isDown = (($state -band 0x8000) -ne 0)
   if ($isDown -and -not $down) {
     $n++
-    $r = Send-Tap (NowMs)
+    # THE PRESS TIME IS TAKEN HERE, BEFORE THE SEND (22 Oct). The reply may arrive a second later; that
+    # cannot touch this line. See the note at the top of the file.
+    $pressTick = NowMs
+    $pressWall = [DateTime]::Now
+    Add-Content -Path $script:logCsv -Value ("{0},{1},{2}" -f $n, $pressTick, $pressWall.ToString('HH:mm:ss.fff'))
+    $r = Send-Tap $pressTick
     $stamp = (Get-Date -Format 'HH:mm:ss.fff')
     if (-not $r.ok) {
       Write-Host ("  {0}  #{1,-3}  NO ANSWER ({2} ms)" -f $stamp, $n, $r.ms) -ForegroundColor Red

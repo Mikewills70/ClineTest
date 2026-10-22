@@ -1234,7 +1234,7 @@ static int           chaseFromPos[NUM_PORTS]  = {0};   // where this traverse st
 // The ring keeps the last few clock beats with the bar position the model gave each of them, plus the two
 // parity-band readings at that beat. A tap finds the NEAREST one and labels it - which is how the user's
 // press says "this beat is beat 1" without any dependence on how accurately they pressed.
-#define TAP_RING 24
+#define TAP_RING 512          // a whole run of beats, so the press log can be aligned afterwards
 static unsigned long g_beatRt[TAP_RING];   // when that beat fired
 static int8_t        g_beatRp[TAP_RING];   // the bar position the model gave it (0 = beat 1)
 static float         g_beatRs[TAP_RING];   // snare-band novelty at that beat
@@ -1251,6 +1251,10 @@ static int32_t       g_tapOff[7] = {0,0,0,0,0,0,0};
 static uint8_t       g_tapOffI = 0;
 static uint8_t       g_tapOffN = 0;
 static int32_t       g_tapOffMed = 0;   // the median offset currently in use, published for the log
+static int32_t       g_tapPairCli[64];  // every tap: the laptop time and the board arrival time,
+static int32_t       g_tapPairArr[64];  // so the two clocks can be aligned after the test
+static uint8_t       g_tapPairI = 0;
+static uint8_t       g_tapPairN = 0;
 
 static uint32_t g_tmFixed = 0;
 static uint32_t g_tmRej   = 0;
@@ -4595,7 +4599,7 @@ static void listeningStep() {
             g_beatRs[g_beatRi] = odfChain[4].novelty;
             g_beatRm[g_beatRi] = odfChain[5].novelty;
             g_beatRi = (uint8_t)((g_beatRi + 1) % TAP_RING);
-            if (g_beatRn < 250) g_beatRn++;
+            if (g_beatRn < 4000) g_beatRn++;
             // THE HALF-BEAT PHASE TEST - the question this session started with. THE MODEL IS BLIND TO
             // (The half-beat test and its correction lived here. Both were guesses at a clock PHASE
             // problem, and both were JUMPS the user could see. The clean timer follows every real beat
@@ -6479,6 +6483,39 @@ void applyMasterBrightness() {
 // spacebar!!!" So this handler LABELS a beat and does NOTHING ELSE. It never touches the clock, the
 // period, clkNext, or any timing value. It finds the nearest beat already DETECTED and remembers that the
 // user said "this one is beat 1" - which is exactly how an inaccurate press still identifies WHICH beat.
+// THE CLOCK SYNC (22 Oct). Returns this board's millis() as plain text. The script calls it and notes the
+// laptop's time either side of the request, so the offset between the two clocks can be measured - that
+// is the shared reference the afterwards alignment needs.
+void handleNow() {
+  server.send(200, "text/plain", String((unsigned long)millis()));
+}
+
+// THE BEAT LOG (22 Oct). Every detected beat with its millis() and the model's bar position, so the
+// press log can be aligned to the detector's own timeline AFTER the run rather than during it.
+void handleBeats() {
+  String o = "ms,bar,sn,md\n";
+  uint16_t n = (g_beatRn < TAP_RING) ? (uint16_t)g_beatRn : TAP_RING;
+  for (uint16_t k = 0; k < n; k++) {
+    uint16_t ix = (uint16_t)((g_beatRi + TAP_RING - n + k) % TAP_RING);
+    o += String((unsigned long)g_beatRt[ix]); o += ',';
+    o += String((int)g_beatRp[ix]);           o += ',';
+    o += String((double)g_beatRs[ix], 2);     o += ',';
+    o += String((double)g_beatRm[ix], 2);     o += '\n';
+  }
+  server.send(200, "text/plain", o);
+}
+
+// THE TAP PAIRS (22 Oct): every tap's laptop time and board arrival time, for the same alignment.
+void handlePairs() {
+  String o = "cli,arr\n";
+  for (uint8_t k = 0; k < g_tapPairN; k++) {
+    uint8_t ix = (uint8_t)((g_tapPairI + 64 - g_tapPairN + k) % 64);
+    o += String((long)g_tapPairCli[ix]); o += ',';
+    o += String((long)g_tapPairArr[ix]); o += '\n';
+  }
+  server.send(200, "text/plain", o);
+}
+
 void handleTap() {
   // THE PRESS TIME COMES FROM THE CLIENT (22 Oct). MEASURED: this server answers anywhere from 70 to
   // 1300 ms after a request, because it only replies when the main loop reaches it - so a press
@@ -6492,6 +6529,12 @@ void handleTap() {
     g_tapOff[g_tapOffI] = (int32_t)((int32_t)arr - (int32_t)cli);
     g_tapOffI = (uint8_t)((g_tapOffI + 1) % 7);
     if (g_tapOffN < 7) g_tapOffN++;
+    // THE PAIR OF CLOCKS, KEPT (22 Oct): the laptop's press time and this board's arrival time. The
+    // AFTERWARDS alignment needs the raw pairs, not just the median - see the note on /pairs.
+    g_tapPairCli[g_tapPairI] = (int32_t)cli;
+    g_tapPairArr[g_tapPairI] = (int32_t)arr;
+    g_tapPairI = (uint8_t)((g_tapPairI + 1) % 64);
+    if (g_tapPairN < 64) g_tapPairN++;
   }
   unsigned long nowMs = arr;
   if (g_tapOffN > 0 && cli > 0) {
@@ -7474,6 +7517,9 @@ void setup() {
   server.on("/diag", HTTP_GET, handleDiag);
   server.on("/trav", HTTP_GET, handleTrav);   // INSTRUMENT: traverse starts, RAM only
   server.on("/tap", HTTP_GET, handleTap);      // THE BEAT-1 TAP: labels a beat, times nothing
+  server.on("/now", HTTP_GET, handleNow);      // CLOCK SYNC: this board millis(), for the alignment
+  server.on("/beats", HTTP_GET, handleBeats);  // the detected beats, for the same
+  server.on("/pairs", HTTP_GET, handlePairs);  // the tap clock pairs, for the same
   server.on("/onsets", HTTP_GET, handleOnsets);   // INSTRUMENT: per-onset ring, RAM only
   server.on("/trace",  HTTP_GET, handleTrace);    // INSTRUMENT: 50 Hz level/novelty ring
   server.on("/leaktest", HTTP_GET, handleLeakTest);
