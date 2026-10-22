@@ -2208,15 +2208,22 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                           //              PARAM_ROW_DEFAULTS and keeps 0, which means NO KICK - the
                           //              minimum that greys Distance and Momentum, the Effect row's
                           //              own rule ever since 17 Oct.
-                          // Speed is seconds per pixel: the QUIET SPEED, the slow creep the dot keeps
-                          // up while nothing is being detected (user, 20 Oct). LIVE with wrap OFF;
-                          // greyed only by the metronome, which never reads it.
+                          // Speed is the IDLE pace, and LIVE for both wrap settings (21 Oct):
+                          //   WRAP OFF  seconds per pixel - the quiet creep the dot keeps up while
+                          //             nothing is detected (user, 20 Oct).
+                          //   WRAP ON   seconds for a full END-TO-END CROSSING, 0 = stopped - the
+                          //             pace the dot uses while no beat is detected, and only then.
+                          //             The beat still owns the pace whenever one is heard.
                           //   MOMENTUM 0-0.1 HERE, and only here (user, 20 Oct): this pattern gets a
                           //              short range while every other pattern stays 0-0.5. The
                           //              firmware's formula is unchanged, so 0.1 behaves exactly as
                           //              0.1 always did - this is a re-ranging of the control, nothing
                           //              more.
-                          range:  { speed: { min: 1, max: 10, step: 0.1 },
+                          // 0 IS NEW (21 Oct): with Wrap ON, Speed is seconds for a FULL CROSSING and
+                          // 0 means STOPPED - the dot holds position while no beat is detected. With
+                          // Wrap OFF the firmware still clamps to 1-10 seconds per pixel, so 0 changes
+                          // nothing there.
+                          range:  { speed: { min: 0, max: 10, step: 0.1 },
                                     momentum: { min: 0, max: 0.1, step: 0.01 },
                                     distance: { min: 1, max: 50, step: 1 } } },
         'Chase 10 - 1': { colour: ['colour'],
@@ -2351,17 +2358,17 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     }
 
     function updateChaseGreying() {
-        // Speed stays LIVE with wrap OFF (user, 20 Oct) - it is the QUIET SPEED, the rate the dot
-        // creeps at while nothing is detected. It is greyed ONLY by the metronome, which takes its
-        // pace from the beat and never reads it.
-        let chase = /^chase/i.test(String(selectedPatternNameLED || ''));
-        let wrap  = document.getElementById('paramWrapLED');
-        let sp    = document.getElementById('paramSpeedLED');
-        let row   = document.getElementById('prowLED-speed');
+        // SPEED IS LIVE FOR THE WRAP-ON CHASE TOO (21 Oct, user): "0 = stopped. The fastest it
+        // should move is the speed it currently travels at now when there is no beat detected -
+        // 1 second to go end to end of the strip." With Wrap ON it is SECONDS PER FULL CROSSING and
+        // it applies ONLY while no beat is being detected - the beat still owns the pace whenever
+        // one is heard. With Wrap OFF it stays the quiet speed it has always been, seconds per
+        // pixel. Nothing is greyed here any more: the metronome no longer owns the idle pace.
+        let sp  = document.getElementById('paramSpeedLED');
+        let row = document.getElementById('prowLED-speed');
         if (!sp) return;
-        let off = chase && wrap && wrap.checked;
-        sp.disabled = off;
-        if (row) row.style.opacity = off ? '0.4' : '1';
+        sp.disabled = false;
+        if (row) row.style.opacity = '1';
     }
 
     // THE EFFECT GATES ITS OWN PARAMETERS (user's requirement, 17 Oct - stated for Moving Dot

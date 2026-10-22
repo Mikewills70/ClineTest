@@ -1174,6 +1174,15 @@ static int           chaseFromPos[NUM_PORTS]  = {0};   // where this traverse st
 // renders it at its own scale. The per-port copies above are mirrors kept for the on-screen
 // diagnostics only. Declared HERE, with the rest of the chase state, because listeningStep()
 // reads g_travIv and the clock has to set the length the next traverse will use.
+static uint32_t      g_travStarts = 0;    // traverses started since boot (IDLE PACE diagnostics)
+// WHERE THE CLOCK PERIOD CAME FROM (21 Oct). TRUE = the silence block set it from the Speed
+// slider, FALSE = the tempo comb set it from detected onsets. The SOURCE is recorded rather
+// than inferred from the value, because a track whose beat period happens to equal the Speed
+// value (1000 ms at Speed 1, or 500 ms at Speed 0.5) would otherwise be mistaken for idle -
+// and the requirement is that Speed must NEVER touch the pattern while a beat is present.
+// The two writers are mutually exclusive: the comb runs on an onset, the silence block only
+// when nothing has been heard for 1.5 s.
+static bool          g_idlePace = true;
 static unsigned long g_travAt  = 0;      // when the current traverse started (0 = none yet)
 static unsigned long g_travIv  = 500;    // its length in ms
 static int           g_travDir = 1;      // +1 toward the far end, -1 toward pixel 0
@@ -1212,6 +1221,40 @@ static inline float chaseSpeed(int p) {
   if (!(s >= 1.0f)) s = 1.0f;              // NaN guard
   return 1.0f / s;
 }
+// THE IDLE PACE FOR A WRAP-ON CHASE: SECONDS FOR ONE FULL END-TO-END CROSSING (21 Oct).
+// User: "0 = stopped. The fastest it should move is the speed it currently travels at now when
+// there is no beat detected - 1 second to go end to end of the strip."
+//     speed 0  -> STOPPED, the dot holds position
+//     speed 1  -> 1000 ms per crossing - the fastest, and the value a Chase record already holds
+//     speed 10 -> 10000 ms per crossing, a slow creep
+// THE UNIT DEPENDS ON WRAP, for the Chase only: with wrap OFF Speed stays SECONDS PER PIXEL (see
+// chaseSpeed), where 1 s/px is a ~95 s crossing. With wrap ON it is seconds per CROSSING, which is
+// what the user asked for and which makes the top of the slider the gentle pace the metronome
+// already coasts at in silence.
+// Returns 0 when this is not a wrap-ON Chase, or when the speed is 0. The clock treats 0 as "not
+// applicable" and keeps its 1 s period; stepChase treats it as STOPPED (it tests the speed itself).
+// IS THE DOT STOPPED? A wrap-ON Chase whose Speed slider is at 0. This is the "0 = Stopped" case
+// the user asked for: the dot holds position while no beat is detected, and the beat still drives
+// it whenever one is heard (the caller checks the clock's period for that).
+static inline bool chaseStopped() {
+  return isChasePat(portCfg[0].pat) && portCfg[0].wrap && !(portCfg[0].speed > 0.0f);
+}
+// THE STOPPED PERIOD, and why it is not 1000 (21 Oct). The idle decision is made from the clock's
+// PERIOD, because the onset test flaps with room noise. A stopped dot therefore needs a period that
+// no music can produce, or "stopped" would be indistinguishable from music at 1000 ms (60 BPM) and
+// the dot would keep crossing. 60 s: the clock ticks once a minute while stopped, the dot holds,
+// and the first real onsets of the next track re-lock the comb and the period in the usual way.
+#define CHASE_STOPPED_MS 60000UL
+
+static inline unsigned long chaseIdleMs() {
+  if (!isChasePat(portCfg[0].pat) || !portCfg[0].wrap) return 0;
+  float s = portCfg[0].speed;
+  if (!(s > 0.0f)) return 0;                 // NaN guard, and the STOPPED case
+  if (s < 0.1f)  s = 0.1f;
+  if (s > 10.0f) s = 10.0f;
+  return (unsigned long)(s * 1000.0f + 0.5f);
+}
+
 static inline int chaseMaxPos(int p) {
   int m = NUM_LEDS_PER_STRIP - chaseDotLen(p);
   return m < 0 ? 0 : m;
@@ -3686,6 +3729,13 @@ static void diagBeatFields(JsonDocument &doc) {
   // multiplier that reaches the board but not the motion (the old fault) cannot hide again.
   doc["v0mu"] = portCfg[0].mult;                doc["v1mu"] = portCfg[1].mult;
   doc["travIv"] = (uint32_t)g_travIv;           // ms per crossing: two beats, or one at 2x
+  // THE IDLE PACE, so a wrong crossing time cannot be argued about: idleNow says whether the
+  // idle branch is running at all, idleMs is the crossing time the Speed slider asks for, and
+  // travN counts traverses started - far above 1/crossing means they are being re-started.
+  doc["idleNow"] = chaseIdleNow(millis()) ? 1 : 0;
+  doc["idlePace"] = g_idlePace ? 1 : 0;   // 1 = the period came from the Speed slider
+  doc["idleMs"]  = (uint32_t)chaseIdleMs();
+  doc["travN"]   = g_travStarts;
   // ---- MOVING DOT TELEMETRY, EVERY PORT (user, 20 Oct) ---------------------------------------
   // The Moving Dot fault is INTERMITTENT: "the moving dots did not stall - I don't understand why
   // the fault was there before but not now". A hand-timed poll cannot catch it, so every port
@@ -3823,6 +3873,13 @@ static unsigned long beatPeriodComb(const unsigned long *r, uint8_t n) {
   return (best >= 4) ? bestP : 0;
 }
 
+// IS THE METRONOME IDLE? (21 Oct) True when the detector has heard nothing for 1.5 s - the same
+// rule the clock already uses to drop to its gentle pace. While idle the dot crosses the strip at
+// the Speed slider's rate instead of following the beat. Placed here because it reads beatListen.
+static inline bool chaseIdleNow(unsigned long now) {
+  return (beatListen[0].lastReal == 0 || (now - beatListen[0].lastReal) > 1500UL);
+}
+
 static void listeningStep() {
   unsigned long now = millis();
   beatFired240 = false;
@@ -3918,7 +3975,7 @@ static void listeningStep() {
           // times per onset is what stalled the display (see the note in beatPeriodComb).
           unsigned long p = 0;
           if (i == 0) { p = beatPeriodComb(lin, cnt); }   // the shared value is set AFTER the median
-          else if (g_beatPeriodMs >= 200) { L.ivMs = g_beatPeriodMs; }
+          else if (g_beatPeriodMs >= 200) { L.ivMs = g_beatPeriodMs; g_idlePace = false; }
           if (p >= 200) {
             // A MEDIAN OVER THE LAST 3 COMB RESULTS. The comb occasionally returns a wrong
             // value for a single window (measured outliers of 350, 370 and 660 ms against a
@@ -3928,7 +3985,7 @@ static void listeningStep() {
             L.pHist[L.pIdx] = p;
             L.pIdx = (uint8_t)((L.pIdx + 1) % 3);
             if (L.pN < 3) L.pN++;
-            if (L.pN < 3) L.ivMs = p;
+            if (L.pN < 3) { L.ivMs = p; g_idlePace = false; }
             else {
               unsigned long a = L.pHist[0], b = L.pHist[1], c2 = L.pHist[2], mid;
               if (a > b) mid = (b > c2) ? b : ((a > c2) ? c2 : a);
@@ -4006,7 +4063,24 @@ static void listeningStep() {
     // fell back to the antifreeze. Now the clock starts at 1 s and keeps going at 1 s until
     // the music returns (user: "the dot should slow to a gentle pace of around 1 sec").
     if (L.active && (L.lastReal == 0 || (now - L.lastReal) > 1500UL)) {
-      L.ivMs = 1000;
+      // THE IDLE PACE COMES FROM THE SPEED SLIDER (21 Oct). This was a hard-coded 1 s clock
+      // period, and because a traverse is TWO of those periods the dot actually crossed in 2 s,
+      // not the "around 1 sec" the user asked for on 20 Oct. For a wrap-ON Chase the Speed
+      // slider is now SECONDS PER FULL CROSSING (0 = stopped), so the idle period IS the
+      // crossing time. 0 means "not a wrap-ON Chase" here, and the old 1 s stands.
+      unsigned long idleMs = chaseIdleMs();
+      // STOPPED gets a period no music can have, so the stop is unambiguous - see
+      // CHASE_STOPPED_MS. Without this, a stopped dot looked like music at 1000 ms.
+      g_idlePace = true;                     // the period below comes from the Speed slider
+  if (idleMs)                 L.ivMs = idleMs;
+      else if (chaseStopped())    L.ivMs = CHASE_STOPPED_MS;
+      else                       L.ivMs = 1000;
+      // A SHORTER PERIOD MUST PULL THE CLOCK IN (21 Oct). The clock advances clkNext by the
+      // period it had at the time, so after a stopped period (60 s) the next tick sat a MINUTE
+      // away and the new, shorter crossing was never applied - measured: back at speed 1 the dot
+      // resumed but travIv stayed at 60000. This only runs in silence, so a music lock is never
+      // disturbed by it.
+      if (L.clkNext != 0 && (long)(L.clkNext - now) > (long)L.ivMs) L.clkNext = now + L.ivMs;
       if (L.clkNext == 0) L.clkNext = now + 1000;
     }
     // IO48 IS THE MUSIC ONLY (21 Oct). User: "IO 48 is flashing like a clock to no music at all."
@@ -4068,7 +4142,21 @@ static void listeningStep() {
           // though the phase steering moves the beats.
           // THE LENGTH IS SHARED TOO. A length held per port is another way for two strips to
           // disagree, so the one number every wrap port follows is set here, once.
-          if (toNext >= 120 && toNext <= 1200 && L.ivMs >= 120 && L.ivMs <= 1200) {
+          // IDLE FIRST, AND OUTSIDE THE MUSIC GUARD (21 Oct). The guard on the else-if belongs to the
+          // MUSIC rule, where toNext is one beat and must fall inside 120-1200 ms. An IDLE crossing
+          // is set by the Speed slider and can be up to 10 s, so putting the idle branch inside that
+          // guard silently ignored every crossing longer than 1.2 s: the clock ran at 5 s while the
+          // dot kept a stale 2 s length. Measured on the board - speed 5 read travIv 2001 - and that
+          // is what this fixes.
+          // THE IDLE PACE IS DECIDED BY THE PERIOD, NOT BY THE ONSET TEST (21 Oct). chaseIdleNow()
+          // reads the detector's last onset and room noise flips it - measured idleNow alternating
+          // 0/1/0/1 on the board - so it cannot decide this. L.ivMs CAN: the silence block only ever
+          // writes it while the room is quiet, so it HOLDS the idle crossing through a stray onset,
+          // which is exactly the steady signal this needs.
+          unsigned long idleCfg = chaseIdleMs();
+          if (g_idlePace && idleCfg > 0) {
+            g_travIv = L.ivMs;                 // ONE idle crossing = the period the silence block set
+          } else if (toNext >= 120 && toNext <= 1200 && L.ivMs >= 120 && L.ivMs <= 1200) {
             // THE BEAT MULTIPLIER DOUBLES THE RESPONSE (21 Oct). It did NOTHING before, and the
             // reason is worth recording: the multiplier only ever armed a SUB-beat, and a sub-beat
             // is deliberately ignored by the wrap-ON branch of actOnBeat ("it would reverse the
@@ -4081,11 +4169,20 @@ static void listeningStep() {
             // 2 gives one crossing per beat, with the clock still restarting it on the beat so the
             // landings stay on the music. The board clamps the checkbox to 1 or 2, so no more is
             // needed; anything larger would need sub-beat triggers as well.
+            // MUSIC RULE: two beats per crossing, or one with the multiplier.
             g_travIv = (L.mult > 1) ? ((toNext + L.ivMs) / 2) : (toNext + L.ivMs);
-            for (int p = 0; p < NUM_PORTS; p++) {
-              if (!portCfg[p].wrap) continue;
-              chaseInterval[p] = g_travIv;   // mirror, so the logs and diagnostics stay readable
-            }
+          } else {
+            // NEITHER (21 Oct): the clock's period is outside the music range, so it IS an idle
+            // crossing and a stray onset must not change that. THIS BRANCH IS WHAT MAKES THE IDLE
+            // PACE RELIABLE: chaseIdleNow() reads the detector's last onset, and room noise flips it
+            // (measured idleNow alternating 0/1/0/1 on the board), so relying on that test alone left
+            // g_travIv STALE - and the traverse length then decayed by 0.75 on every early restart,
+            // measured 5000 -> 3750 -> 2812. The PERIOD is the honest signal: music is 120-1200 ms.
+            g_travIv = L.ivMs;
+          }
+          for (int p = 0; p < NUM_PORTS; p++) {
+            if (!portCfg[p].wrap) continue;
+            chaseInterval[p] = g_travIv;     // mirror, so the logs and diagnostics stay readable
           }
         }
       }
@@ -5215,9 +5312,17 @@ static void chaseTraverseStart(unsigned long now) {
       beatListen[0].nSwal++;                            // counted ONCE, on the reference port
       return;
     }
-    if (gap >= 150 && gap <= 4000) g_travIv = gap;
+    // THE MEASURED GAP REFINES THE LENGTH ONLY AT A MUSIC PERIOD (21 Oct). At an idle period the gap
+    // IS the idle crossing and the clock already publishes it; letting a gap measured from an early
+    // restart overwrite it is what fed the 0.75 spiral.
+    {
+      unsigned long idleCfg = chaseIdleMs();
+      if (!(g_idlePace && idleCfg > 0) &&
+          gap >= 150 && gap <= 12000) g_travIv = gap;
+    }
   }
   if (g_travIv == 0) g_travIv = 500;
+  g_travStarts++;                          // IDLE PACE diagnostics
   g_travAt = now;
   // The clock fires the traverse, so clkNext here is the beat that just became due: two
   // periods on from it is the beat this traverse must land on. Without a clock yet (the onset
@@ -5226,7 +5331,13 @@ static void chaseTraverseStart(unsigned long now) {
     unsigned long per0 = beatListen[0].ivMs ? beatListen[0].ivMs : 500;
     // The same TWO-BEAT nominal divided by the multiplier, so the fixed end and the length the
     // clock publishes can never disagree about how long a traverse lasts.
-    unsigned long travLen = (beatListen[0].mult > 1) ? (per0) : (2UL * per0);
+    // IDLE: the crossing time the Speed slider set, decided by the PERIOD for the same reason as the
+    // clock's decision above. MUSIC: two beats, or one with the multiplier. The clock publishes the
+    // same number, so they cannot disagree.
+    unsigned long idleCfg = chaseIdleMs();
+    unsigned long travLen = (g_idlePace && idleCfg > 0)
+                              ? idleCfg
+                              : ((beatListen[0].mult > 1) ? per0 : (2UL * per0));
     g_travEnd = (beatListen[0].clkNext != 0)
                   ? (beatListen[0].clkNext + beatOffsetMs + travLen)
                   : (now + travLen);
@@ -5281,7 +5392,13 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     // OWN interval, so a port whose interval was stale (a longer beat arriving) re-armed early and
     // started a traverse of its own - the drift. One decision now, and the second call in the same
     // frame is ignored by chaseTraverseStart().
-    unsigned long ivNow = g_travIv ? g_travIv : 500;
+        // STOPPED (21 Oct): no beat detected AND the Speed slider at 0. The dot holds position
+    // exactly where it is - the strip keeps its last frame, so it simply stops, which is
+    // what "0 (Stopped)" means. Nothing is drawn and nothing is transmitted.
+        // STOPPED: Speed at 0 and no music. Decided by the PERIOD for the same reason - the onset test
+    // flaps with room noise, and a dot that stopped and started would be worse than either.
+    if (chaseStopped() && g_idlePace) return false;
+unsigned long ivNow = g_travIv ? g_travIv : 500;
     if (g_travAt == 0 ||
         (now - g_travAt) > (ivNow + ivNow / 4) ||
         (now - g_travAt) > (unsigned long)(antifreeze * 1000)) chaseTraverseStart(now);
@@ -5299,7 +5416,7 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
     // THE TRAVERSE'S OWN END TIME (21 Oct), fixed when it began - see g_travEnd. This USED to be
     // recomputed here every frame, which is what produced the backward jumps: the length grew by a
     // period mid-traverse and the position was recalculated behind the dot.
-    if (g_travEnd > g_travAt && (g_travEnd - g_travAt) <= 3000UL) iv = g_travEnd - g_travAt;
+    if (g_travEnd > g_travAt && (g_travEnd - g_travAt) <= 12000UL) iv = g_travEnd - g_travAt;
     // THE PHASE COMES FROM THE SHARED TRAVERSE ONLY. Two ports can differ in LENGTH (different
     // pixel counts) but never in PHASE, which is what "in sync" means on the strips.
     unsigned long el = now - g_travAt;

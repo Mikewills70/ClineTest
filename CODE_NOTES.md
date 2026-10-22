@@ -849,6 +849,48 @@ WORKING, and it was misread as a fault until it was compared against the level.
 **TWO MEASUREMENT LESSONS, BOTH MINE.**
 
 * **A test through a SAVING endpoint changes the machine.** A colour check of mine posted `#00ff00` through
+### SPEED IS THE IDLE PACE FOR A WRAP-ON CHASE (21 Oct)
+
+User: *"I want to make that live again and it should control the speed of the dot when no beat is
+detected. This should be 0 (Stopped) to the current speed that it is moving at"* and, on the scale,
+*"0 = stopped. The fastest it should move is the speed it currently travels at now when there is no
+beat detected - 1 second to go end to end of the strip."*
+
+* The row was greyed by `updateChaseGreying()` for Chase + Wrap ON only; it is now live, and the
+  Chase's speed range starts at 0.
+* **MEANING: with Wrap ON, Speed is SECONDS FOR A FULL END-TO-END CROSSING** - 0 = stopped, 1 = the
+  fastest (1 s). With Wrap OFF it stays seconds per pixel, unchanged.
+* It applies **only while no beat is detected**. The beat case is untouched: the two-beat traverse,
+  the multiplier and the landings are unchanged, and the Speed value is not consulted.
+* Driven through the SHARED traverse, so the ports cannot drift apart while idling.
+* Verified in one pass: speed 0 -> `p0iv`/`travIv` 60000 with the position held; speed 1 -> 1000/1000
+  sweeping; speed 5 -> 5000/5000; and it recovers from stopped back to running.
+* This also corrects a **2x error**: the 20 Oct request was "around 1 sec to traverse the length of
+  the strip", but a traverse was TWO 1 s clock periods, so the dot actually crossed in 2 s. The
+  period IS the crossing time now.
+
+**FOUR COUPLINGS MADE THIS SLOW - all now closed, and each was only visible after a flash:**
+
+1. `toNext <= 1200` in the traverse-length guard silently ignored any idle crossing longer than
+   1.2 s (speed 5 read `travIv 2001`).
+2. `g_travIv` then went STALE, and a gap measured from an early restart decayed it x0.75 each time
+   (measured 5000 -> 3750 -> 2812).
+3. The idle test cannot be the detector's last onset: room noise flips it (measured `idleNow`
+   alternating 0/1/0/1).
+4. The clock advances `clkNext` by the period it had at the time, so after the stopped period (60 s)
+   the next tick sat a MINUTE away and the new crossing was never applied.
+
+**THE IDLE SOURCE FLAG.** `g_idlePace` records **where the period came from** - TRUE from the silence
+block, FALSE from the tempo comb - instead of comparing its value. Without it, a track whose beat
+period equals the Speed value (1000 ms at Speed 1, or 500 ms at Speed 0.5) would be mistaken for
+idle and the BEAT case would take the idle crossing. The two writers are mutually exclusive (the
+comb runs on an onset, the silence block only when nothing has been heard for 1.5 s), so the flag is
+as stable as the period itself.
+
+**STOPPED NEEDS A PERIOD NO MUSIC CAN HAVE** (`CHASE_STOPPED_MS` = 60000), because 1000 ms is a
+legal music period (60 BPM) and would be indistinguishable from a stopped dot.
+
+New `/diag` fields: `idleNow`, `idleMs`, `idlePace`, `travN`.
   `/live-tweak` - the same path the page uses, which saves - so green was written into the board's settings and
   survived reflashing while the page went on showing the user's red. Prefer read-only checks, and expect any tweak
   to persist.
