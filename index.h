@@ -2219,11 +2219,11 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                           //              firmware's formula is unchanged, so 0.1 behaves exactly as
                           //              0.1 always did - this is a re-ranging of the control, nothing
                           //              more.
-                          // 0 IS NEW (21 Oct): with Wrap ON, Speed is seconds for a FULL CROSSING and
-                          // 0 means STOPPED - the dot holds position while no beat is detected. With
-                          // Wrap OFF the firmware still clamps to 1-10 seconds per pixel, so 0 changes
-                          // nothing there.
-                          range:  { speed: { min: 0, max: 10, step: 0.1 },
+                          // THE RANGE IS 0 TO 1 (21 Oct, user): "1 to the speed of the dot moving end
+                          // to end in 1s". With Wrap ON the value is CROSSINGS PER SECOND - 0 = stopped,
+                          // 1 = one full end-to-end crossing per second, which is the fastest. With
+                          // Wrap OFF the firmware still reads it as 1-10 seconds per pixel.
+                          range:  { speed: { min: 0, max: 1, step: 0.05 },
                                     momentum: { min: 0, max: 0.1, step: 0.01 },
                                     distance: { min: 1, max: 50, step: 1 } } },
         'Chase 10 - 1': { colour: ['colour'],

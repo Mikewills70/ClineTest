@@ -1224,9 +1224,11 @@ static inline float chaseSpeed(int p) {
 // THE IDLE PACE FOR A WRAP-ON CHASE: SECONDS FOR ONE FULL END-TO-END CROSSING (21 Oct).
 // User: "0 = stopped. The fastest it should move is the speed it currently travels at now when
 // there is no beat detected - 1 second to go end to end of the strip."
-//     speed 0  -> STOPPED, the dot holds position
-//     speed 1  -> 1000 ms per crossing - the fastest, and the value a Chase record already holds
-//     speed 10 -> 10000 ms per crossing, a slow creep
+//     speed 0    -> STOPPED, the dot holds position
+//     speed 1    -> 1000 ms per crossing - one FULL crossing per second: the FASTEST, and the value
+//                   a Chase record already holds
+//     speed 0.5  -> 2000 ms per crossing
+//     speed 0.2  -> 5000 ms per crossing
 // THE UNIT DEPENDS ON WRAP, for the Chase only: with wrap OFF Speed stays SECONDS PER PIXEL (see
 // chaseSpeed), where 1 s/px is a ~95 s crossing. With wrap ON it is seconds per CROSSING, which is
 // what the user asked for and which makes the top of the slider the gentle pace the metronome
@@ -1250,9 +1252,8 @@ static inline unsigned long chaseIdleMs() {
   if (!isChasePat(portCfg[0].pat) || !portCfg[0].wrap) return 0;
   float s = portCfg[0].speed;
   if (!(s > 0.0f)) return 0;                 // NaN guard, and the STOPPED case
-  if (s < 0.1f)  s = 0.1f;
-  if (s > 10.0f) s = 10.0f;
-  return (unsigned long)(s * 1000.0f + 0.5f);
+  if (s > 1.0f) s = 1.0f;                    // 1 = one FULL crossing per second: the fastest
+  return (unsigned long)(1000.0f / s + 0.5f);   // 1 -> 1000 ms, 0.5 -> 2000 ms, 0.2 -> 5000 ms
 }
 
 static inline int chaseMaxPos(int p) {
@@ -3998,6 +3999,13 @@ static void listeningStep() {
             // "ports 1 and 2 went out of sync"). MEASURED: sP0..sP3 were equal (44/44/44/44) until
             // the clock locked, then spread to 11/51/51/51.
             if (i == 0) g_beatPeriodMs = L.ivMs;
+            // A SHORTER PERIOD MUST PULL THE CLOCK IN, whoever set it (21 Oct). The clock
+            // advances clkNext by the period it had at the time, so a period that SHRINKS -
+            // after a stopped 60 s period, or a tempo change - would leave the next tick far in
+            // the future and the dot unable to move at all. MEASURED: after Speed 0 the clock
+            // sat a minute away and the dot did not move to music. This is the music path; the
+            // silence block has its own copy for the idle path.
+            if (L.clkNext != 0 && (long)(L.clkNext - now) > (long)L.ivMs) L.clkNext = now + L.ivMs;
           }
         }
         // THE ONSET STEERS THE CLOCK, IT DOES NOT TRIGGER THE METRONOME (21 Oct).

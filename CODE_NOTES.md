@@ -856,15 +856,19 @@ detected. This should be 0 (Stopped) to the current speed that it is moving at"*
 *"0 = stopped. The fastest it should move is the speed it currently travels at now when there is no
 beat detected - 1 second to go end to end of the strip."*
 
-* The row was greyed by `updateChaseGreying()` for Chase + Wrap ON only; it is now live, and the
-  Chase's speed range starts at 0.
-* **MEANING: with Wrap ON, Speed is SECONDS FOR A FULL END-TO-END CROSSING** - 0 = stopped, 1 = the
-  fastest (1 s). With Wrap OFF it stays seconds per pixel, unchanged.
+* The row was greyed by `updateChaseGreying()` for Chase + Wrap ON only; it is now live.
+* **THE RANGE IS 0 TO 1, AND WITH WRAP ON THE VALUE IS CROSSINGS PER SECOND** - 0 = stopped,
+  1 = one full end-to-end crossing per second, which is the FASTEST. The user was explicit: *"1 to
+  the speed of the dot moving end to end in 1s"*. The first attempt used 0-10 SECONDS, which put
+  the fastest setting at the BOTTOM of the slider and was wrong. `chaseIdleMs()` is now
+  `1000 / speed` (1 -> 1000 ms, 0.5 -> 2000 ms, 0.2 -> 5000 ms). With Wrap OFF the value is still
+  read as 1-10 seconds per pixel, unchanged.
 * It applies **only while no beat is detected**. The beat case is untouched: the two-beat traverse,
   the multiplier and the landings are unchanged, and the Speed value is not consulted.
 * Driven through the SHARED traverse, so the ports cannot drift apart while idling.
-* Verified in one pass: speed 0 -> `p0iv`/`travIv` 60000 with the position held; speed 1 -> 1000/1000
-  sweeping; speed 5 -> 5000/5000; and it recovers from stopped back to running.
+* Verified in one pass: speed 0 -> `p0iv`/`travIv` 60000 with the position held; speed 0.5 ->
+  2000/2000; speed 1 -> 1000/1000 sweeping. With music playing: `idlePace` 0, `p0iv` 442 (the track)
+  and `travIv` 884 = 2 x the music period - the beat behaviour intact and the Speed value ignored.
 * This also corrects a **2x error**: the 20 Oct request was "around 1 sec to traverse the length of
   the strip", but a traverse was TWO 1 s clock periods, so the dot actually crossed in 2 s. The
   period IS the crossing time now.
@@ -886,6 +890,15 @@ period equals the Speed value (1000 ms at Speed 1, or 500 ms at Speed 0.5) would
 idle and the BEAT case would take the idle crossing. The two writers are mutually exclusive (the
 comb runs on an onset, the silence block only when nothing has been heard for 1.5 s), so the flag is
 as stable as the period itself.
+
+**A STOPPED PERIOD BROKE THE MUSIC CASE - and this is the one to remember.** The clock advances
+`clkNext` by the period it had at the time, so once the 60 s stopped period was set, the next tick
+sat a MINUTE away. The pull-in that fixes that was only in the silence block, and the silence block
+is skipped the moment music is present - so with music playing the clock never ticked and the dot
+could not move at all. User: *"you have totally destroyed the effect we worked so hard to perfect
+yesterday! The dot no longer moves to music at all!!!"* MEASURED at the time: `v0sp=0`, `p0iv=60000`,
+`p0clk=86`, `sP0` frozen at 54 while `p0ons=94` and `aBlvl` showed audio present. The pull-in is now
+on the MUSIC path too, so a period that shrinks can never leave the clock waiting, whoever set it.
 
 **STOPPED NEEDS A PERIOD NO MUSIC CAN HAVE** (`CHASE_STOPPED_MS` = 60000), because 1000 ms is a
 legal music period (60 BPM) and would be indistinguishable from a stopped dot.
