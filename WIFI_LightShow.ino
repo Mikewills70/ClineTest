@@ -1174,7 +1174,106 @@ static int           chaseFromPos[NUM_PORTS]  = {0};   // where this traverse st
 // renders it at its own scale. The per-port copies above are mirrors kept for the on-screen
 // diagnostics only. Declared HERE, with the rest of the chase state, because listeningStep()
 // reads g_travIv and the clock has to set the length the next traverse will use.
-static uint32_t      g_travStarts = 0;    // traverses started since boot (IDLE PACE diagnostics)
+// THE HALF-BEAT DEAD ZONE (22 Oct). The steering's 1/3..2/3 window protects against a SINGLE
+// off-beat onset - correctly - but an error of about half a beat falls inside it, so once the grid
+// lands there it can NEVER be corrected and the dot sits in the centre of the strip on every beat.
+// MEASURED: onsPos mid-strip in 34 of 66 rows while beatPos was at the ends and travPer was 100.
+// A track with genuine off-beat hits ALTERNATES its onsets between beat and off-beat, so its error
+// is not CONSISTENTLY half a beat - a run of them therefore means the grid is simply wrong.
+#define HALF_RUN_LIMIT 4          // consecutive dead-zone onsets before the grid is moved
+static uint8_t  g_halfRun = 0;    // the current run of them
+// THE PLL TRIM (22 Oct). A persistent, slowly-accumulated correction to the BEAT PERIOD, in ms.
+// The comb search supplies the rough tempo; this supplies the last fraction of a percent that the
+// comb cannot resolve. Without it the clock runs fractionally fast for ever and the phase walks.
+static int32_t  g_pllTrim = 0;
+// Clamp the trim to an eighth of the period, so a bad run of onsets can never wreck the tempo.
+static unsigned long pllPeriod(unsigned long base) {
+  long t = g_pllTrim;
+  long lim = (long)(base / 8);
+  if (t >  lim) t =  lim;
+  if (t < -lim) t = -lim;
+  long v = (long)base + t;
+  return (v > 60) ? (unsigned long)v : base;
+}
+static uint32_t g_halfRe  = 0;    // how many times the grid has been moved by half a beat
+static uint32_t g_travStarts = 0;
+// TRAVERSE INSTRUMENTS (22 Oct, read-only - they change no behaviour). A clock beat is the
+// instant the previous traverse ends and the next begins, so the START POSITION IS THE DOT
+// POSITION AT THE BEAT: at an end (0 or 1000 per-mille) when traverses complete, near 500 when
+// beats land mid-strip. These two name the cause directly:
+//   travPer  - traverse length at the last start as a % of the beat. 100 = one beat (the Beat
+//              Multiplier ON), 200 = two beats (OFF). 200 WHILE ON means the multiplier is lost.
+//   travDone - how far the PREVIOUS traverse had got when this one started, %. 100 = completed,
+//              ~50 = cut off at the halfway point, which is a beat landing in the middle.
+static int32_t  g_tPer  = -1;
+static int32_t  g_tDone = -1;
+static unsigned long g_travPaceLast = 0;   // the pace the last crossing was given (22 Oct)
+// THE SWING: how much of the strip each crossing covers, per-mille (22 Oct). It is the full 1000
+// in steady music and SHRINKS through a disturbance - which is the correction, not a fault.
+// THE PARITY-BAND ONSETS (22 Oct). Chains 4 (snare 200-2000 Hz) and 5 (mid 1000-4000 Hz) exist only
+// to answer "which phase is beat 1". The AUDIO core stamps their onsets; the RENDER core compares
+// each stamp to the kick grid, because the grid lives there. In this music the snare/clap is on
+// 2 and 4, so the phase the snare AVOIDS is beat 1 and 3 - a direct measurement, not an inference.
+volatile uint32_t g_parAt[2]   = {0, 0};   // the last onset stamp of each parity band
+volatile uint32_t g_parSeq[2]  = {0, 0};   // how many onsets it has produced
+static   uint32_t g_parSeen[2] = {0, 0};   // the last sequence the render core has counted
+static   uint32_t g_snOnGrid = 0, g_snOffGrid = 0;   // snare onsets on / off the kick grid
+// THE BAR-PHASE MODEL (22 Oct). The professional answer to "which beat is beat 1".
+// Krebs/Boeck/Widmer (ISMIR 2015, "An Efficient State Space Model for Joint Tempo and Meter
+// Tracking") show the trick: the TEMPO is already known (our comb), so the only unknown is the
+// BAR POSITION - a four-state model advanced once per beat. madmom implements it, and BeatNet
+// (ISMIR 2021) is the state of the art, feeding the same idea from a learned activation.
+// THE LESSON FROM BOTH: the phase must be ACCUMULATED in a state model that prefers to stay
+// put, never flipped by a threshold - which is exactly what the half-beat escape got wrong.
+// The observation is a DOWNBEAT ACTIVATION, because the kick band cannot supply one: in
+// four-on-the-floor the kick is identical on all four beats. The cues that DO carry beat 1 are
+// the SNARE (on 2 and 4, so its ABSENCE marks 1 and 3) and the harmonic change (chords move on
+// beat 1). Both are measured by the parity bands already.
+static float    g_barP[4]   = {0.25f, 0.25f, 0.25f, 0.25f};  // the phase belief
+static int      g_barPos    = 0;      // the most likely bar position, 0..3
+static int32_t  g_barConf   = 25;     // its confidence, percent
+static int32_t  g_dbAct100  = 0;      // the last downbeat activation, x100
+static uint32_t g_barBeats  = 0;      // beats fed into the model
+static uint32_t g_barStable = 0;      // consecutive beats the position has not changed
+static float    g_dbBeatAcc = 0.0f, g_dbMidAcc = 0.0f;   // the activation on beats / on midpoints
+static float    g_dbBeatMean = 0.0f, g_dbMidMean = 0.0f;  // an HONEST EMA of the same two values
+static uint32_t g_dbBeatN = 0, g_dbMidN = 0;              // how many samples each
+static uint32_t g_halfShift = 0;      // times the grid has been moved half a beat
+static float    g_snHold = 0.0f, g_mdHold = 0.0f;   // the PEAK since the last sample
+static bool     g_halfDone = false;   // kept for the log, but no longer blocks a correction
+static unsigned long g_halfLast = 0;  // the last correction, so a cooldown stops any bouncing
+// IS THE BEAT SETTLED? (22 Oct) The clock may drive the crossing - and its beats may reverse the
+// dot - only once the TEMPO has held still for a few beats. Before that the estimate is warm-up
+// junk, and driving the crossing from it is what stalled the dot at both ends during the intro.
+static bool          g_beatSettled = false;
+static unsigned long g_setPrev = 0;
+static uint32_t      g_setRun  = 0;
+static uint32_t      g_arrRevs = 0;   // crossings ended by the dot REACHING the end, not by a beat
+static float    g_snNormPeak = 0.0f, g_mdNormPeak = 0.0f;   // slow peaks for the two cues
+static float    g_dbMin = 1.0f, g_dbMax = 0.0f;   // the OBSERVED range of the raw activation
+static   uint32_t g_mdOnGrid = 0, g_mdOffGrid = 0;   // mid onsets on / off the kick grid
+static int32_t  g_swingLast = -1;
+static int32_t  g_swRing[32] = {0};
+static uint8_t  g_swIdx = 0, g_swN = 0;
+static int32_t  g_tfLast = -1;   // last start position, per-mille of the strip
+static uint32_t g_tGapB = 0;     // clock beats between the last two starts
+static uint32_t g_tG1 = 0, g_tG2 = 0, g_tG3p = 0;   // starts that came 1, 2, 3+ beats later
+static uint32_t g_tLastClk = 0;
+static bool     g_tHaveClk = false;
+// THE DOT POSITION AT EVERY CLOCK BEAT (22 Oct). travFromLast only records ACCEPTED starts, so
+// a beat swallowed by the debounce is invisible - and that is where the fault must be: the
+// accepted starts all measured at the ends while the user saw the dot in the centre. This is
+// recorded in the clock tick itself, so EVERY beat is seen, accepted or swallowed.
+static int32_t  g_bpLast = -1;     // position at the last clock beat, per-mille
+// THE DOT AT EACH DETECTED ONSET (22 Oct). beatPos measures the dot at the BOARD beat, which
+// is blind to a phase error against the MUSIC - and that is what the eye judges. This records
+// the dot where the music actually hits: ~0/~1000 = the phase is right, ~500 = the board beat
+// is half a beat from the music, which with the multiplier on puts the dot in the centre.
+static int32_t  g_onPos = -1;
+static int32_t  g_onRing[32] = {0};
+static uint8_t  g_onIdx = 0, g_onN = 0;
+static int32_t  g_bpRing[32] = {0};
+static uint8_t  g_bpIdx = 0, g_bpN = 0;
 // WHERE THE CLOCK PERIOD CAME FROM (21 Oct). TRUE = the silence block set it from the Speed
 // slider, FALSE = the tempo comb set it from detected onsets. The SOURCE is recorded rather
 // than inferred from the value, because a track whose beat period happens to equal the Speed
@@ -3261,11 +3360,16 @@ static void fastBeatCheck() {
 // in band energy) and a sequence number. Who acts on that is decided by the PATTERN,
 // in the render loop, against its own threshold - see the listening step there.
 // ---------------------------------------------------------------------------
-#define ODF_CHAINS 4
+#define ODF_CHAINS 6    // 0 = the kick band, 1-3 listeners, 4 = snare, 5 = mid (22 Oct)
 struct OdfChain {
   bool  used = false;
   float hpHz = ODF_HP_HZ;      // this chain's band lower edge
   float aLo  = 0.0f;           // its high-pass coefficient (derived from hpHz)
+  // THE LOW-PASS IS PER CHAIN NOW (22 Oct). It used to be shared (odfAHi, fixed at 250 Hz), so a
+  // chain could only vary its bottom edge - fine while every band was a kick band, useless for a
+  // snare or mid band whose whole point is the TOP of the range.
+  float lpHz = ODF_LP_HZ;      // this chain's band upper edge
+  float aLp  = 0.0f;           // its low-pass coefficient (derived from lpHz)
   // Filter state: the same six one-poles as the baseline, per chain.
   float hp1 = 0, hp1Prev = 0, hp2 = 0, hp2Prev = 0;
   float lp1 = 0, lp2 = 0, lp3 = 0, lp4 = 0;
@@ -3497,6 +3601,30 @@ void handleTrace() {
 
 // Find or allocate a chain for a band. Chain 0 IS the baseline band, so a request
 // that matches it SHARES it - the normal case, and why the usual count is one chain.
+// THE PARITY BANDS (22 Oct): two fixed extra chains, always live, whose only job is to say WHERE
+// BEAT 1 IS. The kick band is 40-250 Hz, which its own comment describes as "keeps the kick,
+// rejects snare/hat/vocal" - so the one signal that marks 2 and 4 was filtered out before the
+// detector ever saw it. That is precisely why the grid could sit on 1&3 or 2&4 with nothing to
+// tell them apart. These restore the missing evidence:
+//   chain 4  SNARE/CLAP  200-2000 Hz - in this music the backbeat is on 2 and 4
+//   chain 5  MID         1000-4000 Hz - chord and melody changes mark beat 1
+// Called after the listeners have taken their own chains, and idempotent.
+void odfAuxBands() {
+  if (ODF_CHAINS < 6) return;
+  odfChain[4].hpHz = 200.0f;  odfChain[4].lpHz = 2000.0f;
+  odfChain[5].hpHz = 1000.0f; odfChain[5].lpHz = 4000.0f;
+  for (int c = 4; c < ODF_CHAINS; c++) {
+    if (odfChain[c].used) continue;
+    odfChain[c].aLo = odfBandCoeff(odfChain[c].hpHz);
+    odfChain[c].aLp = 0.0f;                 // recomputed at the next frame boundary
+    odfChain[c].hp1 = odfChain[c].hp1Prev = odfChain[c].hp2 = odfChain[c].hp2Prev = 0;
+    odfChain[c].lp1 = odfChain[c].lp2 = odfChain[c].lp3 = odfChain[c].lp4 = 0;
+    odfChain[c].winMax = odfChain[c].prevWin = 0;
+    odfChain[c].used = true;
+    odfChainUse |= (1u << c);
+  }
+}
+
 int chainForBand(float hz) {
   hz = constrain(hz, 20.0f, 100.0f);
   if (fabsf(hz - odfChain[0].hpHz) < 0.5f) return 0;
@@ -3526,6 +3654,8 @@ void odfConfigureChains() {
   odfChain[0].used = true;
   odfChain[0].hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
   odfChain[0].aLo  = odfBandCoeff(odfChain[0].hpHz);
+  odfChain[0].lpHz = ODF_LP_HZ;
+  odfAuxBands();                           // the two parity bands are always live (22 Oct)
   for (int c = 1; c < ODF_CHAINS; c++) {
     if (odfChain[c].used) continue;        // an in-use extra chain keeps its band
     odfChain[c].hpHz = 0.0f;
@@ -3538,7 +3668,10 @@ void odfConfigureChains() {
 
 // Give every listener its band, threshold and multiplier FROM ITS OWN PATTERN.
 void rebuildListening() {
-  for (int c = 1; c < ODF_CHAINS; c++) odfChain[c].used = false;
+  // THE LISTENERS' CHAINS ARE CLEARED, BUT THE PARITY BANDS ARE NOT (22 Oct): chains 4 and 5 belong
+  // to the beat-1 discriminator, not to any listener, so they must survive this and stay live.
+  for (int c = 1; c < ODF_CHAINS && c < 4; c++) odfChain[c].used = false;
+  for (int c = 4; c < ODF_CHAINS; c++) odfChain[c].used = true;
   odfConfigureChains();
 
   for (int p = 0; p < NUM_PORTS; p++) {
@@ -3877,13 +4010,160 @@ static unsigned long beatPeriodComb(const unsigned long *r, uint8_t n) {
 // IS THE METRONOME IDLE? (21 Oct) True when the detector has heard nothing for 1.5 s - the same
 // rule the clock already uses to drop to its gentle pace. While idle the dot crosses the strip at
 // the Speed slider's rate instead of following the beat. Placed here because it reads beatListen.
+// THE PACE IN FORCE, in ms, for ONE traverse (22 Oct). This is the ONE place it is decided, so the
+// clock's published length, the traverse's fixed end and the mid-traverse re-time cannot disagree:
+//   IDLE (no beat detected) -> the Speed slider's crossing time (0 when stopped)
+//   MUSIC                  -> ONE beat with the Beat Multiplier ON, TWO with it OFF
+static inline unsigned long chasePaceRaw() {
+  unsigned long idle = chaseIdleMs();
+  if (g_idlePace && idle > 0) return idle;
+  unsigned long per = beatListen[0].ivMs;
+  if (per >= 120 && per <= 1200) return (beatListen[0].mult > 1) ? per : (2UL * per);
+  return idle ? idle : (per ? per : 500);      // an odd period: the idle pace, or the period itself
+}
+
+// THE PACE GOVERNOR (22 Oct). The pace only controls the DISPLAY AREA - with the reversal driven by
+// the beat it can no longer affect the TIMING - so it is safe to take several beats to get it right.
+// That is what makes this work, and it is also what gives the tempo estimate and the beat classifier
+// time to settle before the dot commits to them.
+//   WARM-UP: for the first PACE_WARMUP_BEATS after music arrives the target stays at the SLIDER's
+//   pace, so the dot eases in at a speed it already knows rather than jumping to a tempo estimate
+//   that is still warming up.
+//   RAMP: after that the target becomes the beat-derived pace and the pace closes at most
+//   PACE_RAMP_PCT of the remaining gap per beat - about four beats to arrive, and never a lurch.
+//   LOSS: when the beat is lost the same ramp carries it back down to the slider's pace, so a quiet
+//   patch decelerates instead of snapping.
+// The number of steady beats before the clock is trusted to drive the crossing and to reverse the dot.
+#define SETTLED_BEATS     4
+#define PACE_WARMUP_BEATS 4
+#define PACE_RAMP_PCT    35
+static unsigned long g_paceNow    = 0;    // the pace actually in use
+static unsigned long g_paceTarget = 0;    // where it is heading this beat
+static uint32_t      g_paceClk    = 0;    // the clock beat the ramp last advanced on
+static uint32_t      g_paceLastClk = 0;   // when the ramp itself last stepped
+static uint32_t      g_musicBeats = 0;    // beats since music arrived - the warm-up counter
+static bool          g_paceWasIdle = true;
+
+static inline unsigned long chasePaceMs() {
+  unsigned long raw  = chasePaceRaw();
+  unsigned long idle = chaseIdleMs();
+  // the warm-up counter runs on the clock's beats, and resets whenever the music is lost
+  uint32_t clk = beatListen[0].clkFires;
+  if (g_idlePace) { g_musicBeats = 0; g_paceWasIdle = true; }
+  else if (g_paceWasIdle) { g_musicBeats = 0; g_paceWasIdle = false; }
+  if (clk != g_paceClk) {
+    g_paceClk = clk;
+    if (!g_idlePace && g_musicBeats < 250) g_musicBeats++;
+  }
+  // the target: the slider's pace during warm-up, the beat-derived pace after it
+  g_paceTarget = (g_musicBeats < PACE_WARMUP_BEATS && idle > 0) ? idle : raw;
+  if (g_paceNow == 0) g_paceNow = g_paceTarget;
+  // advance the ramp once per BEAT, so its rate does not depend on how often this is called
+  if (clk != g_paceLastClk) {
+    g_paceLastClk = clk;
+    long gap = (long)g_paceTarget - (long)g_paceNow;
+    g_paceNow = (unsigned long)((long)g_paceNow + (gap * PACE_RAMP_PCT) / 100);
+    if (g_paceNow < 60) g_paceNow = 60;              // never a degenerate pace
+  }
+  return g_paceNow ? g_paceNow : raw;
+}
+
 static inline bool chaseIdleNow(unsigned long now) {
   return (beatListen[0].lastReal == 0 || (now - beatListen[0].lastReal) > 1500UL);
+}
+
+// WHERE THE PARITY BANDS LAND (22 Oct). Each snare/mid onset is compared to the KICK GRID: near a
+// grid beat is ON it, about half a beat away is OFF it. Whichever phase the snare avoids is beat 1
+// and 3 - so this single count answers 1&3 versus 2&4 with no inference from strength.
+// THE RAW DOWNBEAT ACTIVATION (22 Oct), from the two parity bands, each normalised against its own
+// slow peak so no user setting is involved. Factored out because it is now sampled at TWO places in
+// the beat: on the clock's beats, and on the MIDPOINTS between them. That second sample is the whole
+// point - see the half-beat phase test.
+static float dbActRaw() {
+  float sn = g_snHold, md = g_mdHold;   // the PEAK since the last sample, not the instant
+  g_snHold = 0.0f;  g_mdHold = 0.0f;    // and clear it for the next half beat
+  // The peaks are maintained per frame (see the peak-hold block in odfEvaluate); reading them here
+  // and NOT updating them is what makes the ratio vary.
+  float snN = (g_snNormPeak > 0.5f) ? (sn / g_snNormPeak) : 0.0f;
+  float mdN = (g_mdNormPeak > 0.5f) ? (md / g_mdNormPeak) : 0.0f;
+  if (snN > 1.0f) snN = 1.0f;  if (snN < 0.0f) snN = 0.0f;
+  if (mdN > 1.0f) mdN = 1.0f;  if (mdN < 0.0f) mdN = 0.0f;
+  float db = 0.75f * (1.0f - snN) + 0.25f * mdN;
+  if (!(db >= 0.0f && db <= 1.0f)) db = 0.0f;
+  return db;
+}
+
+// ONE BEAT INTO THE BAR-PHASE MODEL. snareNorm and midChangeNorm are 0..1, each already normalised
+// against its own slow peak, so no user setting is involved. Called once per CLOCK BEAT.
+static void barPhaseStep(float db) {
+  g_dbAct100 = (int32_t)(db * 100.0f + 0.5f);
+  // NORMALISE IT TO ITS OWN OBSERVED RANGE (22 Oct). MEASURED: dbAct only spans 22 to 80, so an
+  // observation built straight from it sees a 3x spread and the belief never locks - over 197
+  // samples barPos wandered 0,1,2 with barConf stuck at 25-40, which meant g_barStable never
+  // reached 8, which meant the escape gate never engaged, which meant halfRe climbed to 11 and
+  // the grid bounced. That chain IS the drift. Stretching the observed range to 0..1 turns a 3x
+  // spread into the discrimination the model needs.
+  if (db < g_dbMin) g_dbMin = db;   else g_dbMin += (db - g_dbMin) * 0.002f;
+  if (db > g_dbMax) g_dbMax = db;   else g_dbMax += (db - g_dbMax) * 0.002f;
+  float dbN = db;
+  if (g_dbMax - g_dbMin > 0.15f) dbN = (db - g_dbMin) / (g_dbMax - g_dbMin);
+  if (dbN < 0.0f) dbN = 0.0f;  if (dbN > 1.0f) dbN = 1.0f;
+  // THE FORWARD PASS. Each beat advances the position by one, with a small chance of a phase slip so
+  // the model CAN correct a wrong phase - but only when sustained evidence earns it. That slip
+  // probability IS the "prefers to stay put" property, and it is what stops the bouncing.
+  // 0.02 let the belief spread ~20% over ten beats, enough to wash out a weak observation. 0.004
+  // is the "prefers to stay put" term doing its job.
+  const float SLIP = 0.004f;
+  float next[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (int i = 0; i < 4; i++) {
+    next[(i + 1) & 3] += g_barP[i] * (1.0f - SLIP);
+    for (int j = 0; j < 4; j++) next[j] += g_barP[i] * (SLIP / 4.0f);
+  }
+  // OBSERVATION MODEL: position 0 expects the downbeat; position 2 a weaker one; positions 1 and 3
+  // are the off-beats, where the snare lives.
+  // SHARPER (22 Oct): position 0 (beat 1) expects the strongest downbeat, position 2 (beat 3) a
+  // weaker one, and positions 1 and 3 are the SNARE beats - 2 and 4 - so they expect the WEAKEST
+  // downbeat. The old curve only spanned 0.46 to 0.84; this one spans 0.25 to 0.755 and does so over
+  // the normalised activation, so the ratio between a beat-1 candidate and a snare-beat candidate is
+  // now several times rather than 1.8.
+  const float obs[4] = { 0.02f + 0.98f * dbN, 0.85f - 0.80f * dbN,
+                         0.15f + 0.70f * dbN, 0.85f - 0.80f * dbN };
+  float sum = 0.0f;
+  for (int i = 0; i < 4; i++) { next[i] *= obs[i]; sum += next[i]; }
+  if (sum > 0.0f) for (int i = 0; i < 4; i++) g_barP[i] = next[i] / sum;
+  else            for (int i = 0; i < 4; i++) g_barP[i] = 0.25f;
+  int best = 0;
+  for (int i = 1; i < 4; i++) if (g_barP[i] > g_barP[best]) best = i;
+  // LOCKED? (22 Oct) A position that survives several beats in a row is the model telling us the
+  // phase is settled. That is what the half-beat escape below checks before it is allowed to
+  // move the grid - a threshold scheme bounces, a locked model does not.
+  if (best == g_barPos && g_barBeats > 4) { if (g_barStable < 9999) g_barStable++; }
+  else                                    g_barStable = 0;
+  g_barPos  = best;
+  g_barConf = (int32_t)(g_barP[best] * 100.0f + 0.5f);
+  g_barBeats++;
+}
+
+static void parityPhaseCount() {
+  for (int b = 0; b < 2; b++) {
+    uint32_t seq = g_parSeq[b];
+    if (seq == g_parSeen[b]) continue;
+    g_parSeen[b] = seq;
+    unsigned long per = beatListen[0].ivMs;
+    if (!(per >= 200 && per <= 1200) || beatListen[0].clkNext == 0) continue;
+    long d = (long)g_parAt[b] - (long)beatListen[0].clkNext;
+    d %= (long)per;
+    if (d < 0) d += (long)per;                       // the phase of this onset within the beat
+    bool onGrid = (d < (long)per / 4) || (d > (long)(per * 3) / 4);
+    if (b == 0) { if (onGrid) g_snOnGrid++; else g_snOffGrid++; }
+    else        { if (onGrid) g_mdOnGrid++; else g_mdOffGrid++; }
+  }
 }
 
 static void listeningStep() {
   unsigned long now = millis();
   beatFired240 = false;
+  parityPhaseCount();                     // INSTRUMENT: where the parity bands landed (22 Oct)
   bool anyReal = false;        // did ANY listener take a real beat this pass?
   // INSTRUMENT: accumulate the onset ONCE per pass and record it once, with a mask of the
   // listeners that took it. All listeners on a chain share the novelty and the threshold,
@@ -3942,6 +4222,25 @@ static void listeningStep() {
           stamp = (unsigned long)ch.riseAtMs;
         g_beatSeenAt = stamp;                   // the SHARED onset stamp (see g_chaseOnsetHit)
         unsigned long gapNow = (L.lastReal && stamp > L.lastReal) ? (stamp - L.lastReal) : 0;
+        // THE IDLE PACE ENDS AT THE FIRST REAL ONSET (22 Oct). It used to end only when the tempo
+        // comb had re-locked - about five onsets - so after a quiet patch the crossings stayed at the
+        // Speed slider length for two or three beats while the music ran four times faster, and the dot
+        // reversed mid-strip. The silence block sets this while nothing is heard; this clears it the
+        // instant something is, so the very next beat re-bases the crossing at the music pace and the
+        // dot is back on an end ONE BEAT later - as fast as it can physically be.
+        g_idlePace = false;
+    // THE DOT AT THIS ONSET (22 Oct) - see the note on g_onPos. Recorded once per onset, not once
+    // per listener, and at the ONSET ITSELF rather than after the display offset.
+    if (i == 0) {
+      int m0 = chaseMaxPos(0);
+      int32_t op = (m0 > 0) ? (int32_t)(((long)ledPosArr[0] * 1000L) / (long)m0) : 0;
+      if (op < 0) op = 0;
+      if (op > 1000) op = 1000;
+      g_onPos = op;
+      g_onRing[g_onIdx] = op;
+      g_onIdx = (uint8_t)((g_onIdx + 1) & 31);
+      if (g_onN < 32) g_onN++;
+    }
         L.prevReal = L.lastReal;
         L.lastReal = stamp;                     // the interval is now strength-independent
         // THE LOCKED INTERVAL follows only a PLAUSIBLE beat (within 20 percent), so one
@@ -3986,12 +4285,12 @@ static void listeningStep() {
             L.pHist[L.pIdx] = p;
             L.pIdx = (uint8_t)((L.pIdx + 1) % 3);
             if (L.pN < 3) L.pN++;
-            if (L.pN < 3) { L.ivMs = p; g_idlePace = false; }
+            if (L.pN < 3) { L.ivMs = pllPeriod(p); g_idlePace = false; }
             else {
               unsigned long a = L.pHist[0], b = L.pHist[1], c2 = L.pHist[2], mid;
               if (a > b) mid = (b > c2) ? b : ((a > c2) ? c2 : a);
               else       mid = (a > c2) ? a : ((b > c2) ? c2 : b);
-              L.ivMs = mid;
+              L.ivMs = pllPeriod(mid);   // the comb gives the rough tempo, the PLL trims the rest
             }
             // THE SHARED PERIOD IS THE FINAL, SMOOTHED ONE - not the raw comb output. It was
             // published BEFORE the 3-value median, so listener 0 ran at one period and the other
@@ -4026,10 +4325,69 @@ static void listeningStep() {
             long err = (long)stamp - (long)L.clkNext;
             long q   = (long)(L.ivMs / 3);      // +-1/3 of a beat: wider than before, and
                                                 // still clear of the off-beat at 1/2
-            if (err >= -q && err <= q)
+            if (err >= -q && err <= q) {
+              g_halfRun = 0;                     // a clean error: the grid is on the music
               L.clkNext = (unsigned long)((long)L.clkNext + err / 4);      // pull a quarter
+              // AND CORRECT THE RATE (22 Oct). This is the half of the loop that was missing. A
+              // persistent phase error means the PERIOD is wrong, not the phase, so the same error is
+              // fed slowly into the period. err is (the onset - the predicted beat), so if the lights
+              // are running AHEAD of the music the error is positive and the period lengthens. The
+              // gain is deliberately slow (1/24) so the loop settles rather than hunting, and the
+              // clamp in pllPeriod stops a bad run of onsets from wrecking the tempo.
+              // REVERTED (22 Oct). It HUNTED: "I can see lots of corrections happening, but the main
+              // thing I notice is the beat is no longer hitting at the ends of the strips... the timing
+              // is just wrong." A rate change moves the phase, so feeding the phase error into the
+              // period fought the phase pull instead of damping it. The trim stays at 0, which makes
+              // pllPeriod return the base period, so the clock behaves exactly as before the PLL.
+              // THE RATE CORRECTION, DISCIPLINED (22 Oct). The first attempt HUNTED - it drove the period
+              // to 307 ms - because the phase error from EVERY nearby onset went into the integral,
+              // including noisy ones and off-beats. USER: "the dot returned to the centre of the strip and
+              // started relearning the timing (even though it had been spot on previously)". That is the
+              // clock's phase walking, and it only gets fixed AFTER it has drifted.
+              // Gated three ways this time: only while the tempo is SETTLED, only for onsets within a
+              // TWELFTH of a period of the beat (so off-beats at half a period and general junk are
+              // excluded), a much smaller gain, and the stored trim is clamped as well.
+              if (g_beatSettled) {
+                // A SIXTH, not a twelfth: wide enough to keep working while the phase is out, still far
+                // inside the half-beat where the off-beats live.
+                long pLim = (long)(L.ivMs / 6);
+                if (err >= -pLim && err <= pLim) {
+                  // 1/8, not 1/64. Measured reasoning: a 5% tempo error is ~25 ms per beat, which at
+                  // 1/64 gains 0.4 ms per beat - about 63 beats to correct, during which the phase walks
+                  // past two-thirds of a beat and the missed-beat re-phase can land on an off-beat. At
+                  // 1/8 the same error is corrected in about eight beats, before it can get there.
+                  g_pllTrim += (int32_t)(err / 8);
+                  long tLim = (long)(L.ivMs / 6);
+                  if (g_pllTrim >  tLim) g_pllTrim =  (int32_t)tLim;
+                  if (g_pllTrim < -tLim) g_pllTrim = -(int32_t)tLim;
+                }
+              }
+            }
             else if (err > (long)(L.ivMs * 2 / 3) && err <= (long)(L.ivMs * 5 / 4))
               L.clkNext = stamp + L.ivMs;     // the predicted beat was MISSED: re-phase here
+            else {
+              // THE 1/3..2/3 WINDOW, BOTH SIGNS (22 Oct). One of these is an off-beat and must not
+              // move the grid; but a RUN of them means the grid itself is half a beat out. The run is
+              // counted and, at HALF_RUN_LIMIT, the grid is moved onto the music - which is safe
+              // because genuine off-beat hits alternate, so they cannot produce a sustained run.
+              long ae = (err < 0) ? -err : err;
+              if (ae >= (long)(L.ivMs / 3) && ae <= (long)(L.ivMs * 2 / 3)) {
+                if (g_halfRun < 250) g_halfRun++;
+                // ONLY WHILE THE BAR PHASE IS NOT LOCKED (22 Oct). The user: "it drifted into the dot in
+                // the middle after a long time of getting it right" - that is this escape firing when it
+                // should not. Once the bar model has held its position for several beats the phase is
+                // SETTLED, so a run of dead-zone onsets is simply the off-beat being hit, and moving the
+                // grid then is the bounce. The run keeps counting, so the escape is still available the
+                // moment the phase unlocks.
+                if (g_halfRun >= HALF_RUN_LIMIT && g_barStable < 8) {
+                  L.clkNext = stamp + L.ivMs;    // the grid was half a beat out: move it onto the music
+                  g_halfRun = 0;
+                  g_halfRe++;
+                }
+              } else {
+                g_halfRun = 0;                   // far outside: an anomaly, not a half-beat error
+              }
+            }
             // THE 0.25-0.75 WINDOW IS THE OFF-BEAT AND MUST NOT MOVE THE GRID (21 Oct).
             // MEASURED: an off-beat onset lands 0.5 of a period after the prediction, and
             // treating it as a late beat RE-PHASED the clock onto it - then the real beats,
@@ -4080,7 +4438,10 @@ static void listeningStep() {
       // STOPPED gets a period no music can have, so the stop is unambiguous - see
       // CHASE_STOPPED_MS. Without this, a stopped dot looked like music at 1000 ms.
       g_idlePace = true;                     // the period below comes from the Speed slider
-  if (idleMs)                 L.ivMs = idleMs;
+        // THE TRIM IS A MUSIC-TEMPO CORRECTION, so it must not survive the music stopping - a stale
+        // trim carried into another track would start that track fractionally out.
+        if (idleMs) { g_pllTrim = 0; }
+        if (idleMs)                 L.ivMs = idleMs;
       else if (chaseStopped())    L.ivMs = CHASE_STOPPED_MS;
       else                       L.ivMs = 1000;
       // A SHORTER PERIOD MUST PULL THE CLOCK IN (21 Oct). The clock advances clkNext by the
@@ -4121,7 +4482,91 @@ static void listeningStep() {
           // fired ONCE here and applied to every Chase port in this same pass: they cannot
           // diverge, because there is only one number to follow.
           if (musicNow) rawBeatFlag = true;   // the FLASH is music only; the traverse is not
+          // IS THE BEAT SETTLED YET? Computed BEFORE the crossing starts, so the crossing uses it.
+          // This is the governor's warm-up seen from the other side: the same few beats in which the
+          // tempo estimate and the beat classifier are still finding their feet.
+          {
+            unsigned long sp = beatListen[0].ivMs;
+            if (g_setPrev && sp) {
+              unsigned long sd = (sp > g_setPrev) ? (sp - g_setPrev) : (g_setPrev - sp);
+              if (sd * 100UL <= g_setPrev * 10UL) { if (g_setRun < 250) g_setRun++; }   // within 10%
+              else                                  g_setRun = 0;
+            }
+            g_setPrev = sp;
+            g_beatSettled = (g_setRun >= SETTLED_BEATS);
+            if (g_idlePace) { g_setRun = 0; g_beatSettled = false; }
+          }
           chaseTraverseStart(now);      // ONE TRAVERSE PER CLOCK BEAT, SHARED BY EVERY WRAP PORT
+          // THE DOT AT THIS BEAT (22 Oct), recorded for EVERY beat - see the note on g_bpLast.
+          {
+            int m0 = chaseMaxPos(0);
+            int32_t bp = (m0 > 0) ? (int32_t)(((long)ledPosArr[0] * 1000L) / (long)m0) : 0;
+            if (bp < 0) bp = 0;
+            if (bp > 1000) bp = 1000;
+            g_bpLast = bp;
+            g_bpRing[g_bpIdx] = bp;
+            g_bpIdx = (uint8_t)((g_bpIdx + 1) & 31);
+            if (g_bpN < 32) g_bpN++;
+          }
+          // ONE BEAT INTO THE BAR-PHASE MODEL (22 Oct). The two cues are normalised against
+          // their own slow peaks, so the model sees the same scale whatever the room is doing.
+          // ONE BEAT INTO THE BAR-PHASE MODEL, AND THE HALF-BEAT PHASE TEST (22 Oct).
+          // HOLD THE PHASE THROUGH A QUIET PATCH: while nothing is heard the clock runs at the SPEED
+          // SLIDER pace, not the music's, so those beats are NOT the music's beats and advancing the
+          // model through them rotates the phase for no reason - user: "That was perfect, right up to
+          // the last quiet patch of music and then it captured to the wrong beat and hit in the middle
+          // of the strip again." The DOT keeps moving; only the phase is held.
+          {
+            float dbNow = dbActRaw();
+            if (!g_idlePace) barPhaseStep(dbNow);
+            // THE HALF-BEAT PHASE TEST - the question this session started with. THE MODEL IS BLIND TO
+            // A HALF-BEAT OFFSET: it samples the activation only on the clock's OWN beats, so if the
+            // grid sits on the off-beat every sample is taken at the wrong instant and no amount of
+            // model sharpening can see it. MEASURED: with the grid half a beat out, barPos wandered
+            // and halfRe climbed to 32 - the old threshold escape bouncing, exactly as the 21 Oct note
+            // warned it would.
+            // The cure is a SECOND sample, on the MIDPOINTS between the beats, and a comparison. It is
+            // decisive rather than a guess: if the grid is on 1 and 3 the midpoints carry the SNARE
+            // (low activation); if the grid is on 2 and 4 the midpoints carry the DOWNBEAT (high). So a
+            // sustained higher reading at the midpoints means the grid is on the off-beat.
+            if (!g_idlePace) {
+              g_dbBeatMean += (dbNow - g_dbBeatMean) * 0.10f;   // an honest mean - see the note on the
+              g_dbBeatAcc  += dbNow;                            // acc, which is kept only for the gate
+            }
+            if (g_dbBeatN < 400) g_dbBeatN++;
+            if (g_dbBeatN >= 32 && g_dbMidN >= 32) {
+                // THE MEANS, not acc/count. The old form decayed the SUM by 10% every beat while the
+                // COUNT was only capped, so the published value was about 1/24th of the truth and read
+                // 0.00 - which is what made the activation look dead when it was the meter at fault.
+                float bm = g_dbBeatMean;
+              float mm = g_dbMidMean;
+              // STRONGER EVIDENCE + A COOLDOWN, instead of once-only. The ratio went from 1.20 to 1.30
+              // and 45 s must pass between corrections, so a later drift CAN still be fixed while the
+              // test stays far too strict to bounce - which is what the old threshold escape did.
+              if (!g_idlePace && mm > bm * 1.30f &&
+                  (g_halfLast == 0 || (now - g_halfLast) > 45000UL)) {
+                L.clkNext = now + (L.ivMs / 2);   // on the off-beat: move the grid half a beat
+                // AND REVERSE THE DOT AT THE SAME INSTANT. This is the user's own design - "the dot
+                // should change direction exactly when it hears the beat" - and it removes the stall:
+                // the dot has already turned, so it is not waiting for a beat that has moved. Without
+                // this the clock jumps underneath a dot that is mid-crossing and the dot visibly stops
+                // until the new beat arrives.
+                chaseTraverseStart(now);
+                g_halfLast = now;
+                g_halfShift++;
+                // ONCE ONLY (22 Oct). The user saw it fire while the grid was CORRECT and move a
+                // good phase onto the off-beat: "it was on beat perfectly, then stopped and jumped
+                // back in off beat". A phase correction is a jump and cannot be invisible, so the
+                // rule is to make it once, early, and then never again.
+                g_halfDone = true;
+                g_dbBeatAcc = 0; g_dbBeatN = 0; g_dbMidAcc = 0; g_dbMidN = 0;
+                g_dbBeatMean = 0.0f; g_dbMidMean = 0.0f;   // fresh evidence for the next decision
+              }
+              // (the EMA inside the samples is the decay now, so there is nothing to decay here)
+              if (g_dbBeatN > 240) g_dbBeatN = 240;
+              if (g_dbMidN  > 240) g_dbMidN  = 240;
+            }
+          }
           for (int p = 0; p < NUM_PORTS; p++) {
             if (!portCfg[p].wrap) continue;
             beatListen[p].clkFires++;
@@ -4230,12 +4675,52 @@ static void listeningStep() {
 // display keeps working while the refactor is proved in stages. The decision moves
 // out to the pattern in the next step.
 static void odfEvaluate() {
+  // THE PEAK HOLD (22 Oct). A snare's novelty is a spike of a few milliseconds, so an
+  // instantaneous reading at the wrong instant sees nothing and the half-beat test becomes a coin
+  // flip - which is what made it move a CORRECT grid onto the off-beat. Holding the peak since the
+  // last sample asks the right question: did a snare fire in this half beat?
+  {
+    float snNow = odfChain[4].novelty, mdNow = odfChain[5].novelty;
+    if (snNow > g_snHold) g_snHold = snNow;
+    if (mdNow > g_mdHold) g_mdHold = mdNow;
+    // THE RAW PEAKS TRACK THE PER-FRAME NOVELTY, NOT THE HELD VALUE (22 Oct). This is the bug that
+    // killed the downbeat cue: dbActRaw normalised the HELD value against a peak that had itself been
+    // built from held values, so the ratio was always about 1 and the activation became a constant.
+    // MEASURED: dbBeat=0.01, dbMid=0.01, which is why the model had nothing to lock onto and why the
+    // half-beat test compared noise. With the peaks fed from the per-frame novelty the held value
+    // normalises properly - near 0 on a beat with no snare, near 1 on one with a snare.
+    if (snNow > g_snNormPeak) g_snNormPeak = snNow; else g_snNormPeak += (snNow - g_snNormPeak) * 0.02f;
+    if (mdNow > g_mdNormPeak) g_mdNormPeak = mdNow; else g_mdNormPeak += (mdNow - g_mdNormPeak) * 0.02f;
+  }
+  // THE MIDPOINT SAMPLE (22 Oct). Half a beat after each clock beat the activation is read again,
+  // and it is THIS reading that the half-beat test compares against the beat reading. Without it the
+  // model is blind to a half-beat offset - see the note in the clock.
+  {
+    unsigned long clkPer = beatListen[0].ivMs;
+    if (clkPer >= 200 && beatListen[0].clkNext != 0) {
+      unsigned long lastBeat = beatListen[0].clkNext - clkPer;   // clkNext is one period past it
+      unsigned long el = millis() - lastBeat;
+      if (el >= (clkPer / 2 - 5) && el <= (clkPer / 2 + 5)) {
+        if (!g_idlePace) {
+          float v = dbActRaw();
+          g_dbMidMean += (v - g_dbMidMean) * 0.10f;
+          g_dbMidAcc  += v;
+        }
+        if (g_dbMidN < 400) g_dbMidN++;
+      }
+    }
+  }
   // Coefficients refreshed once per frame: audioFs only changes once per FFT window,
   // so this is the same value the per-sample form would have produced.
-  odfAHi          = (1.0f / (audioFs > 1.0f ? audioFs : 1.0f)) /
-                    ((1.0f / (2.0f * 3.14159265f * ODF_LP_HZ)) + (1.0f / (audioFs > 1.0f ? audioFs : 1.0f)));
   odfChain[0].hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
   odfChain[0].aLo  = odfBandCoeff(odfChain[0].hpHz);
+  // EVERY used chain gets its own pair, refreshed once per frame (audioFs changes once per FFT
+  // window, so this is the same value a per-sample form would produce).
+  for (int c = 0; c < ODF_CHAINS; c++) {
+    if (!(odfChainUse & (1u << c))) continue;
+    odfChain[c].aLp = (1.0f / (audioFs > 1.0f ? audioFs : 1.0f)) /
+                      ((1.0f / (2.0f * 3.14159265f * odfChain[c].lpHz)) + (1.0f / (audioFs > 1.0f ? audioFs : 1.0f)));
+  }
 
   // Every chain publishes its novelty and bumps its sequence number. Chain 0's value
   // keeps the original global name so the log is directly comparable with the
@@ -4290,6 +4775,21 @@ static void odfEvaluate() {
   // stays comparable with /diag.
   odfThr = (SENS_FRAC_MAX - (SENS_FRAC_MAX - SENS_FRAC_MIN) * constrain(beatSens, 0.01f, 1.0f))
            * odfChain[0].novPeak;
+
+  // THE PARITY-BAND ONSETS (22 Oct): a plain novelty peak on chains 4 and 5, stamped with the frame
+  // time and counted. 200 ms of refractory keeps one hit from counting several times. MEASUREMENT
+  // ONLY - the render core decides what it means.
+  for (int c = 4; c < ODF_CHAINS; c++) {
+    if (!(odfChainUse & (1u << c))) continue;
+    OdfChain &pch = odfChain[c];
+    float thr = pch.novPeak * 0.35f;
+    if (thr < ODF_THR_FLOOR) thr = ODF_THR_FLOOR;
+    uint32_t ms = (uint32_t)millis();
+    if (pch.novelty >= thr && (ms - g_parAt[c - 4]) >= 200UL) {
+      g_parAt[c - 4]  = ms;
+      g_parSeq[c - 4]++;
+    }
+  }
 
   // NOTHING IS DECIDED HERE ANY MORE. This function MEASURES and PUBLISHES; the
   // PATTERN decides, in listeningStep() on the render core. That is the whole point
@@ -4348,10 +4848,10 @@ static inline void audioProcessSample(float s, int &onsetSub, int stride) {
     // 4-pole low-pass at 250 Hz: keeps the kick, rejects snare, hats and vocals.
     // Two poles were not enough - at 12 dB/octave they leaked through and swamped
     // the onset function whenever the mix got busy.
-    ch.lp1 += odfAHi * (ch.hp2 - ch.lp1);
-    ch.lp2 += odfAHi * (ch.lp1 - ch.lp2);
-    ch.lp3 += odfAHi * (ch.lp2 - ch.lp3);
-    ch.lp4 += odfAHi * (ch.lp3 - ch.lp4);
+    ch.lp1 += ch.aLp * (ch.hp2 - ch.lp1);
+    ch.lp2 += ch.aLp * (ch.lp1 - ch.lp2);
+    ch.lp3 += ch.aLp * (ch.lp2 - ch.lp3);
+    ch.lp4 += ch.aLp * (ch.lp3 - ch.lp4);
 
     float bpRect = fabsf(ch.lp4);
     if (bpRect > ch.winMax) ch.winMax = bpRect;   // peak within this 10 ms window
@@ -5315,10 +5815,23 @@ static void chaseTraverseStart(unsigned long now) {
     // extending to the edges ... only using 50% of the strip". Three quarters of a traverse (1.5
     // beats) swallows the intermediate beat and lets the next real one through, so the dot gets its
     // full crossing and lands on the true ends.
-    if (gap < (unsigned long)((g_travIv ? g_travIv : 500) * 75 / 100)) {
+    // A PACE CHANGE IS NEVER SWALLOWED (22 Oct). The debounce exists to reject a noise onset inside a
+    // crossing, and it must - but when the PACE ITSELF has changed (the music arriving or stopping, a
+    // tempo change, the multiplier toggled) this beat is the one that must re-base the crossing, so
+    // swallowing it would delay the recovery by a whole beat. User: "make the return-from-quiet
+    // recovery deliberately fast (one beat, even if the swing has to grow quickly)".
+    unsigned long paceNow = chasePaceMs();
+    bool paceChanged = (paceNow != g_travPaceLast);
+    if (!paceChanged && gap < (unsigned long)((g_travIv ? g_travIv : 500) * 75 / 100)) {
       g_chaseSwallow++;
       beatListen[0].nSwal++;                            // counted ONCE, on the reference port
       return;
+    }
+    // HOW FAR THE PREVIOUS TRAVERSE HAD GOT (22 Oct). A swallowed trigger returned above, so this
+    // measures exactly the starts that were ACTED ON - the ones that decide where the dot lands.
+    {
+      unsigned long prevLen = (g_travEnd > g_travAt) ? (g_travEnd - g_travAt) : 0;
+      g_tDone = prevLen ? (int32_t)((gap * 100UL) / prevLen) : -1;
     }
     // THE MEASURED GAP REFINES THE LENGTH ONLY AT A MUSIC PERIOD (21 Oct). At an idle period the gap
     // IS the idle crossing and the clock already publishes it; letting a gap measured from an early
@@ -5342,17 +5855,56 @@ static void chaseTraverseStart(unsigned long now) {
     // IDLE: the crossing time the Speed slider set, decided by the PERIOD for the same reason as the
     // clock's decision above. MUSIC: two beats, or one with the multiplier. The clock publishes the
     // same number, so they cannot disagree.
-    unsigned long idleCfg = chaseIdleMs();
-    unsigned long travLen = (g_idlePace && idleCfg > 0)
-                              ? idleCfg
-                              : ((beatListen[0].mult > 1) ? per0 : (2UL * per0));
-    g_travEnd = (beatListen[0].clkNext != 0)
+    // THE PACE, FROM THE ONE PLACE THAT DECIDES IT (22 Oct): idle = the Speed slider's crossing,
+    // music = one beat with the multiplier ON or two with it OFF. The clock publishes the same
+    // number, and a traverse in flight re-times to it if it changes, so they cannot disagree.
+    unsigned long travLen = chasePaceMs();
+    g_travPaceLast = travLen;      // so the next beat can tell whether the pace has changed
+    // THE CLOCK DRIVES THE CROSSING ONLY WHEN THE BEAT IS SETTLED (22 Oct). USER: "During the intro, the
+    // stall is occurring at both ends of the strip. If it cannot find the beat, it should keep moving
+    // under the slider's speed. It should never stall." While the tempo is being hunted clkNext jumps on
+    // every re-phase, so an end time taken from it makes the dot arrive early and WAIT - which is the
+    // intro stall, at both ends because the clock overshoots in both directions. Until the beat is
+    // settled the crossing is pure pace, so it CANNOT stall by construction.
+    g_travEnd = (beatListen[0].clkNext != 0 && g_beatSettled)
                   ? (beatListen[0].clkNext + beatOffsetMs + travLen)
                   : (now + travLen);
   }  // AIM FOR THE FAR END FROM WHERE PORT 0 IS. Port 0 is the reference for the shared decision, so
   // both strips turn round on the same beat even if one had been nudged by an odd extra onset.
   g_travDir = (ledPosArr[0] > (chaseMaxPos(0) / 2)) ? -1 : 1;
   g_travFromFrac = (chaseMaxPos(0) > 0) ? ((float)ledPosArr[0] / (float)chaseMaxPos(0)) : 0.0f;
+  // INSTRUMENTS (see the note on g_tPer). Every traverse start passes through here, whoever
+  // asked for it - the clock, an onset, the antifreeze or the never-freeze re-arm.
+  {
+    int32_t pm = (int32_t)(g_travFromFrac * 1000.0f + 0.5f);
+    if (pm < 0) pm = 0;
+    if (pm > 1000) pm = 1000;
+    g_tfLast = pm;
+    // THE SWING this crossing will cover, per-mille of the strip (see the note on g_swingLast).
+    {
+      int m0  = chaseMaxPos(0);
+      int far = (g_travDir > 0) ? m0 : 0;
+      int sw  = ledPosArr[0] - far;
+      if (sw < 0) sw = -sw;
+      g_swingLast = (m0 > 0) ? (int32_t)(((long)sw * 1000L) / (long)m0) : 1000;
+      g_swRing[g_swIdx] = g_swingLast;
+      g_swIdx = (uint8_t)((g_swIdx + 1) & 31);
+      if (g_swN < 32) g_swN++;
+    }
+    unsigned long per = beatListen[0].ivMs;
+    unsigned long len = (g_travEnd > g_travAt) ? (g_travEnd - g_travAt) : 0;
+    g_tPer = (per >= 120 && per <= 1200 && len) ? (int32_t)((len * 100UL) / per) : -1;
+    uint32_t clk = beatListen[0].clkFires;
+    if (g_tHaveClk) {
+      uint32_t d = clk - g_tLastClk;
+      g_tGapB = d;
+      if (d <= 1)      g_tG1++;
+      else if (d == 2) g_tG2++;
+      else             g_tG3p++;
+    }
+    g_tLastClk = clk;
+    g_tHaveClk = true;
+  }
   for (int p = 0; p < NUM_PORTS; p++) {
     if (!portCfg[p].wrap) continue;
     chaseTrigAt[p]   = now;                             // mirrored per port for the diagnostics
@@ -5425,10 +5977,54 @@ unsigned long ivNow = g_travIv ? g_travIv : 500;
     // recomputed here every frame, which is what produced the backward jumps: the length grew by a
     // period mid-traverse and the position was recalculated behind the dot.
     if (g_travEnd > g_travAt && (g_travEnd - g_travAt) <= 12000UL) iv = g_travEnd - g_travAt;
+    // (A next-beat tracking block lived here for one build. MEASURED with no music: dotPos swept only
+    // 0-94 of 1000 while travN climbed about once per 600 ms, so the crossing was being re-based far
+    // more often than the 2000 ms idle beat and the dot was pinned near the start of the strip. The
+    // reference it used was wrong - the traverse START runs before the clock advances clkNext but this
+    // code runs after - and rather than chase that further it is removed, because the motion was
+    // correct without it. The stall it was meant to cure is a separate, smaller fault.)
+    // ADOPT A NEW PACE MID-TRAVERSE (22 Oct). A traverse keeps the length it was given when it
+    // STARTED, so a pace change - the music arriving or stopping, a tempo change, or the Beat
+    // Multiplier being toggled - left it running at the OLD length: the new beats then restarted it
+    // early and the dot turned round mid-strip. MEASURED after every idle-to-music transition:
+    // travPer 178-200 with travDone 26, and the landings stayed in the centre. Re-timing keeps the
+    // FRACTION TRAVELLED and adopts the new pace, so the dot is still at an end when the new beat
+    // arrives and its position does not jump (el/iv is unchanged by the scaling below).
+    {
+      unsigned long paceNow = chasePaceMs();
+      unsigned long lenNow  = (g_travEnd > g_travAt) ? (g_travEnd - g_travAt) : 0;
+      if (paceNow && lenNow && paceNow != lenNow) {
+        unsigned long elNow = (now > g_travAt) ? (now - g_travAt) : 0;
+        unsigned long done  = (elNow < lenNow) ? ((elNow * 1000UL) / lenNow) : 1000UL;
+        g_travAt  = now - (paceNow * done) / 1000UL;   // a virtual start for that same fraction
+        g_travEnd = g_travAt + paceNow;
+        iv = paceNow;
+      }
+    }
+    // CLOCK'S NEXT BEAT, read every frame, so a pace change is absorbed by that alone - and with
+    // no length to rescale there is no way for the dot to pause.)
     // THE PHASE COMES FROM THE SHARED TRAVERSE ONLY. Two ports can differ in LENGTH (different
     // pixel counts) but never in PHASE, which is what "in sync" means on the strips.
+    // NEVER WAIT AT THE END (22 Oct). USER: "Still stalling during intro at both ends of the strip. If it
+    // cannot find the beat, it should keep moving under the slider's speed. It should never stall."
+    // THE STALL WAS THIS LINE: clamping el to iv parks the dot at the end and it SITS THERE until the
+    // crossing's end time is reached - which is the pause the user kept seeing, at whichever end was
+    // next. Reversing the moment the dot TOUCHES the end means it can never wait at all.
+    // When the beat is settled the arrival and the beat coincide, so nothing changes. When it is not,
+    // the dot simply keeps crossing at the slider's pace, which is exactly the stated rule.
+    // Done IN PLACE rather than through chaseTraverseStart, because that function swallows a restart
+    // arriving less than 75% of the way through the previous crossing, which would reintroduce the wait.
     unsigned long el = now - g_travAt;
-    if (el > iv) el = iv;
+    if (el >= iv) {
+      if (p == 0) {                       // port 0 is the reference, as everywhere else in the traverse
+        g_travAt = now;
+        g_travEnd = now + iv;
+        g_travDir = (ledPosArr[0] > (maxPos / 2)) ? -1 : 1;   // turn round at the end we just reached
+        g_travFromFrac = (maxPos > 0) ? ((float)ledPosArr[0] / (float)maxPos) : 0.0f;
+        g_arrRevs++;
+      }
+      el = 0;                             // and carry on from here, so the dot never sits still
+    }
     // FROM THE SHARED FRACTION, not this port's own remembered position. Scaled to this port's own
     // length, so two ports of different size still start at the same point of the traverse.
     int from = (int)(g_travFromFrac * (float)maxPos + 0.5f);
@@ -5846,6 +6442,127 @@ void applyMasterBrightness() {
 // ---- THE PLAYLIST: THE MASTER PARAMETER STORE (Rules: the Build Process) ---------------------
 // Every field the pattern page saved is read here, so a timeline cell needs nothing but the item's
 // name. This is the ONLY place a playing port gets its parameters from.
+// THE TRAVERSE INSTRUMENTS, on their OWN endpoint (22 Oct). Deliberately NOT in /diag: that handler
+// is already heavy - it builds several KB of JSON on the render core - and adding six fields there
+// wedged the web server (ping answered, HTTP did not; the LED stayed dark, so a hang, not a boot
+// loop). A small separate reply keeps this instrument unable to affect anything else.
+void handleTrav() {
+  String out;
+  out.reserve(256);
+  out  = "{\"travN\":";        out += String((unsigned long)g_travStarts);
+  out += ",\"travPer\":";      out += String((long)g_tPer);
+  out += ",\"travDone\":";     out += String((long)g_tDone);
+  out += ",\"travFromLast\":"; out += String((long)g_tfLast);
+  out += ",\"travGapB\":";     out += String((unsigned long)g_tGapB);
+  out += ",\"travG1\":";       out += String((unsigned long)g_tG1);
+  out += ",\"travG2\":";       out += String((unsigned long)g_tG2);
+  out += ",\"travG3p\":";      out += String((unsigned long)g_tG3p);
+  out += ",\"p0iv\":";         out += String((unsigned long)beatListen[0].ivMs);
+  out += ",\"p0clk\":";        out += String((unsigned long)beatListen[0].clkFires);
+  // WHY THE TRAVERSE LENGTH IS WHAT IT IS (22 Oct). travPer climbing to 200 while p0iv is the
+  // music means the traverse took the multiplier-OFF branch, i.e. the multiplier in force at
+  // the port was 1. These name where that value came from and who owned the port.
+  out += ",\"multLED\":";   out += String((int)multLED);
+  out += ",\"v0mu\":";      out += String((int)portCfg[0].mult);
+  out += ",\"v0wr\":";      out += String(portCfg[0].wrap ? 1 : 0);
+  out += ",\"v0pat\":";     out += String((int)portCfg[0].pat);
+  out += ",\"v0sp\":";      out += String((double)portCfg[0].speed, 3);
+  out += ",\"tlPlaying\":"; out += String(tlPlaying ? 1 : 0);
+  out += ",\"tlLoaded\":";  out += String(tlLoaded ? 1 : 0);
+  out += ",\"pageOwns\":";  out += String((millis() - g_lastTweakMs) < 5000UL ? 1 : 0);
+  out += ",\"idlePace\":";  out += String(g_idlePace ? 1 : 0);
+  // THE SWING: the fraction of the strip each crossing covers, and its smallest over the last
+  // 32 crossings. 1000 = full end to end (steady music). It SHRINKS through a disturbance -
+  // which IS the correction - and grows back to 1000 as the metronome settles.
+  out += ",\"swing\":";    out += String((long)g_swingLast);
+  {
+    int32_t smin = 1001;
+    for (uint8_t q = 0; q < g_swN; q++) if (g_swRing[q] < smin) smin = g_swRing[q];
+    out += ",\"swingMin\":"; out += String((long)(g_swN ? smin : -1));
+    out += ",\"swingN\":";   out += String((unsigned long)g_swN);
+  }
+  out += ",\"paceLast\":";  out += String((unsigned long)g_travPaceLast);
+  // THE HALF-BEAT WATCH (see the note on HALF_RUN_LIMIT): halfRun is the current run of
+  // dead-zone onsets, halfRe how many times the grid has been moved onto the music.
+  out += ",\"halfRun\":"; out += String((unsigned long)g_halfRun);
+  out += ",\"halfRe\":";  out += String((unsigned long)g_halfRe);
+  // THE PARITY ANSWER (see the note on g_parAt): which phase the snare and mid bands land on
+  // relative to the kick grid. If the SNARE is mostly OFF the grid, the grid is on 1&3 (right).
+  // If it is mostly ON the grid, the grid is on 2&4 and should be moved by half a beat.
+  out += ",\"snOn\":";  out += String((unsigned long)g_snOnGrid);
+  out += ",\"snOff\":"; out += String((unsigned long)g_snOffGrid);
+  out += ",\"mdOn\":";  out += String((unsigned long)g_mdOnGrid);
+  out += ",\"mdOff\":"; out += String((unsigned long)g_mdOffGrid);
+  out += ",\"snNov\":"; out += String((double)odfChain[4].novelty, 1);
+  out += ",\"mdNov\":"; out += String((double)odfChain[5].novelty, 1);
+  // THE BAR PHASE (see the note on g_barP): barPos is the most likely position in the bar
+  // (0 = beat 1), barConf its confidence, dbAct the downbeat activation that drove it, and
+  // beatOff the display offset - which is worth watching, because the dot is deliberately
+  // delayed by it and a large value would put the dot mid-strip when the MUSIC hits even with a
+  // perfect grid.
+  out += ",\"barPos\":";   out += String((long)g_barPos);
+  out += ",\"barConf\":";  out += String((long)g_barConf);
+  out += ",\"dbAct\":";    out += String((long)g_dbAct100);
+  out += ",\"barBeats\":"; out += String((unsigned long)g_barBeats);
+  // THE HALF-BEAT TEST: dbBeat is the mean activation on the clock's beats, dbMid on the midpoints.
+  // dbMid above dbBeat means the grid is on the OFF-beat - the comparison the whole session needed.
+  // THE DOT RIGHT NOW, so the motion can be SEEN from here rather than inferred from the beat
+  // samples - which is what the "barely moves" report needed.
+  out += ",\"dotPos\":";   out += String((long)ledPosArr[0]);
+  // THE PLL TRIM, in ms, and the period the clock is actually running at. If pllTrim keeps growing
+  // in one direction the loop has not settled; if it settles and stays, the rate is now right and
+  // the phase stops walking.
+  // THE PACE GOVERNOR: paceNow is the pace in use, paceTarget where it is heading, musicBeats the
+  // warm-up counter. During warm-up the target stays at the slider's pace; then it ramps.
+  out += ",\"paceNow\":";   out += String((unsigned long)g_paceNow);
+  out += ",\"paceTgt\":";   out += String((unsigned long)g_paceTarget);
+  out += ",\"mBeats\":";    out += String((unsigned long)g_musicBeats);
+  out += ",\"pllTrim\":";  out += String((long)g_pllTrim);
+  out += ",\"clkPer\":";   out += String((unsigned long)beatListen[0].ivMs);
+  out += ",\"halfSh\":";   out += String((unsigned long)g_halfShift);
+  // How long since the last half-beat correction, in seconds, and how many the dot has reversed on.
+  // Is the tempo settled enough for the clock to drive the crossing? Should read 0 through the intro.
+  out += ",\"settled\":";
+  out += ",\"arrRevs\":";  out += String((unsigned long)g_arrRevs);  out += String((long)(g_beatSettled ? 1 : 0));
+  out += ",\"setRun\":";   out += String((unsigned long)g_setRun);
+  out += ",\"halfAge\":";  out += String((unsigned long)((g_halfLast && (millis() - g_halfLast) < 600000UL)
+                                                      ? ((millis() - g_halfLast) / 1000UL) : 9999UL));
+  out += ",\"dbBeat\":";   out += String((double)g_dbBeatMean, 3);
+  out += ",\"dbMid\":";    out += String((double)g_dbMidMean, 3);
+  out += ",\"beatOff\":";  out += String((unsigned long)beatOffsetMs);
+  // THE DOT AT THE MUSIC (see the note on g_onPos). THIS is the number that matches what the
+  // eye sees: ~0/~1000 = the beats hit the ends, ~500 = they hit the centre.
+  out += ",\"onsPos\":";    out += String((long)g_onPos);
+  {
+    int32_t omin = 1001, omax = -1;
+    for (uint8_t q = 0; q < g_onN; q++) {
+      int32_t v = g_onRing[q];
+      if (v < omin) omin = v;
+      if (v > omax) omax = v;
+    }
+    out += ",\"onsPosMin\":"; out += String((long)(g_onN ? omin : -1));
+    out += ",\"onsPosMax\":"; out += String((long)(g_onN ? omax : -1));
+    out += ",\"onsN\":";      out += String((unsigned long)g_onN);
+  }
+  // THE DOT AT EVERY BEAT, and its range over the last 32 beats. THIS is the honest answer to
+  // "are the beats landing at the ends": ~0/1000 = the ends, ~500 = the middle, and a rising
+  // beatPosMin/Max shows the landings walking inward.
+  out += ",\"beatPos\":";    out += String((long)g_bpLast);
+  {
+    int32_t bmin = 1001, bmax = -1;
+    for (uint8_t q = 0; q < g_bpN; q++) {
+      int32_t v = g_bpRing[q];
+      if (v < bmin) bmin = v;
+      if (v > bmax) bmax = v;
+    }
+    out += ",\"beatPosMin\":"; out += String((long)(g_bpN ? bmin : -1));
+    out += ",\"beatPosMax\":"; out += String((long)(g_bpN ? bmax : -1));
+    out += ",\"beatN\":";      out += String((unsigned long)g_bpN);
+  }
+  out += "}";
+  server.send(200, "application/json", out);
+}
+
 static void loadPlaylist() {
   for (int i = 0; i < PL_MAX_ITEMS; i++) { plItems[i].used = false; plItems[i].name[0] = 0; }
   plCount = 0;
@@ -6648,6 +7365,7 @@ void setup() {
   server.on("/brightness", HTTP_GET, handleBrightness);
   server.on("/audio", HTTP_GET, handleAudioDetect);
   server.on("/diag", HTTP_GET, handleDiag);
+  server.on("/trav", HTTP_GET, handleTrav);   // INSTRUMENT: traverse starts, RAM only
   server.on("/onsets", HTTP_GET, handleOnsets);   // INSTRUMENT: per-onset ring, RAM only
   server.on("/trace",  HTTP_GET, handleTrace);    // INSTRUMENT: 50 Hz level/novelty ring
   server.on("/leaktest", HTTP_GET, handleLeakTest);
