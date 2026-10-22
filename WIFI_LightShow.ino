@@ -4130,6 +4130,14 @@ static bool          g_paceWasIdle = true;
 // period was assigned unchecked. This bound is applied AT every musical assignment, rather than trusted
 // to the tempo search, because the display's life depends on it. 120 ms is 500 BPM and 1200 ms is
 // 50 BPM, so nothing musical is lost.
+// SEE THE NOTE ABOVE THE CALL SITES: a period under MIN_BEAT_MS is the half-beat and is doubled.
+#define MIN_BEAT_MS 350
+static inline unsigned long fixHalfBeat(unsigned long ms) {
+  if (ms == 0) return 0;
+  while (ms < MIN_BEAT_MS && ms < 4000) ms *= 2;
+  return ms;
+}
+
 static inline unsigned long clampBeatPeriod(unsigned long ms) {
   if (ms < 120)  return 120;
   if (ms > 1200) return 1200;
@@ -4367,7 +4375,7 @@ static void listeningStep() {
           // times per onset is what stalled the display (see the note in beatPeriodComb).
           unsigned long p = 0;
           if (i == 0) { p = beatPeriodComb(lin, cnt); }   // the shared value is set AFTER the median
-          else if (g_beatPeriodMs >= 200) { L.ivMs = clampBeatPeriod(g_beatPeriodMs); g_idlePace = false; }
+          else if (g_beatPeriodMs >= 200) { L.ivMs = clampBeatPeriod(fixHalfBeat(g_beatPeriodMs)); g_idlePace = false; }
           if (p >= 200) {
             // A MEDIAN OVER THE LAST 3 COMB RESULTS. The comb occasionally returns a wrong
             // value for a single window (measured outliers of 350, 370 and 660 ms against a
@@ -4378,7 +4386,7 @@ static void listeningStep() {
             L.pIdx = (uint8_t)((L.pIdx + 1) % 3);
             if (L.pN < 3) L.pN++;
             if (L.pN < 3) {
-              unsigned long base = clampBeatPeriod((unsigned long)p);
+              unsigned long base = clampBeatPeriod(fixHalfBeat((unsigned long)p));
               if (g_perAvg <= 0) g_perAvg = (long)base;
               else                g_perAvg += ((long)base - g_perAvg) / 8;
               L.ivMs = clampBeatPeriod((unsigned long)g_perAvg);
@@ -4394,7 +4402,7 @@ static void listeningStep() {
               // Each new median now moves the rate by an EIGHTH only, so one stray measurement cannot
               // move the beat, while a real tempo change is still followed within a few bars.
               {
-                unsigned long base = clampBeatPeriod(mid);
+                unsigned long base = clampBeatPeriod(fixHalfBeat(mid));   // SEE THE NOTE ON fixHalfBeat
                 if (g_perAvg <= 0) g_perAvg = (long)base;
                 else                g_perAvg += ((long)base - g_perAvg) / 8;
                 L.ivMs = clampBeatPeriod((unsigned long)g_perAvg);
