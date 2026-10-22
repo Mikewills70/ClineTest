@@ -93,6 +93,14 @@ while ((Get-Date) -lt $end) {
       setRun       = $j.setRun
       arrRevs      = $j.arrRevs
       halfAge      = $j.halfAge
+      dotFrac      = $j.dotFrac
+      dotSpd       = $j.dotSpd
+      dotTgt       = $j.dotTgt
+      dotRevs      = $j.dotRevs
+      dotFixes     = $j.dotFixes
+      beatMs       = $j.beatMs
+      perMs        = $j.perMs
+      ivMs         = $j.ivMs
     }
     if (-not $hdr) { ($row.Keys -join ',') | Set-Content -Path $csv; $hdr = $true }
     ($row.Values -join ',') | Add-Content -Path $csv

@@ -4496,7 +4496,10 @@ static void listeningStep() {
             g_beatSettled = (g_setRun >= SETTLED_BEATS);
             if (g_idlePace) { g_setRun = 0; g_beatSettled = false; }
           }
-          chaseTraverseStart(now);      // ONE TRAVERSE PER CLOCK BEAT, SHARED BY EVERY WRAP PORT
+          // THE BEAT FEEDS THE REACTOR (22 Oct). It does not start a traverse any more - the dot's
+          // direction comes from reaching an end. What the beat does is tell the reactor how long a
+          // beat is, and correct the speed if the dot was mid-strip when it arrived.
+          beatReactorOnBeat(now);
           // THE DOT AT THIS BEAT (22 Oct), recorded for EVERY beat - see the note on g_bpLast.
           {
             int m0 = chaseMaxPos(0);
@@ -5935,6 +5938,171 @@ static void chaseBeat(int p, unsigned long now) {
 
 // The per-frame chase update. Returns TRUE only when the dot MOVED, so a still chase draws
 // and transmits nothing.
+// ===================================================================================================
+// THE BEAT REACTOR (22 Oct). THE USER'S DESIGN, AND IT REPLACES THE WHOLE CLOCK-PHASE APPROACH.
+//
+//   "If the dot only ever changes direction on the beat, it is physically impossible for it to ever
+//    get to half beat timing."
+//
+// That is right, and it is why the old approach could never be made to work: it kept a CLOCK with a
+// PHASE, and the dot followed that phase, so the two could disagree - and every "correction" fought
+// something else. FOUR things used to decide where the dot went: the traverse's end time from the
+// clock, the mid-crossing re-time, the arrival reversal, and the half-beat correction. That is how a
+// small timing change could leave the dot oscillating in the middle of the strip.
+//
+// HERE THERE IS NO CLOCK PHASE AT ALL. There is ONE dot: a position, a direction and a speed.
+//
+//   THE SLIDER sets the basic speed AND IS A FLOOR - the dot never moves slower than it.
+//   THE ENDS always reverse the dot, immediately, so a STALL IS IMPOSSIBLE.
+//   A DETECTED BEAT is the ERROR SIGNAL: if the dot is at an end the timing is right and nothing
+//     happens; if it is MID-STRIP the speed was wrong, so the speed is set to cover the remaining
+//     distance in the time to the next beat. That time IS the correction.
+//   NO REGULAR BEAT -> the speed decays back to the slider's rate (the intro, which is accepted).
+//   THE SPEED RAMPS, it never jumps - so every correction is a change of speed, which the eye forgives.
+//
+// A FALSE BEAT CANNOT BREAK IT. The reversal is driven by REACHING THE END, not by the detector, so a
+// spurious onset can only nudge the speed. And a beat heard mid-strip and one heard in the other half
+// cancel out, so no beat-versus-off-beat classification is needed at all.
+// ===================================================================================================
+static float    g_dotFrac   = 0.0f;    // the shared dot position: 0.0 at pixel 0, 1.0 at the far end
+static int8_t   g_dotDir    = 1;       // +1 toward the far end, -1 toward pixel 0
+static float    g_dotSpeed  = 0.0f;    // strips per second, so it scales with the strip's own length
+static float    g_dotSpeedTgt = 0.0f;  // where the speed is heading
+static uint32_t g_dotRevs   = 0;       // reversals caused by REACHING AN END
+static uint32_t g_dotFixes  = 0;       // beats that corrected the speed while the dot was mid-strip
+static uint32_t g_dotLastMs = 0;       // the last update, for the frame's dt
+static float    g_beatPerS  = 0.0f;    // the beat period in seconds, from the tempo detector
+static float    g_dotPeak   = 0.0f;    // the fastest the dot has been asked to go, for the log
+
+// The speed the dot SHOULD be doing: one strip per beat when a beat is known, one strip per slider
+// crossing otherwise. Both are "one strip per X", which is why the reactor works in fractions.
+// THE MUSICAL TEMPO, AND THE HALF-BEAT CORRECTION (22 Oct). MEASURED: dotSpd 3508 strips per second
+// while beatMs read 4100 - impossible together, so the tempo was swinging between about 250 ms and
+// about 4000 ms. 250 ms is the HALF-BEAT, and this track is the one whose onsets are a 50/50 mix of
+// beats and off-beats (the day-one measurement), so the comb search locks onto the ODD-ONSET spacing.
+// Every speed derived from it is then twice too fast - the x2 the user kept reporting. The old pace
+// code hid it behind a fallback that kept the dot slow, which is why it showed as drift instead.
+// A period under MIN_BEAT_S is therefore doubled (it is the half-beat); anything outside the musical
+// window is not believed at all and the slider governs, which is also the accepted intro behaviour.
+#define MIN_BEAT_S 0.35f          // 170 BPM - faster than this is taken to be the half-beat
+#define MAX_BEAT_S 1.20f          // 50 BPM
+static float musicalTempoS() {
+  float per = g_beatPerS;
+  if (!(per > 0.0f)) return 0.0f;
+  while (per < MIN_BEAT_S && per > 0.0f) per *= 2.0f;      // the half-beat, doubled to the beat
+  if (per < MIN_BEAT_S || per > MAX_BEAT_S) return 0.0f;   // still not musical: do not believe it
+  return per;
+}
+
+static float reactorNominalSpeed() {
+  float per = 0.0f;
+  // THE MUSIC TEMPO IS ONLY BELIEVED BETWEEN 120 AND 1200 MS, exactly as the old pace code did it.
+  // MEASURED: beatMs was feeding 3890 ms - eight times too long - which made the dot drag and made the
+  // target wander, so the speed rose and fell again. Outside that window the slider governs, which is
+  // also what the user accepts for the intro.
+  float mt = g_idlePace ? 0.0f : musicalTempoS();
+  if (mt > 0.0f) {
+    // the Beat Multiplier: one beat per crossing with it ON, two with it OFF
+    per = (beatListen[0].mult > 1) ? mt : (2.0f * mt);
+  } else {
+    unsigned long idle = chaseIdleMs();
+    per = (idle > 0) ? ((float)idle / 1000.0f) : 2.0f;   // the slider's crossing, in seconds
+  }
+  if (per < 0.06f) per = 0.06f;                          // never a degenerate speed
+  return 1.0f / per;
+}// Called ONCE PER FRAME from stepChase, for the reference port.
+static void beatReactorStep(unsigned long now) {
+  if (g_dotLastMs == 0) {
+    g_dotLastMs = now;
+    g_dotSpeed = reactorNominalSpeed();
+    g_dotSpeedTgt = g_dotSpeed;
+    return;
+  }
+  unsigned long dtMs = now - g_dotLastMs;
+  if (dtMs < 4) return;                                  // one update per frame is plenty
+  g_dotLastMs = now;
+  float dt = (float)dtMs / 1000.0f;
+
+  // MOVE. Nothing else in the whole program decides the dot's position.
+  g_dotFrac += (float)g_dotDir * g_dotSpeed * dt;
+
+  // THE ENDS ALWAYS REVERSE, IMMEDIATELY. No waiting and no clamping, so a stall is impossible here.
+  if (g_dotFrac >= 1.0f)      { g_dotFrac = 1.0f; g_dotDir = -1; g_dotRevs++; }
+  else if (g_dotFrac <= 0.0f) { g_dotFrac = 0.0f; g_dotDir =  1; g_dotRevs++; }
+
+  // THE RATE, as the user set it: the dot RAMPS toward the speed the beats imply, and eases back when
+  // they are lost. The same smooth shape as the pace governor the user called "great", applied to the
+  // dot's speed instead of to a crossing length. Frame by frame, so it can never be a visible jump.
+  {
+    // THE FALL. "the dot ramps and down as beats are detected... If a regular beat is not found, allow
+    // the rate to reduce again". The RISE happens ON THE BEAT (see beatReactorOnBeat); this is the ease
+    // back toward the slider's speed when beats stop arriving. Downward only, so a beat can always raise
+    // the speed promptly while recovery from a transient stays gentle.
+    float nominal = reactorNominalSpeed();
+    // NO USABLE TEMPO -> HEAD STRAIGHT FOR THE SLIDER'S SPEED. Without this the target kept a STALE
+    // value from an earlier beat, so during the intro the dot "was darting around everywhere" at a speed
+    // that belonged to a beat that no longer existed.
+    if (g_idlePace || musicalTempoS() <= 0.0f) g_dotSpeedTgt = nominal;
+    if (g_dotSpeed > nominal) g_dotSpeed += (nominal - g_dotSpeed) * 0.0010f;
+    if (g_dotPeak < g_dotSpeed) g_dotPeak = g_dotSpeed;
+  }
+
+  // THE SLIDER IS A FLOOR: "the dot can never move slower than the slider speed". When no beat is known
+  // the floor IS the speed, which is why the intro and silence still cross the strip.
+  {
+    unsigned long idle = chaseIdleMs();
+    float floorSpeed = (idle > 0) ? (1.0f / ((float)idle / 1000.0f)) : 0.0f;
+    if (g_dotSpeed < floorSpeed) g_dotSpeed = floorSpeed;
+    if (g_dotSpeed < 0.02f)      g_dotSpeed = 0.02f;      // never fully stop mid-show
+  }
+}
+
+// Called on each DETECTED BEAT. The error signal is the dot's POSITION - no phase, no clock.
+static void beatReactorOnBeat(unsigned long now) {
+  // THE TEMPO COMES FROM THE CLOCK'S OWN PERIOD, the same source the old, verified pace code used.
+  // MEASURED: g_beatPeriodMs swung between about 125 ms and 4430 ms - which is exactly the "too slow by
+  // half" of the first build and then the "too fast by a factor of 2" of every build after it. The old
+  // code used beatListen[0].ivMs, the period the clock is ACTUALLY RUNNING AT, guarded to 120-1200 ms,
+  // and that is where the timing the user remembers came from. One variable, and it was the wrong one.
+  {
+    unsigned long iv = beatListen[0].ivMs;
+    if (iv >= 120 && iv <= 1200) g_beatPerS = (float)iv / 1000.0f;
+  }
+  // THE SAME MUSICAL TEMPO, INCLUDING THE HALF-BEAT DOUBLING. Without this the correction used the raw
+  // 250 ms and set a target twice as fast as the music - see the note on musicalTempoS.
+  float per = musicalTempoS();
+  if (!(per > 0.0f)) return;                              // not a believable tempo: leave the ramp alone
+  if (!(beatListen[0].mult > 1)) per *= 2.0f;             // multiplier OFF: two beats per crossing
+  // HOW FAR THE DOT HAS LEFT TO GO in its current direction. At an end this is the whole strip, which
+  // is correct because the dot has just turned round.
+  // AT AN END THE FULL STRIP IS AHEAD - whichever end, and regardless of which way the direction flag is
+  // pointing at this instant. MEASURED: the beat can arrive in the SAME FRAME as the reversal, before
+  // the flag has flipped, and then the naive formula read toEnd = 0 and gave dist = 2.0. That is the
+  // "twice as fast as required, and it hit the same end every beat" the user reported - the dot
+  // round-tripped inside a single beat.
+  float toEnd = (g_dotDir > 0) ? (1.0f - g_dotFrac) : g_dotFrac;
+  if (g_dotFrac > 0.97f || g_dotFrac < 0.03f) toEnd = 1.0f;
+  if (toEnd < 0.0f) toEnd = 0.0f;
+  // THE DISTANCE THAT MATTERS IS TO THE END AND THEN ALL THE WAY BACK, because reaching the far end is
+  // not the goal - being AT AN END when the next beat arrives is. From the middle that is 1.5 strips;
+  // from an end it is exactly 1.0, which is why this one expression covers both cases with no special
+  // handling. Getting this wrong is what makes the dot SLOW DOWN when a beat catches it mid-strip.
+  // THE FULL STRIP PLUS WHATEVER YOU WERE SHORT. toEnd is the distance to the end in the CURRENT
+  // direction, so just after a reversal it is 1.0 (not 0) - which is why toEnd + 1.0 gave 2.0 at an end
+  // and made the dot round-trip every beat, "twice as fast as required". 2.0 - toEnd is 1.0 at an end
+  // (a normal crossing) and 1.5 from the middle (the user's figure), and it puts the dot at the OTHER
+  // end exactly on the next beat in both cases.
+  float dist = 2.0f - toEnd;
+  // THE CORRECTION: cover that distance in the time to the next beat. A beat heard mid-strip means the
+  // dot was too slow, so this speeds it up; a beat heard at the end leaves the nominal speed alone.
+  if (toEnd < 0.85f) g_dotFixes++;
+  // SPEED UP when a beat catches the dot mid-strip, so the next reversal lands ON the next beat. The
+  // time this takes IS the correction, exactly as the user described.
+  g_dotSpeedTgt = dist / per;
+  // THE RISE, ON THE BEAT: 35 per cent of the gap - the same shape as the pace governor the user called
+  // "great". A few beats take it all the way, which is what "ramps up as beats are detected" means.
+  g_dotSpeed += (g_dotSpeedTgt - g_dotSpeed) * 0.35f;
+}
 static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
   const PortCfg &c = portCfg[p];
   int maxPos = chaseMaxPos(p);
@@ -5958,79 +6126,20 @@ static bool stepChase(int p, unsigned long now, unsigned long dtMs) {
         // STOPPED: Speed at 0 and no music. Decided by the PERIOD for the same reason - the onset test
     // flaps with room noise, and a dot that stopped and started would be worse than either.
     if (chaseStopped() && g_idlePace) return false;
-unsigned long ivNow = g_travIv ? g_travIv : 500;
-    if (g_travAt == 0 ||
-        (now - g_travAt) > (ivNow + ivNow / 4) ||
-        (now - g_travAt) > (unsigned long)(antifreeze * 1000)) chaseTraverseStart(now);
-    unsigned long iv = g_travIv ? g_travIv : 500;
-    // TIMED TO THE NEXT CLOCK BEAT, RECOMPUTED EVERY FRAME. The phase steering pulls that
-    // beat earlier or later AFTER the trigger has happened, so a length fixed at the trigger
-    // is still cut short and the dot turns round mid-strip - user, 21 Oct: "beats still
-    // landing in the middle of the strip instead of at the ends". Taking the remaining time
-    // to the next beat each frame means the dot lands ON it however the beat moved.
-    // THE SHARED CLOCK, NOT THIS PORT OWN ONE (21 Oct). Reading beatListen[p] here gave each
-    // port a slightly different traverse length even though ONE clock fired them all, so the
-    // strips drifted apart and then came back together - user: "they remained in sync for a
-    // while and then broke out of sync again, and then got back into sync again". Listener 0
-    // owns the beat; every Chase port follows that one number.
-    // THE TRAVERSE'S OWN END TIME (21 Oct), fixed when it began - see g_travEnd. This USED to be
-    // recomputed here every frame, which is what produced the backward jumps: the length grew by a
-    // period mid-traverse and the position was recalculated behind the dot.
-    if (g_travEnd > g_travAt && (g_travEnd - g_travAt) <= 12000UL) iv = g_travEnd - g_travAt;
-    // (A next-beat tracking block lived here for one build. MEASURED with no music: dotPos swept only
-    // 0-94 of 1000 while travN climbed about once per 600 ms, so the crossing was being re-based far
-    // more often than the 2000 ms idle beat and the dot was pinned near the start of the strip. The
-    // reference it used was wrong - the traverse START runs before the clock advances clkNext but this
-    // code runs after - and rather than chase that further it is removed, because the motion was
-    // correct without it. The stall it was meant to cure is a separate, smaller fault.)
-    // ADOPT A NEW PACE MID-TRAVERSE (22 Oct). A traverse keeps the length it was given when it
-    // STARTED, so a pace change - the music arriving or stopping, a tempo change, or the Beat
-    // Multiplier being toggled - left it running at the OLD length: the new beats then restarted it
-    // early and the dot turned round mid-strip. MEASURED after every idle-to-music transition:
-    // travPer 178-200 with travDone 26, and the landings stayed in the centre. Re-timing keeps the
-    // FRACTION TRAVELLED and adopts the new pace, so the dot is still at an end when the new beat
-    // arrives and its position does not jump (el/iv is unchanged by the scaling below).
-    {
-      unsigned long paceNow = chasePaceMs();
-      unsigned long lenNow  = (g_travEnd > g_travAt) ? (g_travEnd - g_travAt) : 0;
-      if (paceNow && lenNow && paceNow != lenNow) {
-        unsigned long elNow = (now > g_travAt) ? (now - g_travAt) : 0;
-        unsigned long done  = (elNow < lenNow) ? ((elNow * 1000UL) / lenNow) : 1000UL;
-        g_travAt  = now - (paceNow * done) / 1000UL;   // a virtual start for that same fraction
-        g_travEnd = g_travAt + paceNow;
-        iv = paceNow;
-      }
-    }
-    // CLOCK'S NEXT BEAT, read every frame, so a pace change is absorbed by that alone - and with
-    // no length to rescale there is no way for the dot to pause.)
-    // THE PHASE COMES FROM THE SHARED TRAVERSE ONLY. Two ports can differ in LENGTH (different
-    // pixel counts) but never in PHASE, which is what "in sync" means on the strips.
-    // NEVER WAIT AT THE END (22 Oct). USER: "Still stalling during intro at both ends of the strip. If it
-    // cannot find the beat, it should keep moving under the slider's speed. It should never stall."
-    // THE STALL WAS THIS LINE: clamping el to iv parks the dot at the end and it SITS THERE until the
-    // crossing's end time is reached - which is the pause the user kept seeing, at whichever end was
-    // next. Reversing the moment the dot TOUCHES the end means it can never wait at all.
-    // When the beat is settled the arrival and the beat coincide, so nothing changes. When it is not,
-    // the dot simply keeps crossing at the slider's pace, which is exactly the stated rule.
-    // Done IN PLACE rather than through chaseTraverseStart, because that function swallows a restart
-    // arriving less than 75% of the way through the previous crossing, which would reintroduce the wait.
-    unsigned long el = now - g_travAt;
-    if (el >= iv) {
-      if (p == 0) {                       // port 0 is the reference, as everywhere else in the traverse
-        g_travAt = now;
-        g_travEnd = now + iv;
-        g_travDir = (ledPosArr[0] > (maxPos / 2)) ? -1 : 1;   // turn round at the end we just reached
-        g_travFromFrac = (maxPos > 0) ? ((float)ledPosArr[0] / (float)maxPos) : 0.0f;
-        g_arrRevs++;
-      }
-      el = 0;                             // and carry on from here, so the dot never sits still
-    }
-    // FROM THE SHARED FRACTION, not this port's own remembered position. Scaled to this port's own
-    // length, so two ports of different size still start at the same point of the traverse.
-    int from = (int)(g_travFromFrac * (float)maxPos + 0.5f);
-    int to   = (g_travDir > 0) ? maxPos : 0;
-    int np   = from + (int)(((long)(to - from) * (long)el) / (long)iv);
-    ledPosArr[p] = (np < 0 || np > maxPos) ? 0 : np;      // clamped: see the note below
+
+    // ===============================================================================================
+    // THE DOT'S POSITION COMES FROM THE BEAT REACTOR AND NOWHERE ELSE (22 Oct). See the note on
+    // g_dotFrac: one position, one direction, one speed, no clock phase. Everything that used to be
+    // here - the traverse's own end time taken from the clock, the mid-crossing re-time, the arrival
+    // reversal and the half-beat correction - is gone, because four sources of timing is exactly how a
+    // small correction could leave the dot oscillating in the middle of the strip.
+    // The reactor is stepped once per frame, on the reference port; every wrap port then renders the
+    // ONE shared fraction scaled to its own pixel count, which is what keeps the strips in sync.
+    // ===============================================================================================
+    if (p == 0) beatReactorStep(now);
+    ledPosArr[p] = (int)(g_dotFrac * (float)maxPos + 0.5f);
+    if (ledPosArr[p] < 0)      ledPosArr[p] = 0;
+    if (ledPosArr[p] > maxPos) ledPosArr[p] = maxPos;
   } else {
     // BASS BEAT DRIVES THE DOT (user, 20 Oct): every detected BASS BEAT advances the dot by DISTANCE
     // pixels, covered in the KICK SPEED's time, and then the dot STOPS and waits for the next beat.
@@ -6522,8 +6631,27 @@ void handleTrav() {
   out += ",\"halfSh\":";   out += String((unsigned long)g_halfShift);
   // How long since the last half-beat correction, in seconds, and how many the dot has reversed on.
   // Is the tempo settled enough for the clock to drive the crossing? Should read 0 through the intro.
-  out += ",\"settled\":";
-  out += ",\"arrRevs\":";  out += String((unsigned long)g_arrRevs);  out += String((long)(g_beatSettled ? 1 : 0));
+  // THE VALUE FOR THAT LABEL. It was LOST when a later patch replaced the line that had been inserted
+  // between the label and its value, so /trav emitted "settled":, - malformed JSON that silently broke
+  // every poller run and hid the gate from me for two builds. Kept adjacent now, on purpose.
+  out += ",\"settled\":";  out += String((long)(g_beatSettled ? 1 : 0));
+  out += ",\"setRun\":";   out += String((unsigned long)g_setRun);
+  out += ",\"arrRevs\":";  out += String((unsigned long)g_arrRevs);
+  // THE BEAT REACTOR: dotFrac is the shared position (0..1000), dotSpd the speed in strips per
+  // THOUSAND seconds, dotTgt where it is heading, dotRevs reversals by reaching an end, dotFixes the
+  // beats that found the dot mid-strip and corrected the speed. If dotFixes keeps climbing the timing
+  // is still being corrected; if it stops, the dot is arriving with the beat.
+  out += ",\"dotFrac\":";  out += String((long)(g_dotFrac * 1000.0f + 0.5f));
+  out += ",\"dotSpd\":";   out += String((long)(g_dotSpeed * 1000.0f + 0.5f));
+  out += ",\"dotTgt\":";   out += String((long)(g_dotSpeedTgt * 1000.0f + 0.5f));
+  out += ",\"dotRevs\":";  out += String((unsigned long)g_dotRevs);
+  out += ",\"dotFixes\":"; out += String((unsigned long)g_dotFixes);
+  out += ",\"beatMs\":";   out += String((long)g_beatPeriodMs);
+  // The tempo the reactor actually USED, after the half-beat doubling - the honest number.
+  out += ",\"perMs\":";    out += String((long)(musicalTempoS() * 1000.0f));
+  // The CLOCK PERIOD itself, which is now the tempo source. Should sit near perMs; the old
+  // g_beatPeriodMs is still published as beatMs to show how far off it was.
+  out += ",\"ivMs\":";     out += String((unsigned long)beatListen[0].ivMs);  out += String((long)(g_beatSettled ? 1 : 0));
   out += ",\"setRun\":";   out += String((unsigned long)g_setRun);
   out += ",\"halfAge\":";  out += String((unsigned long)((g_halfLast && (millis() - g_halfLast) < 600000UL)
                                                       ? ((millis() - g_halfLast) / 1000UL) : 9999UL));
