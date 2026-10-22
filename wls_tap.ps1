@@ -43,6 +43,7 @@ function NowMs { return [int]([Environment]::TickCount -band 0x7FFFFFFF) }
 $script:logCsv  = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'beat1_taps_LABEL.csv'
 $script:syncCsv = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'beat1_sync_LABEL.csv'
 $script:syncN   = 0
+$script:sendScript = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'wls_tap_send.ps1'
 
 function SyncAt {
   $w1 = [DateTime]::Now
@@ -121,9 +122,9 @@ if (-not $probe.ok) {
 
 
 $n = 0
-$agree = 0
-$dis = 0
-$stray = 0
+# (agree/disagree/stray counters removed: the alignment is done afterwards)
+
+
 while ($true) {
   if ([Console]::KeyAvailable) {
     $k = [Console]::ReadKey($true)
@@ -138,30 +139,29 @@ while ($true) {
     $pressTick = NowMs
     $pressWall = [DateTime]::Now
     Add-Content -Path $script:logCsv -Value ("{0},{1},{2}" -f $n, $pressTick, $pressWall.ToString('HH:mm:ss.fff'))
-    $r = Send-Tap $pressTick
+    # THE SEND MUST NOT BLOCK THE POLL (22 Oct). MEASURED: the board's reply takes 70-1300 ms and the loop
+    # was waiting for all of it, so a press made during a send was never seen - about 50 presses produced
+    # only 4 lines. The request now goes out from a SEPARATE hidden process which returns immediately, so
+    # the loop keeps polling and no press is missed. The press time is already logged above and is also
+    # passed in ?t=, so the delay cannot affect when the board thinks the press happened.
+    Start-Process -FilePath 'powershell' -ArgumentList @(
+      '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:sendScript,'-T',$pressTick,'-Board',$Board
+    ) -WindowStyle Hidden | Out-Null
+    $r = @{ ok = $true; body = 'sent (background)'; ms = 0 }
     $stamp = (Get-Date -Format 'HH:mm:ss.fff')
-    if (-not $r.ok) {
-      Write-Host ("  {0}  #{1,-3}  NO ANSWER ({2} ms)" -f $stamp, $n, $r.ms) -ForegroundColor Red
-    } elseif ($r.body -like '*stray*') {
-      $stray++
-      Write-Host ("  {0}  #{1,-3}  ----   no beat near that click ({2} ms)" -f $stamp, $n, $r.ms) -ForegroundColor DarkYellow
-    } elseif ($r.body -like '*AGREE*') {
-      $agree++
-      Write-Host ("  {0}  #{1,-3}  BEAT 1  board agrees ({2} ms)" -f $stamp, $n, $r.ms) -ForegroundColor Green
-    } else {
-      $dis++
-      Write-Host ("  {0}  #{1,-3}  beat 1  board says: {2} ({3} ms)" -f $stamp, $n, $r.body, $r.ms) -ForegroundColor Magenta
-    }
-    Write-Host ("           tally: agree {0}   disagree {1}   stray {2}" -f $agree, $dis, $stray) -ForegroundColor Gray
-  }
+    # ONE CLEAN LINE PER PRESS (22 Oct). The request now goes out on its own, so there is no reply to
+    # print - and none is wanted, because the board's answer only mattered for the live tally, which the
+    # AFTERWARDS alignment replaces. What matters is that EVERY press is recorded here, the instant it
+    # happens, and that the loop never stops watching the button.
+    Write-Host ("  {0}  press #{1,-3}  logged" -f $stamp, $n) -ForegroundColor Green  }
   $down = $isDown
   Start-Sleep -Milliseconds $PollMs
 }
 
 Write-Host ''
 Write-Host '=====================================================================' -ForegroundColor Cyan
-Write-Host ("  DONE.  clicks {0}   agree {1}   disagree {2}   stray {3}" -f $n, $agree, $dis, $stray) -ForegroundColor Cyan
-Write-Host '  If agree is close to the click count, the detector picks the same beat as your ear.' -ForegroundColor Gray
+Write-Host ("  DONE.  presses recorded {0}" -f $n) -ForegroundColor Cyan
+Write-Host '  Presses are in beat1_taps_LABEL.csv. Tell me when done and I will align them.' -ForegroundColor Gray
 Write-Host ''
 Write-Host '  *** REMINDER: REMOVE THIS SCRIPT FROM THE LAPTOP - the testing phase is over. ***' -ForegroundColor Yellow
 Write-Host '=====================================================================' -ForegroundColor Cyan
