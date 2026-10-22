@@ -4131,11 +4131,20 @@ static bool          g_paceWasIdle = true;
 // to the tempo search, because the display's life depends on it. 120 ms is 500 BPM and 1200 ms is
 // 50 BPM, so nothing musical is lost.
 // SEE THE NOTE ABOVE THE CALL SITES: a period under MIN_BEAT_MS is the half-beat and is doubled.
-#define MIN_BEAT_MS 350
+#define MIN_BEAT_MS        350   // under this a period is taken to be the half-beat
+#define STICKY_RELEASE_MS  500   // and it STAYS halved until it clearly exceeds this, so it cannot toggle
+static bool g_halfSticky = false;   // see the note above: sticky, never toggling on a threshold
+static uint32_t g_halfDoubles = 0;  // how many times the half-beat has been corrected
 static inline unsigned long fixHalfBeat(unsigned long ms) {
   if (ms == 0) return 0;
-  while (ms < MIN_BEAT_MS && ms < 4000) ms *= 2;
-  return ms;
+  // STICKY DECISION, not a threshold test: this is the fix for the toggling that made the tempo oscillate
+  // after every quiet section - "half beat, back into time, then out again".
+  if (!g_halfSticky && ms < MIN_BEAT_MS) { g_halfSticky = true; g_halfDoubles++; }
+  if (g_halfSticky && ms > STICKY_RELEASE_MS) { g_halfSticky = false; }   // released only when clearly long
+  if (!g_halfSticky) return ms;
+  unsigned long d = ms;
+  while (d < MIN_BEAT_MS && d < 4000) d *= 2;
+  return d;
 }
 
 static inline unsigned long clampBeatPeriod(unsigned long ms) {
@@ -4466,16 +4475,6 @@ static void listeningStep() {
               // A REAL BEAT. A quarter of the phase error and a sixteenth of it into the period: both
               // far too small to see on one beat, and together they converge in a few beats.
               L.clkNext = (unsigned long)((long)L.clkNext + err / 4);
-              // THE CORRECTION MUST GO INTO THE AVERAGE TOO (22 Oct). Writing only L.ivMs did NOTHING:
-              // the tempo-adoption block resets L.ivMs from g_perAvg on every onset, so the correction was
-              // wiped milliseconds later, every single time, and never accumulated. That is why the timing
-              // still advanced very slightly every beat. g_perAvg is the value the search actually
-              // maintains, so the correction belongs there - and then it BUILDS UP instead of vanishing.
-              if (g_perAvg > 0) {
-                g_perAvg += (long)(err / 16);
-                if (g_perAvg < 120)  g_perAvg = 120;
-                if (g_perAvg > 1200) g_perAvg = 1200;
-              }
               L.ivMs    = clampBeatPeriod((unsigned long)((long)L.ivMs + err / 16));
               g_tmFixed++;
               if (ae > g_tmWorst) g_tmWorst = (int32_t)ae;
@@ -6669,6 +6668,10 @@ void handleTrav() {
   // already sitting on the music.
   out += ",\"tmFixed\":";  out += String((unsigned long)g_tmFixed);
   out += ",\"beat1\":";    out += String((unsigned long)g_beat1Flashes);
+  // THE STICKY GUARD: sticky 1 means the period is currently being treated as the half-beat. It should
+  // CHANGE RARELY - a state that flips often is the toggling that made the tempo oscillate.
+  out += ",\"sticky\":";   out += String((long)(g_halfSticky ? 1 : 0));
+  out += ",\"halved\":";   out += String((unsigned long)g_halfDoubles);
   // THE BEAT-1 SCORE FROM THE USER TAPS (22 Oct). tapCount taps landed on a beat; tapAgree of those
   // the model ALSO called beat 1. tapAgree near tapCount means the detector picks the same beat as the
   // user ear. tapStray counts presses that landed nowhere near a beat.
