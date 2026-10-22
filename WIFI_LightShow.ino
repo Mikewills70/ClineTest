@@ -1262,6 +1262,10 @@ static int32_t  g_tmWorst = 0;
 // THE STEADY BEAT RATE (22 Oct). An average of the recent medians, moved by only an eighth each
 // time, so one stray measurement cannot shift the beat - which is what steadies IO48.
 static long     g_perAvg = 0;
+// THE PERSISTENT RATE TRIM (22 Oct): a small correction to the beat PERIOD, in ms, kept in its own
+// variable so the tempo search cannot overwrite it. Applied when the clock schedules the next beat.
+static long     g_rateTrim = 0;
+static long     g_rateTrimMax = 0;   // the largest it has reached, for the log
 // (The PLL trim and pllPeriod lived here. The trim was switched off - its accumulation caused the
 // drift the user reported as "lots of corrections happening" - so pllPeriod was returning its
 // argument unchanged. Dead weight, removed, and the period is now what the comb and the clean
@@ -4131,20 +4135,11 @@ static bool          g_paceWasIdle = true;
 // to the tempo search, because the display's life depends on it. 120 ms is 500 BPM and 1200 ms is
 // 50 BPM, so nothing musical is lost.
 // SEE THE NOTE ABOVE THE CALL SITES: a period under MIN_BEAT_MS is the half-beat and is doubled.
-#define MIN_BEAT_MS        350   // under this a period is taken to be the half-beat
-#define STICKY_RELEASE_MS  500   // and it STAYS halved until it clearly exceeds this, so it cannot toggle
-static bool g_halfSticky = false;   // see the note above: sticky, never toggling on a threshold
-static uint32_t g_halfDoubles = 0;  // how many times the half-beat has been corrected
+#define MIN_BEAT_MS 350
 static inline unsigned long fixHalfBeat(unsigned long ms) {
   if (ms == 0) return 0;
-  // STICKY DECISION, not a threshold test: this is the fix for the toggling that made the tempo oscillate
-  // after every quiet section - "half beat, back into time, then out again".
-  if (!g_halfSticky && ms < MIN_BEAT_MS) { g_halfSticky = true; g_halfDoubles++; }
-  if (g_halfSticky && ms > STICKY_RELEASE_MS) { g_halfSticky = false; }   // released only when clearly long
-  if (!g_halfSticky) return ms;
-  unsigned long d = ms;
-  while (d < MIN_BEAT_MS && d < 4000) d *= 2;
-  return d;
+  while (ms < MIN_BEAT_MS && ms < 4000) ms *= 2;
+  return ms;
 }
 
 static inline unsigned long clampBeatPeriod(unsigned long ms) {
@@ -4476,6 +4471,16 @@ static void listeningStep() {
               // far too small to see on one beat, and together they converge in a few beats.
               L.clkNext = (unsigned long)((long)L.clkNext + err / 4);
               L.ivMs    = clampBeatPeriod((unsigned long)((long)L.ivMs + err / 16));
+              // AND THE PERSISTENT TRIM. err is (onset - scheduled beat), so a clock that runs FAST sees
+              // the onsets arrive LATE and err comes back positive - which LENGTHENS the period, exactly
+              // the correction the measurement calls for. 1/8 per beat converges in a few beats, and the
+              // clamp stops anything wild if the music changes.
+              g_rateTrim += (long)(err / 8);
+              if (g_rateTrim >  60) g_rateTrim =  60;
+              if (g_rateTrim < -60) g_rateTrim = -60;
+              if ((g_rateTrim < 0 ? -g_rateTrim : g_rateTrim) > g_rateTrimMax) {
+                g_rateTrimMax = (g_rateTrim < 0 ? -g_rateTrim : g_rateTrim);
+              }
               g_tmFixed++;
               if (ae > g_tmWorst) g_tmWorst = (int32_t)ae;
             } else {
@@ -4627,7 +4632,10 @@ static void listeningStep() {
             beatListen[p].clkFires++;
           }
         }
-        L.clkNext += L.ivMs;
+        // THE TRIM IS APPLIED HERE (22 Oct), when the next beat is scheduled - not in L.ivMs or g_perAvg,
+        // which the tempo search overwrites. This is what makes a correction SURVIVE, which the two
+        // earlier attempts did not.
+        L.clkNext += (unsigned long)((long)L.ivMs + g_rateTrim);
         if ((long)(now - L.clkNext) > (long)L.ivMs) L.clkNext = now + L.ivMs;  // never flood
         // THE TRAVERSE LASTS EXACTLY UNTIL THE NEXT CLOCK BEAT (21 Oct). It used to take
         // the gap to the PREVIOUS trigger, which is not the same number: the phase steering
@@ -6668,10 +6676,11 @@ void handleTrav() {
   // already sitting on the music.
   out += ",\"tmFixed\":";  out += String((unsigned long)g_tmFixed);
   out += ",\"beat1\":";    out += String((unsigned long)g_beat1Flashes);
-  // THE STICKY GUARD: sticky 1 means the period is currently being treated as the half-beat. It should
-  // CHANGE RARELY - a state that flips often is the toggling that made the tempo oscillate.
-  out += ",\"sticky\":";   out += String((long)(g_halfSticky ? 1 : 0));
-  out += ",\"halved\":";   out += String((unsigned long)g_halfDoubles);
+  // THE RATE TRIM: the measured drift correction, in ms. It should settle to a steady value near +5
+  // (the measured 444 vs 449 ms). If it climbs to the clamp, the clock is wrong by more than this
+  // correction can fix.
+  out += ",\"rateTrim\":"; out += String((long)g_rateTrim);
+  out += ",\"trimMax\":";  out += String((long)g_rateTrimMax);
   // THE BEAT-1 SCORE FROM THE USER TAPS (22 Oct). tapCount taps landed on a beat; tapAgree of those
   // the model ALSO called beat 1. tapAgree near tapCount means the detector picks the same beat as the
   // user ear. tapStray counts presses that landed nowhere near a beat.
