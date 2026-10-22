@@ -1220,6 +1220,33 @@ static int           chaseFromPos[NUM_PORTS]  = {0};   // where this traverse st
 // tmRej counts detections REFUSED because they would have needed a big one, tmWorst the largest
 // accepted error in ms. If tmRej stays near zero and tmWorst is small, the timer is tracking real
 // beats and rejecting nothing.
+// ===================================================================================================
+// THE BEAT RING, AND THE USER'S BEAT-1 TAPS (22 Oct)
+// ===================================================================================================
+// USER: "I will press the keyboard spacebar every time beat 1 is heard. My timing will be a little
+// inaccurate but when paired with the beat detection you should be able to identify which beat I am
+// highlighting. You need to learn from the sound how to detect beat 1 and compare it to my presses."
+//
+// THE USER'S CORRECTION, and it matters: "The timing must come from the beats only, nothing to do when I
+// hit the spacebar!!!" A tap is therefore used ONLY to LABEL which beat is beat 1. It never sets, adjusts
+// or in any way influences the beat time. The timing comes from the beat detection alone.
+//
+// The ring keeps the last few clock beats with the bar position the model gave each of them, plus the two
+// parity-band readings at that beat. A tap finds the NEAREST one and labels it - which is how the user's
+// press says "this beat is beat 1" without any dependence on how accurately they pressed.
+#define TAP_RING 24
+static unsigned long g_beatRt[TAP_RING];   // when that beat fired
+static int8_t        g_beatRp[TAP_RING];   // the bar position the model gave it (0 = beat 1)
+static float         g_beatRs[TAP_RING];   // snare-band novelty at that beat
+static float         g_beatRm[TAP_RING];   // mid-band novelty at that beat
+static uint8_t       g_beatRi = 0;         // the write cursor
+static uint32_t      g_beatRn = 0;         // how many beats are in the ring
+static uint8_t       g_tapSlot = 0;        // the tap cursor
+static uint32_t      g_tapCount = 0;       // taps that landed near a beat
+static uint32_t      g_tapAgree = 0;       // ... and the model also called that beat 1
+static uint32_t      g_tapDisagree = 0;    // ... and the model did NOT
+static uint32_t      g_tapStray = 0;       // presses that were nowhere near a beat
+
 static uint32_t g_tmFixed = 0;
 static uint32_t g_tmRej   = 0;
 static int32_t  g_tmWorst = 0;
@@ -4555,6 +4582,15 @@ static void listeningStep() {
           {
             float dbNow = dbActRaw();
             if (!g_idlePace) barPhaseStep(dbNow);
+            // KEEP EVERY BEAT WITH ITS BAR POSITION (22 Oct). The user's tap will find the nearest one here
+            // and label it - see the note on the beat ring. Recorded AFTER barPhaseStep, so the position is
+            // the model's answer for THIS beat.
+            g_beatRt[g_beatRi] = now;
+            g_beatRp[g_beatRi] = (int8_t)g_barPos;
+            g_beatRs[g_beatRi] = odfChain[4].novelty;
+            g_beatRm[g_beatRi] = odfChain[5].novelty;
+            g_beatRi = (uint8_t)((g_beatRi + 1) % TAP_RING);
+            if (g_beatRn < 250) g_beatRn++;
             // THE HALF-BEAT PHASE TEST - the question this session started with. THE MODEL IS BLIND TO
             // (The half-beat test and its correction lived here. Both were guesses at a clock PHASE
             // problem, and both were JUMPS the user could see. The clean timer follows every real beat
@@ -6431,6 +6467,39 @@ void applyMasterBrightness() {
 // is already heavy - it builds several KB of JSON on the render core - and adding six fields there
 // wedged the web server (ping answered, HTTP did not; the LED stayed dark, so a hang, not a boot
 // loop). A small separate reply keeps this instrument unable to affect anything else.
+// THE USER'S BEAT-1 TAP (22 Oct). USER: "I will press the keyboard spacebar every time beat 1 is heard.
+// My timing will be a little inaccurate but when paired with the beat detection you should be able to
+// identify which beat I am highlighting."
+// THE USER'S CORRECTION: "The timing must come from the beats only, nothing to do when I hit the
+// spacebar!!!" So this handler LABELS a beat and does NOTHING ELSE. It never touches the clock, the
+// period, clkNext, or any timing value. It finds the nearest beat already DETECTED and remembers that the
+// user said "this one is beat 1" - which is exactly how an inaccurate press still identifies WHICH beat.
+void handleTap() {
+  unsigned long nowMs = millis();
+  int best = -1;
+  unsigned long bestD = 0xFFFFFFFFUL;
+  if (beatListen[0].ivMs >= 120 && g_beatRn > 0) {
+    unsigned long lim = beatListen[0].ivMs / 3;      // a third of a beat: closer than that is a beat
+    for (uint8_t k = 0; k < TAP_RING && k < g_beatRn; k++) {
+      uint8_t ix = (uint8_t)((g_beatRi + TAP_RING - 1 - k) % TAP_RING);
+      unsigned long d = (nowMs > g_beatRt[ix]) ? (nowMs - g_beatRt[ix]) : (g_beatRt[ix] - nowMs);
+      if (d < bestD) { bestD = d; best = ix; }
+    }
+    if (bestD > lim) best = -1;                      // nowhere near a beat: a stray press, ignored
+  }
+  if (best >= 0) {
+    g_tapSlot = (uint8_t)((g_tapSlot + 1) % TAP_RING);
+    g_tapCount++;
+    // THE AGREEMENT SCORE: the model calls a beat "beat 1" when its position is 0. The user has just said
+    // "this one is beat 1". Do they agree? That single count is the honest score for the beat-1 detector.
+    if (g_beatRp[best] == 0) g_tapAgree++; else g_tapDisagree++;
+    server.send(200, "text/plain", "beat");
+  } else {
+    g_tapStray++;
+    server.send(200, "text/plain", "stray");
+  }
+}
+
 void handleTrav() {
   String out;
   out.reserve(256);
@@ -6506,6 +6575,13 @@ void handleTrav() {
   // already sitting on the music.
   out += ",\"tmFixed\":";  out += String((unsigned long)g_tmFixed);
   out += ",\"beat1\":";    out += String((unsigned long)g_beat1Flashes);
+  // THE BEAT-1 SCORE FROM THE USER TAPS (22 Oct). tapCount taps landed on a beat; tapAgree of those
+  // the model ALSO called beat 1. tapAgree near tapCount means the detector picks the same beat as the
+  // user ear. tapStray counts presses that landed nowhere near a beat.
+  out += ",\"tapCount\":"; out += String((unsigned long)g_tapCount);
+  out += ",\"tapAgree\":"; out += String((unsigned long)g_tapAgree);
+  out += ",\"tapDis\":";   out += String((unsigned long)g_tapDisagree);
+  out += ",\"tapStray\":"; out += String((unsigned long)g_tapStray);
   // The bar model position (0 = beat 1) and its confidence. Together with beat1 this says whether the
   // beat-1 indicator is firing at the right moments.
   out += ",\"barPos\":";   out += String((long)g_barPos);
@@ -7360,6 +7436,7 @@ void setup() {
   server.on("/audio", HTTP_GET, handleAudioDetect);
   server.on("/diag", HTTP_GET, handleDiag);
   server.on("/trav", HTTP_GET, handleTrav);   // INSTRUMENT: traverse starts, RAM only
+  server.on("/tap", HTTP_GET, handleTap);      // THE BEAT-1 TAP: labels a beat, times nothing
   server.on("/onsets", HTTP_GET, handleOnsets);   // INSTRUMENT: per-onset ring, RAM only
   server.on("/trace",  HTTP_GET, handleTrace);    // INSTRUMENT: 50 Hz level/novelty ring
   server.on("/leaktest", HTTP_GET, handleLeakTest);

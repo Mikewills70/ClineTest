@@ -1236,7 +1236,37 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     // suspects - the firmware stays perfectly healthy while the screen is dead, and the log
     // says nothing. Report it to the board (GET /pagerr) so it lands in /log.txt beside the
     // requests, with the line and the stack.
-    window.addEventListener('error', function (e) {
+    /* THE BEAT-1 TAP (22 Oct).
+   USER: "I will press the keyboard spacebar every time beat 1 is heard. My timing will be a little
+   inaccurate but when paired with the beat detection you should be able to identify which beat I am
+   highlighting. You need to learn from the sound how to detect beat 1 and compare it to my presses."
+   THE USER'S CORRECTION, which matters: "The timing must come from the beats only, nothing to do when I
+   hit the spacebar!!!" So a press LABELS a beat and does nothing else. It never sets or adjusts any
+   timing. The firmware finds the nearest detected beat and remembers that the user called it beat 1,
+   which is exactly how a slightly inaccurate press still identifies WHICH beat was meant. */
+(function () {
+  var lastTap = 0;
+  document.addEventListener('keydown', function (ev) {
+    if (ev.code !== 'Space' && ev.key !== ' ') return;
+    if (ev.repeat) return;
+    var t = ev.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    var n = Date.now();
+    if (n - lastTap < 120) return;                 // one press, one tap
+    lastTap = n;
+    ev.preventDefault();
+    fetch('/tap').then(function (r) { return r.text(); }).then(function (s) {
+      var el = document.getElementById('tapline');
+      if (el) {
+        el.textContent = 'beat-1 tap: ' + s;
+        el.style.opacity = '1';
+        setTimeout(function () { el.style.opacity = '0.35'; }, 400);
+      }
+    }).catch(function () {});
+  });
+})();
+
+window.addEventListener('error', function (e) {
         fetch('/pagerr?m=' + encodeURIComponent(String(e.message || '?')) +
               '&l=' + encodeURIComponent((e.lineno || 0) + ':' + (e.colno || 0)) +
               '&s=' + encodeURIComponent(String((e.error && e.error.stack) || '').slice(0, 120)))
