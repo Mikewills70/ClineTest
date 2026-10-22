@@ -1246,6 +1246,11 @@ static uint32_t      g_tapCount = 0;       // taps that landed near a beat
 static uint32_t      g_tapAgree = 0;       // ... and the model also called that beat 1
 static uint32_t      g_tapDisagree = 0;    // ... and the model did NOT
 static uint32_t      g_tapStray = 0;       // presses that were nowhere near a beat
+// THE CLOCK OFFSET between the laptop and the board, learned from the taps themselves. See handleTap.
+static int32_t       g_tapOff[7] = {0,0,0,0,0,0,0};
+static uint8_t       g_tapOffI = 0;
+static uint8_t       g_tapOffN = 0;
+static int32_t       g_tapOffMed = 0;   // the median offset currently in use, published for the log
 
 static uint32_t g_tmFixed = 0;
 static uint32_t g_tmRej   = 0;
@@ -6475,7 +6480,29 @@ void applyMasterBrightness() {
 // period, clkNext, or any timing value. It finds the nearest beat already DETECTED and remembers that the
 // user said "this one is beat 1" - which is exactly how an inaccurate press still identifies WHICH beat.
 void handleTap() {
-  unsigned long nowMs = millis();
+  // THE PRESS TIME COMES FROM THE CLIENT (22 Oct). MEASURED: this server answers anywhere from 70 to
+  // 1300 ms after a request, because it only replies when the main loop reaches it - so a press
+  // timestamped on ARRIVAL would be up to two beats late. The client sends its own millisecond count and
+  // the board derives the offset between the two clocks from the MEDIAN of the recent taps, which absorbs
+  // the network and server delay automatically. THE TIMING IS STILL UNTOUCHED - this decides only WHICH
+  // beat was meant.
+  unsigned long arr = millis();
+  long cli = server.hasArg("t") ? (long)server.arg("t").toInt() : -1;
+  if (cli > 0) {
+    g_tapOff[g_tapOffI] = (int32_t)((int32_t)arr - (int32_t)cli);
+    g_tapOffI = (uint8_t)((g_tapOffI + 1) % 7);
+    if (g_tapOffN < 7) g_tapOffN++;
+  }
+  unsigned long nowMs = arr;
+  if (g_tapOffN > 0 && cli > 0) {
+    int32_t s[7];
+    for (uint8_t k = 0; k < g_tapOffN; k++) s[k] = g_tapOff[k];
+    for (uint8_t a = 0; a + 1 < g_tapOffN; a++)
+      for (uint8_t b = 0; b + 1 < g_tapOffN - a; b++)
+        if (s[b] > s[b + 1]) { int32_t tmp = s[b]; s[b] = s[b + 1]; s[b + 1] = tmp; }
+    g_tapOffMed = s[g_tapOffN / 2];
+    nowMs = (unsigned long)((int32_t)cli + g_tapOffMed);
+  }
   int best = -1;
   unsigned long bestD = 0xFFFFFFFFUL;
   if (beatListen[0].ivMs >= 120 && g_beatRn > 0) {
@@ -6493,7 +6520,13 @@ void handleTap() {
     // THE AGREEMENT SCORE: the model calls a beat "beat 1" when its position is 0. The user has just said
     // "this one is beat 1". Do they agree? That single count is the honest score for the beat-1 detector.
     if (g_beatRp[best] == 0) g_tapAgree++; else g_tapDisagree++;
-    server.send(200, "text/plain", "beat");
+    // THE REPLY NAMES THE POSITION THE MODEL GAVE THAT BEAT, so the feedback on the laptop says whether
+    // the two agreed. pos=0 means the model ALSO called it beat 1; pos=1..3 means the user called beat 1
+    // a beat the model had placed elsewhere. All this does is REPORT - nothing here times anything.
+    String rep = "beat pos=";
+    rep += String((int)g_beatRp[best]);
+    if (g_beatRp[best] == 0) rep += " AGREE"; else rep += " disagree";
+    server.send(200, "text/plain", rep);
   } else {
     g_tapStray++;
     server.send(200, "text/plain", "stray");
@@ -6582,6 +6615,10 @@ void handleTrav() {
   out += ",\"tapAgree\":"; out += String((unsigned long)g_tapAgree);
   out += ",\"tapDis\":";   out += String((unsigned long)g_tapDisagree);
   out += ",\"tapStray\":"; out += String((unsigned long)g_tapStray);
+  // The clock offset currently in use, ms. It should settle to a steady value once a few taps have
+  // been made; if it swings widely the replies are too variable to calibrate from.
+  out += ",\"tapOff\":";   out += String((long)g_tapOffMed);
+  out += ",\"tapOffN\":";  out += String((unsigned long)g_tapOffN);
   // The bar model position (0 = beat 1) and its confidence. Together with beat1 this says whether the
   // beat-1 indicator is firing at the right moments.
   out += ",\"barPos\":";   out += String((long)g_barPos);
