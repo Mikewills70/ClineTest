@@ -138,6 +138,20 @@ volatile bool musicFullMode = false;   // "FULL RANGE" selected (audio task read
 unsigned long lastStepTime = 0;
 unsigned long lastBeatTime = 0;
 unsigned long powerLedOffAt = 0;   // IO48 flash-off timestamp (0 = already off)
+// ===================================================================================================
+// *** TEST FEATURE: BEAT 1 ON 240V CHANNEL 10 - REMOVE WHEN THE COMPARISON IS DONE ***
+// USER, 22 Oct: "I want you to try and detect beat 1, and when you think the beat you are listening to
+// is beat 1, flash 240V channel 10 only for the same length of time IO48 is on, so I can compare your
+// timing to reality."
+// Channel 10 is channelPins[9] (pin 42). The flash is driven ONLY from the beat block below, and the
+// 240V render SKIPS this pin, so the pattern output cannot fight the indicator.
+// Beat 1 is the BAR MODEL position 0 - the same model that reached 88 per cent confidence.
+// TO REMOVE: this block, the flash in the rawBeatFlag block, the off block beside the IO48 one, and
+// the skip in the 240V channel loop.
+// ===================================================================================================
+#define BEAT1_CHAN_IDX 9
+static unsigned long beat1OffAt = 0;      // beat-1 indicator flash-off timestamp (0 = off)
+static uint32_t      g_beat1Flashes = 0;  // how many times beat 1 has been flashed
 int dotPos240 = 0;
 int dotDirection = 1;
 // A beat must be LATCHED: the 240V display steps at its own rate, so a beat
@@ -1202,25 +1216,21 @@ static int           chaseFromPos[NUM_PORTS]  = {0};   // where this traverse st
 // MEASURED: onsPos mid-strip in 34 of 66 rows while beatPos was at the ends and travPer was 100.
 // A track with genuine off-beat hits ALTERNATES its onsets between beat and off-beat, so its error
 // is not CONSISTENTLY half a beat - a run of them therefore means the grid is simply wrong.
-#define HALF_RUN_LIMIT 4          // consecutive dead-zone onsets before the grid is moved
-static uint8_t  g_halfRun = 0;    // the current run of them
+// THE CLEAN BEAT TIMER (22 Oct). tmFixed counts beats that were followed with a small correction,
+// tmRej counts detections REFUSED because they would have needed a big one, tmWorst the largest
+// accepted error in ms. If tmRej stays near zero and tmWorst is small, the timer is tracking real
+// beats and rejecting nothing.
+static uint32_t g_tmFixed = 0;
+static uint32_t g_tmRej   = 0;
+static int32_t  g_tmWorst = 0;
 // THE STEADY BEAT RATE (22 Oct). An average of the recent medians, moved by only an eighth each
 // time, so one stray measurement cannot shift the beat - which is what steadies IO48.
 static long     g_perAvg = 0;
-// THE PLL TRIM (22 Oct). A persistent, slowly-accumulated correction to the BEAT PERIOD, in ms.
-// The comb search supplies the rough tempo; this supplies the last fraction of a percent that the
-// comb cannot resolve. Without it the clock runs fractionally fast for ever and the phase walks.
-static int32_t  g_pllTrim = 0;
-// Clamp the trim to an eighth of the period, so a bad run of onsets can never wreck the tempo.
-static unsigned long pllPeriod(unsigned long base) {
-  long t = g_pllTrim;
-  long lim = (long)(base / 8);
-  if (t >  lim) t =  lim;
-  if (t < -lim) t = -lim;
-  long v = (long)base + t;
-  return (v > 60) ? (unsigned long)v : base;
-}
-static uint32_t g_halfRe  = 0;    // how many times the grid has been moved by half a beat
+// (The PLL trim and pllPeriod lived here. The trim was switched off - its accumulation caused the
+// drift the user reported as "lots of corrections happening" - so pllPeriod was returning its
+// argument unchanged. Dead weight, removed, and the period is now what the comb and the clean
+// timer say it is.)
+// (g_halfRe removed with the half-beat escape.)
 static uint32_t g_travStarts = 0;
 // TRAVERSE INSTRUMENTS (22 Oct, read-only - they change no behaviour). A clock beat is the
 // instant the previous traverse ends and the next begins, so the START POSITION IS THE DOT
@@ -1261,12 +1271,12 @@ static int32_t  g_dbAct100  = 0;      // the last downbeat activation, x100
 static uint32_t g_barBeats  = 0;      // beats fed into the model
 static uint32_t g_barStable = 0;      // consecutive beats the position has not changed
 static float    g_dbBeatAcc = 0.0f, g_dbMidAcc = 0.0f;   // the activation on beats / on midpoints
-static float    g_dbBeatMean = 0.0f, g_dbMidMean = 0.0f;  // an HONEST EMA of the same two values
-static uint32_t g_dbBeatN = 0, g_dbMidN = 0;              // how many samples each
-static uint32_t g_halfShift = 0;      // times the grid has been moved half a beat
+// (The beat/midpoint means lived here. They fed the half-beat test, both are removed.)
+// (The sample counts lived here with the means.)
+// (g_halfShift removed with the half-beat correction.)
 static float    g_snHold = 0.0f, g_mdHold = 0.0f;   // the PEAK since the last sample
-static bool     g_halfDone = false;   // kept for the log, but no longer blocks a correction
-static unsigned long g_halfLast = 0;  // the last correction, so a cooldown stops any bouncing
+// (g_halfDone removed with the half-beat correction.)
+// (g_halfLast removed with the half-beat correction.)
 // IS THE BEAT SETTLED? (22 Oct) The clock may drive the crossing - and its beats may reverse the
 // dot - only once the TEMPO has held still for a few beats. Before that the estimate is warm-up
 // junk, and driving the crossing from it is what stalled the dot at both ends during the intro.
@@ -4332,7 +4342,7 @@ static void listeningStep() {
             L.pIdx = (uint8_t)((L.pIdx + 1) % 3);
             if (L.pN < 3) L.pN++;
             if (L.pN < 3) {
-              unsigned long base = clampBeatPeriod(pllPeriod(p));
+              unsigned long base = clampBeatPeriod((unsigned long)p);
               if (g_perAvg <= 0) g_perAvg = (long)base;
               else                g_perAvg += ((long)base - g_perAvg) / 8;
               L.ivMs = clampBeatPeriod((unsigned long)g_perAvg);
@@ -4348,7 +4358,7 @@ static void listeningStep() {
               // Each new median now moves the rate by an EIGHTH only, so one stray measurement cannot
               // move the beat, while a real tempo change is still followed within a few bars.
               {
-                unsigned long base = clampBeatPeriod(pllPeriod(mid));
+                unsigned long base = clampBeatPeriod(mid);
                 if (g_perAvg <= 0) g_perAvg = (long)base;
                 else                g_perAvg += ((long)base - g_perAvg) / 8;
                 L.ivMs = clampBeatPeriod((unsigned long)g_perAvg);
@@ -4381,86 +4391,45 @@ static void listeningStep() {
         //   * an onset near the prediction pulls the grid a quarter of the way towards it;
         //   * an onset 0.25-0.75 of a period late RE-PHASES the grid from itself;
         //   * an onset near the half-period (the off-beat) cannot move the grid at all.
+        // ===========================================================================================
+        // THE BEAT TIMER, CLEAN (22 Oct). THE USER'S DESIGN, and it replaces every one of the old
+        // correction mechanisms - all of which STEPPED the beat time and were therefore visible as a
+        // delay in the flash:
+        //
+        //   "I want a small adjustment PER BEAT, and an overall timer to keep track of the beat. If I
+        //    can see an extra beat or error in timing with my eyes and without timers calibrated to ms,
+        //    then an overall timer should be able to eliminate any spurious beats that do not conform to
+        //    the small timing changes that might be required per beat."
+        //
+        // THE OVERALL TIMER is L.clkNext. It ACCUMULATES (L.clkNext += L.ivMs, below) and is never
+        // written to a fresh value, which is what makes it an independent reference.
+        // THE PER-BEAT ADJUSTMENT is a FRACTION of the error, applied to the timer AND to the period, so
+        // the timing walks into line over a few beats instead of snapping.
+        // THE REJECTION IS THE SIZE ITSELF. A real beat needs only a tiny correction, so it is followed.
+        // A spurious beat would need a big one, so it is REFUSED and the timer does not move at all.
+        // That is how "an overall timer eliminates any spurious beats" - no tuning window, no run
+        // counting, no half-beat escape. Every one of those was a guess at this same problem, and every
+        // one of them was a JUMP, which is exactly why the user could see them.
+        // A few beats to establish is accepted by the user.
+        // ===========================================================================================
         if (L.ivMs >= 200) {
           if (L.clkNext == 0) L.clkNext = stamp + L.ivMs;
           else {
-            long err = (long)stamp - (long)L.clkNext;
-            long q   = (long)(L.ivMs / 3);      // +-1/3 of a beat: wider than before, and
-                                                // still clear of the off-beat at 1/2
-            if (err >= -q && err <= q) {
-              g_halfRun = 0;                     // a clean error: the grid is on the music
-              L.clkNext = (unsigned long)((long)L.clkNext + err / 4);      // pull a quarter
-              // AND CORRECT THE RATE (22 Oct). This is the half of the loop that was missing. A
-              // persistent phase error means the PERIOD is wrong, not the phase, so the same error is
-              // fed slowly into the period. err is (the onset - the predicted beat), so if the lights
-              // are running AHEAD of the music the error is positive and the period lengthens. The
-              // gain is deliberately slow (1/24) so the loop settles rather than hunting, and the
-              // clamp in pllPeriod stops a bad run of onsets from wrecking the tempo.
-              // REVERTED (22 Oct). It HUNTED: "I can see lots of corrections happening, but the main
-              // thing I notice is the beat is no longer hitting at the ends of the strips... the timing
-              // is just wrong." A rate change moves the phase, so feeding the phase error into the
-              // period fought the phase pull instead of damping it. The trim stays at 0, which makes
-              // pllPeriod return the base period, so the clock behaves exactly as before the PLL.
-              // THE RATE CORRECTION, DISCIPLINED (22 Oct). The first attempt HUNTED - it drove the period
-              // to 307 ms - because the phase error from EVERY nearby onset went into the integral,
-              // including noisy ones and off-beats. USER: "the dot returned to the centre of the strip and
-              // started relearning the timing (even though it had been spot on previously)". That is the
-              // clock's phase walking, and it only gets fixed AFTER it has drifted.
-              // Gated three ways this time: only while the tempo is SETTLED, only for onsets within a
-              // TWELFTH of a period of the beat (so off-beats at half a period and general junk are
-              // excluded), a much smaller gain, and the stored trim is clamped as well.
-              if (g_beatSettled) {
-                // A SIXTH, not a twelfth: wide enough to keep working while the phase is out, still far
-                // inside the half-beat where the off-beats live.
-                long pLim = (long)(L.ivMs / 6);
-                if (err >= -pLim && err <= pLim) {
-                  // 1/8, not 1/64. Measured reasoning: a 5% tempo error is ~25 ms per beat, which at
-                  // 1/64 gains 0.4 ms per beat - about 63 beats to correct, during which the phase walks
-                  // past two-thirds of a beat and the missed-beat re-phase can land on an off-beat. At
-                  // 1/8 the same error is corrected in about eight beats, before it can get there.
-                  // TURNED OFF (22 Oct). This was integrating the error from EVERY onset - off-beats
-                  // included - straight into the beat PERIOD at 1/8 gain, with no window to reject a bad
-                  // one. The user saw the result: "I can see lots of corrections happening". A period
-                  // that keeps being nudged is what IO48 drifts against, and with the clamp in place
-                  // switching it off cannot dark the board.
-                  // g_pllTrim += (int32_t)(err / 8);
-                  long tLim = (long)(L.ivMs / 6);
-                  if (g_pllTrim >  tLim) g_pllTrim =  (int32_t)tLim;
-                  if (g_pllTrim < -tLim) g_pllTrim = -(int32_t)tLim;
-                }
-              }
+            long err = (long)stamp - (long)L.clkNext;    // the onset against the SCHEDULED beat
+            long rej = (long)(L.ivMs / 3);               // beyond a third of a beat it is not a beat
+            long ae  = (err < 0) ? -err : err;
+            if (ae <= rej) {
+              // A REAL BEAT. A quarter of the phase error and a sixteenth of it into the period: both
+              // far too small to see on one beat, and together they converge in a few beats.
+              L.clkNext = (unsigned long)((long)L.clkNext + err / 4);
+              L.ivMs    = clampBeatPeriod((unsigned long)((long)L.ivMs + err / 16));
+              g_tmFixed++;
+              if (ae > g_tmWorst) g_tmWorst = (int32_t)ae;
+            } else {
+              // A SPURIOUS BEAT - or an off-beat, which is the same thing here. It does NOT move the
+              // timer. This single branch is the entire rejection mechanism.
+              g_tmRej++;
             }
-            else if (err > (long)(L.ivMs * 2 / 3) && err <= (long)(L.ivMs * 5 / 4))
-              L.clkNext = stamp + L.ivMs;     // the predicted beat was MISSED: re-phase here
-            else {
-              // THE 1/3..2/3 WINDOW, BOTH SIGNS (22 Oct). One of these is an off-beat and must not
-              // move the grid; but a RUN of them means the grid itself is half a beat out. The run is
-              // counted and, at HALF_RUN_LIMIT, the grid is moved onto the music - which is safe
-              // because genuine off-beat hits alternate, so they cannot produce a sustained run.
-              long ae = (err < 0) ? -err : err;
-              if (ae >= (long)(L.ivMs / 3) && ae <= (long)(L.ivMs * 2 / 3)) {
-                if (g_halfRun < 250) g_halfRun++;
-                // ONLY WHILE THE BAR PHASE IS NOT LOCKED (22 Oct). The user: "it drifted into the dot in
-                // the middle after a long time of getting it right" - that is this escape firing when it
-                // should not. Once the bar model has held its position for several beats the phase is
-                // SETTLED, so a run of dead-zone onsets is simply the off-beat being hit, and moving the
-                // grid then is the bounce. The run keeps counting, so the escape is still available the
-                // moment the phase unlocks.
-                if (g_halfRun >= HALF_RUN_LIMIT && g_barStable < 8) {
-                  L.clkNext = stamp + L.ivMs;    // the grid was half a beat out: move it onto the music
-                  g_halfRun = 0;
-                  g_halfRe++;
-                }
-              } else {
-                g_halfRun = 0;                   // far outside: an anomaly, not a half-beat error
-              }
-            }
-            // THE 0.25-0.75 WINDOW IS THE OFF-BEAT AND MUST NOT MOVE THE GRID (21 Oct).
-            // MEASURED: an off-beat onset lands 0.5 of a period after the prediction, and
-            // treating it as a late beat RE-PHASED the clock onto it - then the real beats,
-            // now 0.5 late of the new grid, flipped it back, so the grid bounced between the
-            // beat and the off-beat and the dot reversed mid-traverse. That is exactly what
-            // the user reported: "the dot trying to respond to the double timing".
           }
         }
         g_beatReal++;
@@ -4507,7 +4476,7 @@ static void listeningStep() {
       g_idlePace = true;                     // the period below comes from the Speed slider
         // THE TRIM IS A MUSIC-TEMPO CORRECTION, so it must not survive the music stopping - a stale
         // trim carried into another track would start that track fractionally out.
-        if (idleMs) { g_pllTrim = 0; g_perAvg = 0; }   // a fresh average for the next track
+        if (idleMs) { g_perAvg = 0; }   // a fresh beat-rate average for the next track
         if (idleMs)                 L.ivMs = idleMs;
       else if (chaseStopped())    L.ivMs = CHASE_STOPPED_MS;
       else                       L.ivMs = 1000;
@@ -4587,52 +4556,9 @@ static void listeningStep() {
             float dbNow = dbActRaw();
             if (!g_idlePace) barPhaseStep(dbNow);
             // THE HALF-BEAT PHASE TEST - the question this session started with. THE MODEL IS BLIND TO
-            // A HALF-BEAT OFFSET: it samples the activation only on the clock's OWN beats, so if the
-            // grid sits on the off-beat every sample is taken at the wrong instant and no amount of
-            // model sharpening can see it. MEASURED: with the grid half a beat out, barPos wandered
-            // and halfRe climbed to 32 - the old threshold escape bouncing, exactly as the 21 Oct note
-            // warned it would.
-            // The cure is a SECOND sample, on the MIDPOINTS between the beats, and a comparison. It is
-            // decisive rather than a guess: if the grid is on 1 and 3 the midpoints carry the SNARE
-            // (low activation); if the grid is on 2 and 4 the midpoints carry the DOWNBEAT (high). So a
-            // sustained higher reading at the midpoints means the grid is on the off-beat.
-            if (!g_idlePace) {
-              g_dbBeatMean += (dbNow - g_dbBeatMean) * 0.10f;   // an honest mean - see the note on the
-              g_dbBeatAcc  += dbNow;                            // acc, which is kept only for the gate
-            }
-            if (g_dbBeatN < 400) g_dbBeatN++;
-            if (g_dbBeatN >= 32 && g_dbMidN >= 32) {
-                // THE MEANS, not acc/count. The old form decayed the SUM by 10% every beat while the
-                // COUNT was only capped, so the published value was about 1/24th of the truth and read
-                // 0.00 - which is what made the activation look dead when it was the meter at fault.
-                float bm = g_dbBeatMean;
-              float mm = g_dbMidMean;
-              // STRONGER EVIDENCE + A COOLDOWN, instead of once-only. The ratio went from 1.20 to 1.30
-              // and 45 s must pass between corrections, so a later drift CAN still be fixed while the
-              // test stays far too strict to bounce - which is what the old threshold escape did.
-              if (!g_idlePace && mm > bm * 1.30f &&
-                  (g_halfLast == 0 || (now - g_halfLast) > 45000UL)) {
-                L.clkNext = now + (L.ivMs / 2);   // on the off-beat: move the grid half a beat
-                // AND REVERSE THE DOT AT THE SAME INSTANT. This is the user's own design - "the dot
-                // should change direction exactly when it hears the beat" - and it removes the stall:
-                // the dot has already turned, so it is not waiting for a beat that has moved. Without
-                // this the clock jumps underneath a dot that is mid-crossing and the dot visibly stops
-                // until the new beat arrives.
-                chaseTraverseStart(now);
-                g_halfLast = now;
-                g_halfShift++;
-                // ONCE ONLY (22 Oct). The user saw it fire while the grid was CORRECT and move a
-                // good phase onto the off-beat: "it was on beat perfectly, then stopped and jumped
-                // back in off beat". A phase correction is a jump and cannot be invisible, so the
-                // rule is to make it once, early, and then never again.
-                g_halfDone = true;
-                g_dbBeatAcc = 0; g_dbBeatN = 0; g_dbMidAcc = 0; g_dbMidN = 0;
-                g_dbBeatMean = 0.0f; g_dbMidMean = 0.0f;   // fresh evidence for the next decision
-              }
-              // (the EMA inside the samples is the decay now, so there is nothing to decay here)
-              if (g_dbBeatN > 240) g_dbBeatN = 240;
-              if (g_dbMidN  > 240) g_dbMidN  = 240;
-            }
+            // (The half-beat test and its correction lived here. Both were guesses at a clock PHASE
+            // problem, and both were JUMPS the user could see. The clean timer follows every real beat
+            // directly, so there is no phase left to test for. Removing them is part of the clean-up.
           }
           for (int p = 0; p < NUM_PORTS; p++) {
             if (!portCfg[p].wrap) continue;
@@ -4759,24 +4685,9 @@ static void odfEvaluate() {
     if (snNow > g_snNormPeak) g_snNormPeak = snNow; else g_snNormPeak += (snNow - g_snNormPeak) * 0.02f;
     if (mdNow > g_mdNormPeak) g_mdNormPeak = mdNow; else g_mdNormPeak += (mdNow - g_mdNormPeak) * 0.02f;
   }
-  // THE MIDPOINT SAMPLE (22 Oct). Half a beat after each clock beat the activation is read again,
-  // and it is THIS reading that the half-beat test compares against the beat reading. Without it the
-  // model is blind to a half-beat offset - see the note in the clock.
-  {
-    unsigned long clkPer = beatListen[0].ivMs;
-    if (clkPer >= 200 && beatListen[0].clkNext != 0) {
-      unsigned long lastBeat = beatListen[0].clkNext - clkPer;   // clkNext is one period past it
-      unsigned long el = millis() - lastBeat;
-      if (el >= (clkPer / 2 - 5) && el <= (clkPer / 2 + 5)) {
-        if (!g_idlePace) {
-          float v = dbActRaw();
-          g_dbMidMean += (v - g_dbMidMean) * 0.10f;
-          g_dbMidAcc  += v;
-        }
-        if (g_dbMidN < 400) g_dbMidN++;
-      }
-    }
-  }
+  // (The MIDPOINT SAMPLE lived here. It existed only so the half-beat test could compare the
+  // activation at the beats with the activation half a beat later - and both are gone, because the
+  // clean timer needs no phase measurement at all.)
   // Coefficients refreshed once per frame: audioFs only changes once per FFT window,
   // so this is the same value the per-sample form would have produced.
   odfChain[0].hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
@@ -5583,10 +5494,10 @@ void executePatternStep(bool beatHeard) {
   // top of this file. Every relay channel is driven LOW regardless of the pattern. Remove this block
   // with the switch; the line below it is the original and is untouched when the switch is off.
   if (WLS_IO48_ONLY) {
-    for (int i = 0; i < N; i++) digitalWrite(channelPins[i], LOW);
+    for (int i = 0; i < N; i++) { if (i == BEAT1_CHAN_IDX) continue; digitalWrite(channelPins[i], LOW); }
     return;
   }
-  for (int i = 0; i < N; i++) digitalWrite(channelPins[i], on[i] ? HIGH : LOW);
+  for (int i = 0; i < N; i++) { if (i == BEAT1_CHAN_IDX) continue; digitalWrite(channelPins[i], on[i] ? HIGH : LOW); }
 }
 
 void run240VDisplayPattern(bool beat) {
@@ -6556,10 +6467,6 @@ void handleTrav() {
     out += ",\"swingN\":";   out += String((unsigned long)g_swN);
   }
   out += ",\"paceLast\":";  out += String((unsigned long)g_travPaceLast);
-  // THE HALF-BEAT WATCH (see the note on HALF_RUN_LIMIT): halfRun is the current run of
-  // dead-zone onsets, halfRe how many times the grid has been moved onto the music.
-  out += ",\"halfRun\":"; out += String((unsigned long)g_halfRun);
-  out += ",\"halfRe\":";  out += String((unsigned long)g_halfRe);
   // THE PARITY ANSWER (see the note on g_parAt): which phase the snare and mid bands land on
   // relative to the kick grid. If the SNARE is mostly OFF the grid, the grid is on 1&3 (right).
   // If it is mostly ON the grid, the grid is on 2&4 and should be moved by half a beat.
@@ -6574,7 +6481,7 @@ void handleTrav() {
   // beatOff the display offset - which is worth watching, because the dot is deliberately
   // delayed by it and a large value would put the dot mid-strip when the MUSIC hits even with a
   // perfect grid.
-  out += ",\"barPos\":";   out += String((long)g_barPos);
+  // (barPos is already published by the bar block; the duplicate is removed.)
   out += ",\"barConf\":";  out += String((long)g_barConf);
   out += ",\"dbAct\":";    out += String((long)g_dbAct100);
   out += ",\"barBeats\":"; out += String((unsigned long)g_barBeats);
@@ -6591,18 +6498,31 @@ void handleTrav() {
   out += ",\"paceNow\":";   out += String((unsigned long)g_paceNow);
   out += ",\"paceTgt\":";   out += String((unsigned long)g_paceTarget);
   out += ",\"mBeats\":";    out += String((unsigned long)g_musicBeats);
-  out += ",\"pllTrim\":";  out += String((long)g_pllTrim);
+  // (pllTrim removed with the PLL.)
   out += ",\"clkPer\":";   out += String((unsigned long)beatListen[0].ivMs);
-  out += ",\"halfSh\":";   out += String((unsigned long)g_halfShift);
+  // THE CLEAN TIMER: tmFixed beats followed, tmRej detections REFUSED as spurious, tmWorst the largest
+  // error accepted in ms. Together they say whether the timer is tracking real beats. A tmRej that
+  // climbs fast means the rejection bound is too tight; a tmWorst that stays small means the timer is
+  // already sitting on the music.
+  out += ",\"tmFixed\":";  out += String((unsigned long)g_tmFixed);
+  out += ",\"beat1\":";    out += String((unsigned long)g_beat1Flashes);
+  // The bar model position (0 = beat 1) and its confidence. Together with beat1 this says whether the
+  // beat-1 indicator is firing at the right moments.
+  out += ",\"barPos\":";   out += String((long)g_barPos);
+  out += ",\"barStable\":"; out += String((long)g_barBeats);
+  // (barPos is already published by the bar block; the duplicate is removed.)
+  out += ",\"tmRej\":";    out += String((unsigned long)g_tmRej);
+  out += ",\"tmWorst\":";  out += String((long)g_tmWorst);
   // How long since the last half-beat correction, in seconds, and how many the dot has reversed on.
   // Is the tempo settled enough for the clock to drive the crossing? Should read 0 through the intro.
-  out += ",\"settled\":";
-  out += ",\"arrRevs\":";  out += String((unsigned long)g_arrRevs);  out += String((long)(g_beatSettled ? 1 : 0));
+  // (a bare settled label lived here, emitting "settled":, and breaking the JSON parse) 
+  // These two shared ONE line, which emitted "settled":,"arrRevs":N and produced malformed JSON. It
+  // silently broke every poller run and hid the gate from me for two builds. Separate lines now.
+  out += ",\"arrRevs\":";  out += String((unsigned long)g_arrRevs);
+  out += ",\"settled\":";  out += String((long)(g_beatSettled ? 1 : 0));
   out += ",\"setRun\":";   out += String((unsigned long)g_setRun);
-  out += ",\"halfAge\":";  out += String((unsigned long)((g_halfLast && (millis() - g_halfLast) < 600000UL)
-                                                      ? ((millis() - g_halfLast) / 1000UL) : 9999UL));
-  out += ",\"dbBeat\":";   out += String((double)g_dbBeatMean, 3);
-  out += ",\"dbMid\":";    out += String((double)g_dbMidMean, 3);
+  // (dbBeat removed - it measured the activation on the beat only for the half-beat test.)
+  // (dbMid removed for the same reason.)
   out += ",\"beatOff\":";  out += String((unsigned long)beatOffsetMs);
   // THE DOT AT THE MUSIC (see the note on g_onPos). THIS is the number that matches what the
   // eye sees: ~0/~1000 = the beats hit the ends, ~500 = they hit the centre.
@@ -7619,6 +7539,13 @@ void loop() {
       if (fl < 60) fl = 60;
       powerLedOffAt = millis() + fl;
       g_io48Beats++;
+      // THE BEAT-1 INDICATOR (see the block near the top). SAME fl, so the two flashes are directly
+      // comparable side by side: IO48 on every beat, channel 10 only when the bar model says beat 1.
+      if (g_barPos == 0) {
+        digitalWrite(channelPins[BEAT1_CHAN_IDX], HIGH);
+        beat1OffAt = millis() + fl;
+        g_beat1Flashes++;
+      }
     }
     // THE FLASH IS TURNED OFF HERE (21 Oct). It used to be turned off ONLY inside the 240V
     // engine step (executePatternStep), so with the 240V display OFF - the normal case for
@@ -7637,6 +7564,16 @@ void loop() {
       } else {
         digitalWrite(POWER_LED_PIN, LOW);
         powerLedOffAt = 0;
+      }
+    }
+    // AND THE SAME FOR THE BEAT-1 INDICATOR, held high until its own end time exactly as IO48 is, so
+    // nothing else writing the pin can cut the pulse short.
+    if (beat1OffAt != 0) {
+      if ((long)(millis() - beat1OffAt) < 0) {
+        if (digitalRead(channelPins[BEAT1_CHAN_IDX]) == LOW) digitalWrite(channelPins[BEAT1_CHAN_IDX], HIGH);
+      } else {
+        digitalWrite(channelPins[BEAT1_CHAN_IDX], LOW);
+        beat1OffAt = 0;
       }
     }
 
