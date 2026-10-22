@@ -1261,8 +1261,6 @@ static uint32_t g_tmRej   = 0;
 static int32_t  g_tmWorst = 0;
 // THE STEADY BEAT RATE (22 Oct). An average of the recent medians, moved by only an eighth each
 // time, so one stray measurement cannot shift the beat - which is what steadies IO48.
-static uint32_t g_rhythmBeats = 0;   // beats that matched the tempo and advanced the bar phase
-static uint32_t g_offRhythmBeats = 0; // ticks refused: talking, room noise, the quiet sections
 static long     g_perAvg = 0;
 // (The PLL trim and pllPeriod lived here. The trim was switched off - its accumulation caused the
 // drift the user reported as "lots of corrections happening" - so pllPeriod was returning its
@@ -4468,6 +4466,16 @@ static void listeningStep() {
               // A REAL BEAT. A quarter of the phase error and a sixteenth of it into the period: both
               // far too small to see on one beat, and together they converge in a few beats.
               L.clkNext = (unsigned long)((long)L.clkNext + err / 4);
+              // THE CORRECTION MUST GO INTO THE AVERAGE TOO (22 Oct). Writing only L.ivMs did NOTHING:
+              // the tempo-adoption block resets L.ivMs from g_perAvg on every onset, so the correction was
+              // wiped milliseconds later, every single time, and never accumulated. That is why the timing
+              // still advanced very slightly every beat. g_perAvg is the value the search actually
+              // maintains, so the correction belongs there - and then it BUILDS UP instead of vanishing.
+              if (g_perAvg > 0) {
+                g_perAvg += (long)(err / 16);
+                if (g_perAvg < 120)  g_perAvg = 120;
+                if (g_perAvg > 1200) g_perAvg = 1200;
+              }
               L.ivMs    = clampBeatPeriod((unsigned long)((long)L.ivMs + err / 16));
               g_tmFixed++;
               if (ae > g_tmWorst) g_tmWorst = (int32_t)ae;
@@ -4600,29 +4608,16 @@ static void listeningStep() {
           // of the strip again." The DOT keeps moving; only the phase is held.
           {
             float dbNow = dbActRaw();
-            // IS THIS BEAT PART OF THE RHYTHM? Its interval against the tempo the clock is running.
-            // SEE THE NOTE ABOVE: ticks from talking and room noise are not beats and must NOT advance the
-            // bar phase, or the 1s slip forward and never come back - which is exactly what the user saw.
-            {
-              unsigned long biv = L.prevReal ? (now - L.prevReal) : 0;
-              unsigned long bper = L.ivMs;
-              bool musicBeat = (bper >= 120 && biv >= (unsigned long)(bper * 85 / 100) &&
-                                biv <= (unsigned long)(bper * 115 / 100));
-              if (!g_idlePace && musicBeat) {
-                barPhaseStep(dbNow);
-                // and only a music beat is worth keeping in the log for the afterwards analysis
-                g_beatRt[g_beatRi] = now;
-                g_beatRp[g_beatRi] = (int8_t)g_barPos;
-                g_beatRs[g_beatRi] = odfChain[4].novelty;
-                g_beatRm[g_beatRi] = odfChain[5].novelty;
-                g_beatRi = (uint8_t)((g_beatRi + 1) % TAP_RING);
-                if (g_beatRn < 4000) g_beatRn++;
-                g_rhythmBeats++;
-              } else {
-                g_offRhythmBeats++;
-              }
-            }
-            // (the ring fill now happens INSIDE the music-beat gate above, so only rhythm beats are logged)
+            if (!g_idlePace) barPhaseStep(dbNow);
+            // KEEP EVERY BEAT WITH ITS BAR POSITION (22 Oct). The user's tap will find the nearest one here
+            // and label it - see the note on the beat ring. Recorded AFTER barPhaseStep, so the position is
+            // the model's answer for THIS beat.
+            g_beatRt[g_beatRi] = now;
+            g_beatRp[g_beatRi] = (int8_t)g_barPos;
+            g_beatRs[g_beatRi] = odfChain[4].novelty;
+            g_beatRm[g_beatRi] = odfChain[5].novelty;
+            g_beatRi = (uint8_t)((g_beatRi + 1) % TAP_RING);
+            if (g_beatRn < 4000) g_beatRn++;
             // THE HALF-BEAT PHASE TEST - the question this session started with. THE MODEL IS BLIND TO
             // (The half-beat test and its correction lived here. Both were guesses at a clock PHASE
             // problem, and both were JUMPS the user could see. The clean timer follows every real beat
@@ -6674,10 +6669,6 @@ void handleTrav() {
   // already sitting on the music.
   out += ",\"tmFixed\":";  out += String((unsigned long)g_tmFixed);
   out += ",\"beat1\":";    out += String((unsigned long)g_beat1Flashes);
-  // MUSIC beats (which advanced the bar phase) against ticks REFUSED as not part of the rhythm. If
-  // nonBeats keeps climbing during quiet passages, the gate is doing its job.
-  out += ",\"rhyBeats\":"; out += String((unsigned long)g_rhythmBeats);
-  out += ",\"offRhy\":";   out += String((unsigned long)g_offRhythmBeats);
   // THE BEAT-1 SCORE FROM THE USER TAPS (22 Oct). tapCount taps landed on a beat; tapAgree of those
   // the model ALSO called beat 1. tapAgree near tapCount means the detector picks the same beat as the
   // user ear. tapStray counts presses that landed nowhere near a beat.
