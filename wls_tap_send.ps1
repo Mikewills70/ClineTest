@@ -16,7 +16,10 @@ try {
   $s = $c.GetStream()
   $req = [System.Text.Encoding]::ASCII.GetBytes("GET /tap?t=$T HTTP/1.0`r`nHost: $Board`r`nConnection: close`r`n`r`n")
   $s.Write($req, 0, $req.Length)
-  $buf = New-Object byte[] 256
-  $null = $s.Read($buf, 0, 256)
+  $s.Flush()
+  # A SHORT PAUSE, THEN CLOSE (22 Oct). The board handles the request as it arrives, so there is no need
+  # to wait for the reply - and waiting cost ~540 ms per press because the server is slow to answer. The
+  # pause just lets the write leave the socket before the connection is closed underneath it.
+  Start-Sleep -Milliseconds 80
   $c.Close()
 } catch { }
