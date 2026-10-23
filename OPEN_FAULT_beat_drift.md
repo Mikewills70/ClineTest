@@ -82,6 +82,87 @@ mechanism explains all four reported symptoms.
    written authorisation.**
 3. Keep the display dark while measuring the beat — a workaround, not a fix.
 
+## MEASURED 23 Oct 2026, 14:58 — the fault quantified with wls_beatmon.ps1
+
+User's report of that run: **"Started on-time, ran slow and drifted out of time again."** And separately,
+earlier: *"consistently slow... did not correct after over 60 seconds of play."*
+
+| Measurement | Value | Source |
+|---|---|---|
+| **The music** | **446 ms median = 134.5 BPM** | 308 onset intervals (leading edges) |
+| **Clock 2 (the fit)** | **128 BPM = 468.75 ms — pinned, never moved** | `fitBpm` in /trav |
+| **Clock 1 (what the display runs on)** | **468 ms** | `p0iv` in /diag |
+| **ERROR** | **+22 ms per beat = 4.9% slow** | |
+
+**22 ms per beat slips a full beat every ~20 beats — about 9 seconds.** That reproduces "started on time,
+ran slow, drifted out of time" including its rate.
+
+```
+fitAcc = 14        fitRej = 236 → 321
+```
+
+**Clock 2 accepted 14 onsets and rejected 321 — a 96% rejection rate.** THE USER'S ARCHITECTURE, stated
+exactly: *"the intro locks on to whatever, but the 2nd clock keeps monitoring until it finds a stronger
+(more confident beat) and hands that over. That was what we tested and what worked."*
+
+**So Clock 2 is still hunting — it is rejecting everything it sees.** With its input polluted it cannot
+find a candidate it trusts, so it keeps the only lock it has, the wrong one. It is not broken; it is
+starved of clean evidence.
+
+## Clock 2 HAS NOT BEEN CHANGED — checked twice, including outside the guard's fence
+
+The fence covers **L3284 → L4171** (the ODF section through `fitBeatStep`). **The width measurement
+(L4680-4705) and the fit's CALL SITE (L4669) are OUTSIDE it**, so the guard could not have caught a
+change there. It was therefore diffed against the baseline by hand:
+
+**The baseline's width block is byte-identical to today's**, including `if (w >= 10 && w <= 2000)`.
+The only difference in that block is the beat-1 vote removed in B2, which READ `w`, `g_fitPer` and
+`g_fitN` and wrote none of them. `git diff` confirms: 13 lines out, 6 comment lines in, no functional change.
+
+**GAP IN THE GUARD, worth remembering:** it protects `fitBeatStep` but NOT what feeds it. Any future
+claim that "the guard proves the beat is unchanged" must say *"the fenced region"*, not *"the beat"*.
+
+## The one input that HAS changed: the display load
+
+| | `odfHz` | `fLedUs` |
+|---|---|---|
+| Baseline era (strips DARK, IO48-only switch ON) | ~100 | ~0 |
+| Now (strips live, switch removed in B1) | **87** | **3140 µs** |
+
+The width is `millis() - g_widStart`, closed when the envelope falls to half its peak. **A coarser frame
+cadence detects that fall later, so the width inflates** — and `g_widLast / 2` is the midpoint offset the
+fit is fed. Measured today: **median 30 ms, but outliers at 1000-1949 ms**, i.e. a ~975 ms offset on
+those beats, against a beat period of 446 ms.
+
+**This is the leading HYPOTHESIS, not a proven cause** — there is no baseline sample of `wid` from a
+dark-strips run to compare against. The A/B test below settles it.
+
+## ALSO FOUND: `p0lst` can WRAP, and that can suppress a flash
+
+The monitor crashed with `Cannot convert value "4294967287" to type "System.Int32"`.
+`4294967287 = 0xFFFFFFF7 = -9` signed. So `p0lst = nowMs - L.lastReal` came out **-9**: `lastReal` was
+**9 ms AHEAD** of the reader's `millis()`.
+
+**It matters because `musicNow` uses the identical unsigned comparison:**
+
+```c
+bool musicNow = !(L.lastReal == 0 || (now - L.lastReal) > 1500UL);
+```
+
+If `now < lastReal`, the gap becomes ~4.29e9 > 1500, so **`musicNow` reads FALSE and the flash is
+suppressed.** That is a SECOND, independent cause of a missed flash — and unlike the 1500 ms gate, it
+would drop a SINGLE flash. **Not yet investigated: why `lastReal` can be stamped ahead of `now`.**
+
+## THE A/B TEST — the next action, and it needs no beat-code change
+
+**Run the same track with the strips DARK** (temporarily restore the documented `WLS_IO48_ONLY` switch).
+Same music, same frozen Clock 2, one variable. The prediction:
+
+- **`odfHz` returns to ~100 AND Clock 2 locks to ~134 BPM** → the load is proven, and the fix is on the
+  DISPLAY side (rate-limit the strip transmit) — **not in the protected region at all.**
+- **`odfHz` ~100 and it STILL locks to 128** → the load is exonerated; look next at the BPM bell, whose
+  centre is 120 (128 sits between the music's 134.5 and the bell's 120 — the prime suspect, unproven).
+
 ## Instruments that MUST be kept until this is closed
 
 - `/onsets` and `wls_onsrec.ps1` — the onset recorder is the **beat's own** instrument. Do not remove it

@@ -99,9 +99,16 @@ while ($true) {
   $rows++
 
   # LIVE WARNINGS - the three things we are hunting, flagged as they happen
-  $fl = [int]$d.io48; $ck = [int]$d.p0clk; $lst = [int]$d.p0lst; $iv = [int]$d.p0iv
+  # p0lst can WRAP: lastReal is sometimes a few ms AHEAD of the reader,s millis(), so now-lastReal goes
+  # negative and prints as ~4294967287. Unwrap it so the warning logic stays sane.
+  $fl = [int]$d.io48; $ck = [int]$d.p0clk; $iv = [int]$d.p0iv
+  $lstL = [int64]$d.p0lst
+  if ($lstL -gt 2147483647) { $lstL = $lstL - 4294967296 }
+  $lst = [int]$lstL
+  $lstWrap = ($lstL -lt 0)
   $da = [int]$d.displayActive
   $note = ''
+  if ($lstWrap) { $note += ('  *** p0lst WRAPPED (' + $lstL + 'ms) - lastReal AHEAD of now, which also makes musicNow read FALSE ***') }
   if ($lastFlash -ge 0 -and $ck -gt $lastClk -and $fl -eq $lastFlash) { $note += '  *** CLOCK BEAT WITH NO FLASH ***' }
   if ($lst -gt 1500 -and $da -eq 1) { $note += '  *** MUSIC GATE CLOSED (p0lst>1500) ***' }
   if ($iv -gt 1500 -and $da -eq 1) { $note += '  *** IDLE PACE: clock not locked to music ***' }
