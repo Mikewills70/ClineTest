@@ -1262,10 +1262,6 @@ static int32_t  g_tmWorst = 0;
 // THE STEADY BEAT RATE (22 Oct). An average of the recent medians, moved by only an eighth each
 // time, so one stray measurement cannot shift the beat - which is what steadies IO48.
 static long     g_perAvg = 0;
-// THE PERSISTENT RATE TRIM (22 Oct): a small correction to the beat PERIOD, in ms, kept in its own
-// variable so the tempo search cannot overwrite it. Applied when the clock schedules the next beat.
-static long     g_rateTrim = 0;
-static long     g_rateTrimMax = 0;   // the largest it has reached, for the log
 // (The PLL trim and pllPeriod lived here. The trim was switched off - its accumulation caused the
 // drift the user reported as "lots of corrections happening" - so pllPeriod was returning its
 // argument unchanged. Dead weight, removed, and the period is now what the comb and the clean
@@ -3569,6 +3565,11 @@ struct OnsRec {
   float    hpHz;                  // the ODF band in use: this listener lower edge
   uint16_t mask;                  // bit i = listener i took this onset (0-9 strips, 10 = 240V)
   uint8_t  kind;                  // 0 = real onset (sub beats are counted in /diag only)
+  // THE TRAILING EDGE AND THE PEAK (22 Oct): the user asked for the beat to be measured from the MID
+  // POINT of the beat rather than its leading edge, because instruments attack at different instants.
+  // Both edges are needed to test that, so the record now carries them.
+  uint32_t fallMs;                // when the novelty fell back to 40 per cent of the peak (0 = not yet)
+  float    peak;                  // the highest novelty this onset reached
 };
 OnsRec   onsRing[ONS_RING];
 volatile uint32_t onsHead = 0;    // TOTAL onsets ever recorded = the sampler cursor
@@ -3599,6 +3600,8 @@ static inline void onsRecord(uint32_t stamp, uint16_t mask, int chain, float nov
   r.hpHz   = odfChain[chain].hpHz;
   r.mask   = mask;
   r.kind   = 0;
+  r.fallMs = 0;                           // not fallen yet: the frame loop fills this in
+  r.peak   = nov;                         // the peak so far
   onsHead  = seq + 1;
 }
 
@@ -3636,16 +3639,22 @@ void handleOnsets() {
   if (n > (uint32_t)maxN) n = (uint32_t)maxN;
   uint32_t next = from + n;
   String out;
-  out.reserve((unsigned)(n * 84 + 80));
-  char buf[112];
+  out.reserve((unsigned)(n * 112 + 96));   // the line grew with fall= and mid=
+  char buf[144];
   snprintf(buf, sizeof(buf), "# onsets since=%lu sent=%lu next=%lu head=%lu\n",
            (unsigned long)from, (unsigned long)n, (unsigned long)next, (unsigned long)head);
   out += buf;
   for (uint32_t s = from; s < next; s++) {
     const OnsRec &r = onsRing[s % ONS_RING];
     snprintf(buf, sizeof(buf),
-             "ms=%lu mask=%03x nov=%.3f thr=%.3f rise=%.1f band=%.0f-250\n",
-             (unsigned long)r.ms, (unsigned)r.mask,
+             "ms=%lu fall=%lu mid=%ld mask=%03x nov=%.3f thr=%.3f rise=%.1f band=%.0f-250\n",
+             (unsigned long)r.ms,
+             // THE TRAILING EDGE AND THE MID POINT (22 Oct). fall is when the novelty fell back to 40 per
+             // cent of its peak; mid is the midpoint the user asked for. fall=0 means it had not fallen
+             // when the line was sent, and mid=-1 means the midpoint is not yet known.
+             (unsigned long)r.fallMs,
+             (long)((r.fallMs > r.ms) ? (long)(r.ms + (r.fallMs - r.ms) / 2) : -1L),
+             (unsigned)r.mask,
              (double)r.nov, (double)r.thr, (double)r.riseDb, (double)r.hpHz);
     out += buf;
   }
@@ -4471,16 +4480,6 @@ static void listeningStep() {
               // far too small to see on one beat, and together they converge in a few beats.
               L.clkNext = (unsigned long)((long)L.clkNext + err / 4);
               L.ivMs    = clampBeatPeriod((unsigned long)((long)L.ivMs + err / 16));
-              // AND THE PERSISTENT TRIM. err is (onset - scheduled beat), so a clock that runs FAST sees
-              // the onsets arrive LATE and err comes back positive - which LENGTHENS the period, exactly
-              // the correction the measurement calls for. 1/8 per beat converges in a few beats, and the
-              // clamp stops anything wild if the music changes.
-              g_rateTrim += (long)(err / 8);
-              if (g_rateTrim >  60) g_rateTrim =  60;
-              if (g_rateTrim < -60) g_rateTrim = -60;
-              if ((g_rateTrim < 0 ? -g_rateTrim : g_rateTrim) > g_rateTrimMax) {
-                g_rateTrimMax = (g_rateTrim < 0 ? -g_rateTrim : g_rateTrim);
-              }
               g_tmFixed++;
               if (ae > g_tmWorst) g_tmWorst = (int32_t)ae;
             } else {
@@ -4632,10 +4631,7 @@ static void listeningStep() {
             beatListen[p].clkFires++;
           }
         }
-        // THE TRIM IS APPLIED HERE (22 Oct), when the next beat is scheduled - not in L.ivMs or g_perAvg,
-        // which the tempo search overwrites. This is what makes a correction SURVIVE, which the two
-        // earlier attempts did not.
-        L.clkNext += (unsigned long)((long)L.ivMs + g_rateTrim);
+        L.clkNext += L.ivMs;
         if ((long)(now - L.clkNext) > (long)L.ivMs) L.clkNext = now + L.ivMs;  // never flood
         // THE TRAVERSE LASTS EXACTLY UNTIL THE NEXT CLOCK BEAT (21 Oct). It used to take
         // the gap to the PREVIOUS trigger, which is not the same number: the phase steering
@@ -4738,6 +4734,20 @@ static void listeningStep() {
 // display keeps working while the refactor is proved in stages. The decision moves
 // out to the pattern in the next step.
 static void odfEvaluate() {
+  // THE TRAILING EDGE (22 Oct). The most recent onset is watched until its novelty falls back to 40 per
+  // cent of its peak; that instant is its trailing edge. (leading + trailing) / 2 is then the MID POINT,
+  // which the user believes is steadier than the leading edge because instruments attack at different
+  // instants. Chain 0 is used because that is the kick/bass band the beat detection is built on.
+  {
+    static uint32_t trkSeq = 0;
+    if (onsHead > trkSeq) { trkSeq = onsHead; }            // a new onset: watch this one
+    if (trkSeq > 0) {
+      OnsRec &last = onsRing[(trkSeq - 1) % ONS_RING];
+      float nv0 = odfChain[0].novelty;
+      if (nv0 > last.peak) last.peak = nv0;
+      if (last.fallMs == 0 && last.peak > 0.0f && nv0 < last.peak * 0.40f) last.fallMs = millis();
+    }
+  }
   // THE PEAK HOLD (22 Oct). A snare's novelty is a spike of a few milliseconds, so an
   // instantaneous reading at the wrong instant sees nothing and the half-beat test becomes a coin
   // flip - which is what made it move a CORRECT grid onto the off-beat. Holding the peak since the
@@ -6676,11 +6686,6 @@ void handleTrav() {
   // already sitting on the music.
   out += ",\"tmFixed\":";  out += String((unsigned long)g_tmFixed);
   out += ",\"beat1\":";    out += String((unsigned long)g_beat1Flashes);
-  // THE RATE TRIM: the measured drift correction, in ms. It should settle to a steady value near +5
-  // (the measured 444 vs 449 ms). If it climbs to the clamp, the clock is wrong by more than this
-  // correction can fix.
-  out += ",\"rateTrim\":"; out += String((long)g_rateTrim);
-  out += ",\"trimMax\":";  out += String((long)g_rateTrimMax);
   // THE BEAT-1 SCORE FROM THE USER TAPS (22 Oct). tapCount taps landed on a beat; tapAgree of those
   // the model ALSO called beat 1. tapAgree near tapCount means the detector picks the same beat as the
   // user ear. tapStray counts presses that landed nowhere near a beat.
