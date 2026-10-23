@@ -4164,6 +4164,13 @@ static float         g_widPeak = 0.0f;      // the envelope peak of the onset be
 static unsigned long g_widStart = 0;        // its leading edge
 static unsigned long g_widLast = 0;         // the width of the most recent complete beat, ms
 static unsigned long g_widAvg = 0;          // the running mean width, used to place the mid point
+// BEAT 1 BY WIDTH. Beat 1 is the heaviest beat, so the width votes for it. Only starts once the beat is
+// locked, as instructed. The bar position comes from the CLOCK's index, so it holds through quiet patches.
+static unsigned long g_beatIdx = 0;          // accepted beats since the lock, gives each beat a bar position
+static float g_barWid[4] = {0,0,0,0};        // summed width per bar position
+static unsigned long g_barN[4] = {0,0,0,0};  // how many beats contributed to each position
+static long  g_beat1 = -1;                   // 0..3 once known, -1 while still deciding
+static float g_b1conf = 0.0f;                // how clearly the winner beats the runner-up
 static uint32_t      g_widN = 0;
 static float         g_conf = 0.0f;         // the current fit confidence, 0..1
 
@@ -4343,13 +4350,19 @@ static void barPhaseStep(float db) {
   else            for (int i = 0; i < 4; i++) g_barP[i] = 0.25f;
   int best = 0;
   for (int i = 1; i < 4; i++) if (g_barP[i] > g_barP[best]) best = i;
+  // THE WIDTH VOTE TAKES PRECEDENCE (23 Oct). The loop above is the OLD heuristic - it picks the position
+  // the curve "expects" to be the downbeat, and it is not a measurement of anything, which is why beat 1
+  // was failing. Once the width vote has a winner that IS the answer: beat 1 is the heaviest beat,
+  // measured from the envelope. The old model remains the fallback only while the vote is deciding.
+  if (g_beat1 >= 0) best = (int)g_beat1;
   // LOCKED? (22 Oct) A position that survives several beats in a row is the model telling us the
   // phase is settled. That is what the half-beat escape below checks before it is allowed to
   // move the grid - a threshold scheme bounces, a locked model does not.
   if (best == g_barPos && g_barBeats > 4) { if (g_barStable < 9999) g_barStable++; }
   else                                    g_barStable = 0;
   g_barPos  = best;
-  g_barConf = (int32_t)(g_barP[best] * 100.0f + 0.5f);
+  g_barConf = (g_beat1 >= 0) ? (int32_t)(g_b1conf * 100.0f + 0.5f)
+                             : (int32_t)(g_barP[best] * 100.0f + 0.5f);
   g_barBeats++;
 }
 
@@ -4875,6 +4888,26 @@ static void odfEvaluate() {
           g_widLast = w;
           if (g_widN < 4000) g_widN++;
           // a running mean as well, so the mid point does not swing on one odd beat
+          // THE VOTE. This width belongs to the beat that has just passed, so it goes to that beat's
+          // position in the bar. Guarded on the lock: no beat 1 until the beat is found.
+          if (g_fitPer > 0 && g_fitN >= 2) {
+            int bp = (int)(g_fitN % 4);       // g_fitN already counts accepted beats
+            g_barWid[bp] += (float)w;
+            if (g_barN[bp] < 100000) g_barN[bp]++;
+            // THE WINNER. The heaviest of the four positions is beat 1. Decided here, in the vote, so
+            // there is one place that owns it. Two samples per position, so one loud snare cannot win.
+            float mean[4]; int ok = 0;
+            for (int i = 0; i < 4; i++) mean[i] = (g_barN[i] >= 2) ? (g_barWid[i] / (float)g_barN[i]) : -1.0f;
+            for (int i = 0; i < 4; i++) if (mean[i] > 0.0f) ok++;
+            if (ok == 4) {
+              int b1 = 0, b2 = 0;
+              for (int i = 1; i < 4; i++) if (mean[i] > mean[b1]) b1 = i;
+              for (int i = 0; i < 4; i++) if (i != b1 && mean[i] > mean[b2]) b2 = i;
+              float sep = (mean[b1] > 0.0f) ? ((mean[b1] - mean[b2]) / mean[b1]) : 0.0f;
+              g_beat1  = b1;
+              g_b1conf = (sep < 0.0f) ? 0.0f : ((sep > 1.0f) ? 1.0f : sep);
+            }
+          }
           if (g_widAvg <= 0.0f) g_widAvg = (float)w;
           else                  g_widAvg += ((float)w - g_widAvg) * 0.2f;
         }
@@ -6849,6 +6882,20 @@ void handleTrav() {
   // midOff is how far the mid point sits after the detection crossing - the bias the fit now avoids,
   // and the offset the lightshow beats are placed by.
   out += ",\"midOff\":";   out += String((unsigned long)(g_widAvg > 0.0f ? (unsigned long)(g_widAvg / 2.0f) : 0));
+  // BEAT 1 BY WIDTH - see the note at g_beatIdx. b1w against b1rest is the measurement the user asked
+  // for: over the track the downbeat should stand clear as the heavier beat.
+  out += ",\"barPos\":";  out += String((long)(g_fitN % 4));
+  out += ",\"beat1\":";   out += String(g_beat1);
+  out += ",\"b1conf\":";  out += String(g_b1conf, 3);
+  {
+    float mean[4];
+    for (int i = 0; i < 4; i++) mean[i] = (g_barN[i] >= 2) ? (g_barWid[i] / (float)g_barN[i]) : 0.0f;
+    float other = 0.0f; int no = 0;
+    for (int i = 0; i < 4; i++) if (i != g_beat1 && mean[i] > 0.0f) { other += mean[i]; no++; }
+    out += ",\"b1w\":";    out += String(mean[g_beat1 >= 0 ? g_beat1 : 0], 1);
+    out += ",\"b1rest\":"; out += String(no > 0 ? (other / (float)no) : 0.0f, 1);
+    out += ",\"barN\":";   out += String((unsigned long)(g_barN[0] + g_barN[1] + g_barN[2] + g_barN[3]));
+  }
   out += ",\"widN\":";     out += String((unsigned long)g_widN);
   out += ",\"conf\":";     out += String((double)g_conf, 3);
   out += ",\"fitBpm\":";   out += String((long)(g_fitPer ? (60000L / (long)g_fitPer) : 0));
