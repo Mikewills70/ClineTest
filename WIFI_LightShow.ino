@@ -7301,7 +7301,8 @@ void setup() {
   server.on("/audio", HTTP_GET, handleAudioDetect);
   server.on("/diag", HTTP_GET, handleDiag);
   server.on("/trav", HTTP_GET, handleTrav);   // INSTRUMENT: traverse starts, RAM only
-  server.on("/now", HTTP_GET, handleNow);      // CLOCK SYNC: a plain board-millis() reference  server.on("/onsets", HTTP_GET, handleOnsets);   // INSTRUMENT: per-onset ring, RAM only
+  server.on("/now", HTTP_GET, handleNow);      // CLOCK SYNC: a plain board-millis() reference
+  server.on("/onsets", HTTP_GET, handleOnsets);   // INSTRUMENT: per-onset ring, RAM only
   server.on("/trace",  HTTP_GET, handleTrace);    // INSTRUMENT: 50 Hz level/novelty ring
   server.on("/leaktest", HTTP_GET, handleLeakTest);
   server.on("/log.txt", HTTP_GET, handleLog);
