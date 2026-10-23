@@ -4163,6 +4163,7 @@ static uint32_t      g_fitAccept = 0, g_fitReject = 0;
 static float         g_widPeak = 0.0f;      // the envelope peak of the onset being measured
 static unsigned long g_widStart = 0;        // its leading edge
 static unsigned long g_widLast = 0;         // the width of the most recent complete beat, ms
+static unsigned long g_widAvg = 0;          // the running mean width, used to place the mid point
 static uint32_t      g_widN = 0;
 static float         g_conf = 0.0f;         // the current fit confidence, 0..1
 
@@ -4840,7 +4841,11 @@ static void listeningStep() {
   // THE WINDOW-FITTING TRACKER (see the note on fitBeatStep): every detected onset is offered to it, and it
 // decides whether that is where a beat should be. The clock then runs on the fitted period, so the beats
 // it fires are PREDICTED beats - smooth, and unaffected by detection jitter.
-if (onsNew) fitBeatStep(onsStamp, beatListen[0].ivMs);
+// THE MID POINT, NOT THE CROSSING (23 Oct) - see the note above fitBeatStep. The width of the PREVIOUS
+// beat is used because this onset's own width is not known until its envelope falls; the widths change
+// slowly, so that is a good estimate. g_widLast is 0 until the first width is measured, which simply
+// means the earliest beats are fitted on their leading edge as before.
+if (onsNew) fitBeatStep(onsStamp + (g_widLast / 2), beatListen[0].ivMs);
 if (onsNew) onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr);   // INSTRUMENT: the line
   if (anyReal) g_onsetReal++;
 }
@@ -4866,7 +4871,13 @@ static void odfEvaluate() {
       if (e > g_widPeak) g_widPeak = e;
       if (g_widPeak > 0.0f && e < g_widPeak * 0.5f) {
         unsigned long w = millis() - g_widStart;
-        if (w >= 10 && w <= 2000) { g_widLast = w; if (g_widN < 4000) g_widN++; }
+        if (w >= 10 && w <= 2000) {
+          g_widLast = w;
+          if (g_widN < 4000) g_widN++;
+          // a running mean as well, so the mid point does not swing on one odd beat
+          if (g_widAvg <= 0.0f) g_widAvg = (float)w;
+          else                  g_widAvg += ((float)w - g_widAvg) * 0.2f;
+        }
         g_widPeak = -1.0f;                      // -1 means "already closed for this onset"
       }
     }
@@ -6835,6 +6846,9 @@ void handleTrav() {
   // transient narrow. conf is the fit confidence: the width, the rejection rate against the expected
   // ~50 per cent, the interval spread, and the BPM bell as a nudge. bpm is what the fit implies.
   out += ",\"wid\":";      out += String((unsigned long)g_widLast);
+  // midOff is how far the mid point sits after the detection crossing - the bias the fit now avoids,
+  // and the offset the lightshow beats are placed by.
+  out += ",\"midOff\":";   out += String((unsigned long)(g_widAvg > 0.0f ? (unsigned long)(g_widAvg / 2.0f) : 0));
   out += ",\"widN\":";     out += String((unsigned long)g_widN);
   out += ",\"conf\":";     out += String((double)g_conf, 3);
   out += ",\"fitBpm\":";   out += String((long)(g_fitPer ? (60000L / (long)g_fitPer) : 0));
