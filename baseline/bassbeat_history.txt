@@ -1,3 +1,4 @@
 # BASS BEAT PROTECTED REGION - append only. One line per authorised change.
 # date                hash                                                              reason
 2026-10-23 11:56:38  1BD4CB20C595AC1B0901B112A75E5BF1CB11490336D4DB269BF8087258B90AF6  INITIAL FREEZE. Beat declared FINISHED by the user (baseline-hitthatperfectbeat-2026-10-23). Frozen BEFORE the beat-1/bar-detection removal begins, so any accidental damage to the beat is detectable.
+2026-10-23 12:14:14  FD40C4C3D06D5DED4A731220F4B1EF8065F48D0B3B765FC4EE9B1DDE1094D2F9  AUTHORISED (user, 23 Oct, one-off Rule 10 exception for the beat-1 removal): deleted the bar-state block g_beatIdx/g_barWid/g_barN/g_beat1/g_b1conf, which had been appended inside the fence after g_widAvg. Proven to be the ONLY in-region change - the identical deletion applied to the frozen copy reproduces the file byte for byte. No beat code altered.

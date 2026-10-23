@@ -802,13 +802,6 @@ static float         g_widPeak = 0.0f;      // the envelope peak of the onset be
 static unsigned long g_widStart = 0;        // its leading edge
 static unsigned long g_widLast = 0;         // the width of the most recent complete beat, ms
 static unsigned long g_widAvg = 0;          // the running mean width, used to place the mid point
-// BEAT 1 BY WIDTH. Beat 1 is the heaviest beat, so the width votes for it. Only starts once the beat is
-// locked, as instructed. The bar position comes from the CLOCK's index, so it holds through quiet patches.
-static unsigned long g_beatIdx = 0;          // accepted beats since the lock, gives each beat a bar position
-static float g_barWid[4] = {0,0,0,0};        // summed width per bar position
-static unsigned long g_barN[4] = {0,0,0,0};  // how many beats contributed to each position
-static long  g_beat1 = -1;                   // 0..3 once known, -1 while still deciding
-static float g_b1conf = 0.0f;                // how clearly the winner beats the runner-up
 static uint32_t      g_widN = 0;
 static float         g_conf = 0.0f;         // the current fit confidence, 0..1
 

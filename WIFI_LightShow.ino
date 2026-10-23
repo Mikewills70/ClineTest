@@ -1254,28 +1254,15 @@ volatile uint32_t g_parAt[2]   = {0, 0};   // the last onset stamp of each parit
 volatile uint32_t g_parSeq[2]  = {0, 0};   // how many onsets it has produced
 static   uint32_t g_parSeen[2] = {0, 0};   // the last sequence the render core has counted
 static   uint32_t g_snOnGrid = 0, g_snOffGrid = 0;   // snare onsets on / off the kick grid
+static   uint32_t g_mdOnGrid = 0, g_mdOffGrid = 0;   // mid onsets on / off the kick grid
 // THE BAR-PHASE MODEL (22 Oct). The professional answer to "which beat is beat 1".
 // Krebs/Boeck/Widmer (ISMIR 2015, "An Efficient State Space Model for Joint Tempo and Meter
 // Tracking") show the trick: the TEMPO is already known (our comb), so the only unknown is the
 // BAR POSITION - a four-state model advanced once per beat. madmom implements it, and BeatNet
 // (ISMIR 2021) is the state of the art, feeding the same idea from a learned activation.
-// THE LESSON FROM BOTH: the phase must be ACCUMULATED in a state model that prefers to stay
-// put, never flipped by a threshold - which is exactly what the half-beat escape got wrong.
-// The observation is a DOWNBEAT ACTIVATION, because the kick band cannot supply one: in
-// four-on-the-floor the kick is identical on all four beats. The cues that DO carry beat 1 are
-// the SNARE (on 2 and 4, so its ABSENCE marks 1 and 3) and the harmonic change (chords move on
-// beat 1). Both are measured by the parity bands already.
-static float    g_barP[4]   = {0.25f, 0.25f, 0.25f, 0.25f};  // the phase belief
-static int      g_barPos    = 0;      // the most likely bar position, 0..3
-static int32_t  g_barConf   = 25;     // its confidence, percent
-static int32_t  g_dbAct100  = 0;      // the last downbeat activation, x100
-static uint32_t g_barBeats  = 0;      // beats fed into the model
-static uint32_t g_barStable = 0;      // consecutive beats the position has not changed
-static float    g_dbBeatAcc = 0.0f, g_dbMidAcc = 0.0f;   // the activation on beats / on midpoints
 // (The beat/midpoint means lived here. They fed the half-beat test, both are removed.)
 // (The sample counts lived here with the means.)
 // (g_halfShift removed with the half-beat correction.)
-static float    g_snHold = 0.0f, g_mdHold = 0.0f;   // the PEAK since the last sample
 // (g_halfDone removed with the half-beat correction.)
 // (g_halfLast removed with the half-beat correction.)
 // IS THE BEAT SETTLED? (22 Oct) The clock may drive the crossing - and its beats may reverse the
@@ -1285,9 +1272,6 @@ static bool          g_beatSettled = false;
 static unsigned long g_setPrev = 0;
 static uint32_t      g_setRun  = 0;
 static uint32_t      g_arrRevs = 0;   // crossings ended by the dot REACHING the end, not by a beat
-static float    g_snNormPeak = 0.0f, g_mdNormPeak = 0.0f;   // slow peaks for the two cues
-static float    g_dbMin = 1.0f, g_dbMax = 0.0f;   // the OBSERVED range of the raw activation
-static   uint32_t g_mdOnGrid = 0, g_mdOffGrid = 0;   // mid onsets on / off the kick grid
 static int32_t  g_swingLast = -1;
 static int32_t  g_swRing[32] = {0};
 static uint8_t  g_swIdx = 0, g_swN = 0;
@@ -4145,13 +4129,6 @@ static float         g_widPeak = 0.0f;      // the envelope peak of the onset be
 static unsigned long g_widStart = 0;        // its leading edge
 static unsigned long g_widLast = 0;         // the width of the most recent complete beat, ms
 static unsigned long g_widAvg = 0;          // the running mean width, used to place the mid point
-// BEAT 1 BY WIDTH. Beat 1 is the heaviest beat, so the width votes for it. Only starts once the beat is
-// locked, as instructed. The bar position comes from the CLOCK's index, so it holds through quiet patches.
-static unsigned long g_beatIdx = 0;          // accepted beats since the lock, gives each beat a bar position
-static float g_barWid[4] = {0,0,0,0};        // summed width per bar position
-static unsigned long g_barN[4] = {0,0,0,0};  // how many beats contributed to each position
-static long  g_beat1 = -1;                   // 0..3 once known, -1 while still deciding
-static float g_b1conf = 0.0f;                // how clearly the winner beats the runner-up
 static uint32_t      g_widN = 0;
 static float         g_conf = 0.0f;         // the current fit confidence, 0..1
 
@@ -4240,10 +4217,11 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
 // start of the region, and wls_beatguard.ps1). Everything below is free to change.
 //
 // REMOVED 23 Oct 2026, by the user's one-off exception: the beat-1 / bar-detection code that used to be
-// interleaved with this region - the bar-phase model (barPhaseStep, dbActRaw, g_barP, g_barPos, g_barStable),
-// the width vote (g_beat1, g_barWid, g_barN, g_b1conf), the parity phase counters, and the beat-1
-// instrumentation ring. The user's decision: "There is no requirement for any code that detects bars
-// (beat 1). That can all be removed now." Channel 10 is a plain 240V light channel again.
+// interleaved with this region. ALL OF IT IS NOW GONE. The user's decision: "There is no requirement for
+// any code that detects bars (beat 1). That can all be removed now." Removed: the bar-phase model and
+// its activation, the width vote, the parity phase counters, the beat-1 instrumentation ring, the
+// channel-10 beat-1 indicator, and the two bar-position readouts. Channel 10 is a plain 240V light
+// channel again. The user's one-off Rule 10 exception covers exactly these removals and no others.
 // NONE OF THAT WAS THE BEAT. The beat - what is inside these sentinels - is untouched.
 
 static inline unsigned long clampBeatPeriod(unsigned long ms) {
@@ -4283,81 +4261,6 @@ static inline bool chaseIdleNow(unsigned long now) {
 // WHERE THE PARITY BANDS LAND (22 Oct). Each snare/mid onset is compared to the KICK GRID: near a
 // grid beat is ON it, about half a beat away is OFF it. Whichever phase the snare avoids is beat 1
 // and 3 - so this single count answers 1&3 versus 2&4 with no inference from strength.
-// THE RAW DOWNBEAT ACTIVATION (22 Oct), from the two parity bands, each normalised against its own
-// slow peak so no user setting is involved. Factored out because it is now sampled at TWO places in
-// the beat: on the clock's beats, and on the MIDPOINTS between them. That second sample is the whole
-// point - see the half-beat phase test.
-static float dbActRaw() {
-  float sn = g_snHold, md = g_mdHold;   // the PEAK since the last sample, not the instant
-  g_snHold = 0.0f;  g_mdHold = 0.0f;    // and clear it for the next half beat
-  // The peaks are maintained per frame (see the peak-hold block in odfEvaluate); reading them here
-  // and NOT updating them is what makes the ratio vary.
-  float snN = (g_snNormPeak > 0.5f) ? (sn / g_snNormPeak) : 0.0f;
-  float mdN = (g_mdNormPeak > 0.5f) ? (md / g_mdNormPeak) : 0.0f;
-  if (snN > 1.0f) snN = 1.0f;  if (snN < 0.0f) snN = 0.0f;
-  if (mdN > 1.0f) mdN = 1.0f;  if (mdN < 0.0f) mdN = 0.0f;
-  float db = 0.75f * (1.0f - snN) + 0.25f * mdN;
-  if (!(db >= 0.0f && db <= 1.0f)) db = 0.0f;
-  return db;
-}
-
-// ONE BEAT INTO THE BAR-PHASE MODEL. snareNorm and midChangeNorm are 0..1, each already normalised
-// against its own slow peak, so no user setting is involved. Called once per CLOCK BEAT.
-static void barPhaseStep(float db) {
-  g_dbAct100 = (int32_t)(db * 100.0f + 0.5f);
-  // NORMALISE IT TO ITS OWN OBSERVED RANGE (22 Oct). MEASURED: dbAct only spans 22 to 80, so an
-  // observation built straight from it sees a 3x spread and the belief never locks - over 197
-  // samples barPos wandered 0,1,2 with barConf stuck at 25-40, which meant g_barStable never
-  // reached 8, which meant the escape gate never engaged, which meant halfRe climbed to 11 and
-  // the grid bounced. That chain IS the drift. Stretching the observed range to 0..1 turns a 3x
-  // spread into the discrimination the model needs.
-  if (db < g_dbMin) g_dbMin = db;   else g_dbMin += (db - g_dbMin) * 0.002f;
-  if (db > g_dbMax) g_dbMax = db;   else g_dbMax += (db - g_dbMax) * 0.002f;
-  float dbN = db;
-  if (g_dbMax - g_dbMin > 0.15f) dbN = (db - g_dbMin) / (g_dbMax - g_dbMin);
-  if (dbN < 0.0f) dbN = 0.0f;  if (dbN > 1.0f) dbN = 1.0f;
-  // THE FORWARD PASS. Each beat advances the position by one, with a small chance of a phase slip so
-  // the model CAN correct a wrong phase - but only when sustained evidence earns it. That slip
-  // probability IS the "prefers to stay put" property, and it is what stops the bouncing.
-  // 0.02 let the belief spread ~20% over ten beats, enough to wash out a weak observation. 0.004
-  // is the "prefers to stay put" term doing its job.
-  const float SLIP = 0.004f;
-  float next[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  for (int i = 0; i < 4; i++) {
-    next[(i + 1) & 3] += g_barP[i] * (1.0f - SLIP);
-    for (int j = 0; j < 4; j++) next[j] += g_barP[i] * (SLIP / 4.0f);
-  }
-  // OBSERVATION MODEL: position 0 expects the downbeat; position 2 a weaker one; positions 1 and 3
-  // are the off-beats, where the snare lives.
-  // SHARPER (22 Oct): position 0 (beat 1) expects the strongest downbeat, position 2 (beat 3) a
-  // weaker one, and positions 1 and 3 are the SNARE beats - 2 and 4 - so they expect the WEAKEST
-  // downbeat. The old curve only spanned 0.46 to 0.84; this one spans 0.25 to 0.755 and does so over
-  // the normalised activation, so the ratio between a beat-1 candidate and a snare-beat candidate is
-  // now several times rather than 1.8.
-  const float obs[4] = { 0.02f + 0.98f * dbN, 0.85f - 0.80f * dbN,
-                         0.15f + 0.70f * dbN, 0.85f - 0.80f * dbN };
-  float sum = 0.0f;
-  for (int i = 0; i < 4; i++) { next[i] *= obs[i]; sum += next[i]; }
-  if (sum > 0.0f) for (int i = 0; i < 4; i++) g_barP[i] = next[i] / sum;
-  else            for (int i = 0; i < 4; i++) g_barP[i] = 0.25f;
-  int best = 0;
-  for (int i = 1; i < 4; i++) if (g_barP[i] > g_barP[best]) best = i;
-  // THE WIDTH VOTE TAKES PRECEDENCE (23 Oct). The loop above is the OLD heuristic - it picks the position
-  // the curve "expects" to be the downbeat, and it is not a measurement of anything, which is why beat 1
-  // was failing. Once the width vote has a winner that IS the answer: beat 1 is the heaviest beat,
-  // measured from the envelope. The old model remains the fallback only while the vote is deciding.
-  if (g_beat1 >= 0) best = (int)g_beat1;
-  // LOCKED? (22 Oct) A position that survives several beats in a row is the model telling us the
-  // phase is settled. That is what the half-beat escape below checks before it is allowed to
-  // move the grid - a threshold scheme bounces, a locked model does not.
-  if (best == g_barPos && g_barBeats > 4) { if (g_barStable < 9999) g_barStable++; }
-  else                                    g_barStable = 0;
-  g_barPos  = best;
-  g_barConf = (g_beat1 >= 0) ? (int32_t)(g_b1conf * 100.0f + 0.5f)
-                             : (int32_t)(g_barP[best] * 100.0f + 0.5f);
-  g_barBeats++;
-}
-
 static void parityPhaseCount() {
   for (int b = 0; b < 2; b++) {
     uint32_t seq = g_parSeq[b];
@@ -4722,29 +4625,6 @@ static void listeningStep() {
           }
           // ONE BEAT INTO THE BAR-PHASE MODEL (22 Oct). The two cues are normalised against
           // their own slow peaks, so the model sees the same scale whatever the room is doing.
-          // ONE BEAT INTO THE BAR-PHASE MODEL, AND THE HALF-BEAT PHASE TEST (22 Oct).
-          // HOLD THE PHASE THROUGH A QUIET PATCH: while nothing is heard the clock runs at the SPEED
-          // SLIDER pace, not the music's, so those beats are NOT the music's beats and advancing the
-          // model through them rotates the phase for no reason - user: "That was perfect, right up to
-          // the last quiet patch of music and then it captured to the wrong beat and hit in the middle
-          // of the strip again." The DOT keeps moving; only the phase is held.
-          {
-            float dbNow = dbActRaw();
-            if (!g_idlePace) barPhaseStep(dbNow);
-            // KEEP EVERY BEAT WITH ITS BAR POSITION (22 Oct). The user's tap will find the nearest one here
-            // and label it - see the note on the beat ring. Recorded AFTER barPhaseStep, so the position is
-            // the model's answer for THIS beat.
-            g_beatRt[g_beatRi] = now;
-            g_beatRp[g_beatRi] = (int8_t)g_barPos;
-            g_beatRs[g_beatRi] = odfChain[4].novelty;
-            g_beatRm[g_beatRi] = odfChain[5].novelty;
-            g_beatRi = (uint8_t)((g_beatRi + 1) % TAP_RING);
-            if (g_beatRn < 4000) g_beatRn++;
-            // THE HALF-BEAT PHASE TEST - the question this session started with. THE MODEL IS BLIND TO
-            // (The half-beat test and its correction lived here. Both were guesses at a clock PHASE
-            // problem, and both were JUMPS the user could see. The clean timer follows every real beat
-            // directly, so there is no phase left to test for. Removing them is part of the clean-up.
-          }
           for (int p = 0; p < NUM_PORTS; p++) {
             if (!portCfg[p].wrap) continue;
             beatListen[p].clkFires++;
@@ -4880,26 +4760,6 @@ static void odfEvaluate() {
           g_widLast = w;
           if (g_widN < 4000) g_widN++;
           // a running mean as well, so the mid point does not swing on one odd beat
-          // THE VOTE. This width belongs to the beat that has just passed, so it goes to that beat's
-          // position in the bar. Guarded on the lock: no beat 1 until the beat is found.
-          if (g_fitPer > 0 && g_fitN >= 2) {
-            int bp = (int)(g_fitN % 4);       // g_fitN already counts accepted beats
-            g_barWid[bp] += (float)w;
-            if (g_barN[bp] < 100000) g_barN[bp]++;
-            // THE WINNER. The heaviest of the four positions is beat 1. Decided here, in the vote, so
-            // there is one place that owns it. Two samples per position, so one loud snare cannot win.
-            float mean[4]; int ok = 0;
-            for (int i = 0; i < 4; i++) mean[i] = (g_barN[i] >= 2) ? (g_barWid[i] / (float)g_barN[i]) : -1.0f;
-            for (int i = 0; i < 4; i++) if (mean[i] > 0.0f) ok++;
-            if (ok == 4) {
-              int b1 = 0, b2 = 0;
-              for (int i = 1; i < 4; i++) if (mean[i] > mean[b1]) b1 = i;
-              for (int i = 0; i < 4; i++) if (i != b1 && mean[i] > mean[b2]) b2 = i;
-              float sep = (mean[b1] > 0.0f) ? ((mean[b1] - mean[b2]) / mean[b1]) : 0.0f;
-              g_beat1  = b1;
-              g_b1conf = (sep < 0.0f) ? 0.0f : ((sep > 1.0f) ? 1.0f : sep);
-            }
-          }
           if (g_widAvg <= 0.0f) g_widAvg = (float)w;
           else                  g_widAvg += ((float)w - g_widAvg) * 0.2f;
         }
@@ -4920,23 +4780,6 @@ static void odfEvaluate() {
       if (nv0 > last.peak) last.peak = nv0;
       if (last.fallMs == 0 && last.peak > 0.0f && nv0 < last.peak * 0.40f) last.fallMs = millis();
     }
-  }
-  // THE PEAK HOLD (22 Oct). A snare's novelty is a spike of a few milliseconds, so an
-  // instantaneous reading at the wrong instant sees nothing and the half-beat test becomes a coin
-  // flip - which is what made it move a CORRECT grid onto the off-beat. Holding the peak since the
-  // last sample asks the right question: did a snare fire in this half beat?
-  {
-    float snNow = odfChain[4].novelty, mdNow = odfChain[5].novelty;
-    if (snNow > g_snHold) g_snHold = snNow;
-    if (mdNow > g_mdHold) g_mdHold = mdNow;
-    // THE RAW PEAKS TRACK THE PER-FRAME NOVELTY, NOT THE HELD VALUE (22 Oct). This is the bug that
-    // killed the downbeat cue: dbActRaw normalised the HELD value against a peak that had itself been
-    // built from held values, so the ratio was always about 1 and the activation became a constant.
-    // MEASURED: dbBeat=0.01, dbMid=0.01, which is why the model had nothing to lock onto and why the
-    // half-beat test compared noise. With the peaks fed from the per-frame novelty the held value
-    // normalises properly - near 0 on a beat with no snare, near 1 on one with a snare.
-    if (snNow > g_snNormPeak) g_snNormPeak = snNow; else g_snNormPeak += (snNow - g_snNormPeak) * 0.02f;
-    if (mdNow > g_mdNormPeak) g_mdNormPeak = mdNow; else g_mdNormPeak += (mdNow - g_mdNormPeak) * 0.02f;
   }
   // (The MIDPOINT SAMPLE lived here. It existed only so the half-beat test could compare the
   // activation at the beats with the activation half a beat later - and both are gone, because the
@@ -6822,15 +6665,6 @@ void handleTrav() {
   out += ",\"mdOff\":"; out += String((unsigned long)g_mdOffGrid);
   out += ",\"snNov\":"; out += String((double)odfChain[4].novelty, 1);
   out += ",\"mdNov\":"; out += String((double)odfChain[5].novelty, 1);
-  // THE BAR PHASE (see the note on g_barP): barPos is the most likely position in the bar
-  // (0 = beat 1), barConf its confidence, dbAct the downbeat activation that drove it, and
-  // beatOff the display offset - which is worth watching, because the dot is deliberately
-  // delayed by it and a large value would put the dot mid-strip when the MUSIC hits even with a
-  // perfect grid.
-  // (barPos is already published by the bar block; the duplicate is removed.)
-  out += ",\"barConf\":";  out += String((long)g_barConf);
-  out += ",\"dbAct\":";    out += String((long)g_dbAct100);
-  out += ",\"barBeats\":"; out += String((unsigned long)g_barBeats);
   // THE HALF-BEAT TEST: dbBeat is the mean activation on the clock's beats, dbMid on the midpoints.
   // dbMid above dbBeat means the grid is on the OFF-beat - the comparison the whole session needed.
   // THE DOT RIGHT NOW, so the motion can be SEEN from here rather than inferred from the beat
@@ -6866,20 +6700,6 @@ void handleTrav() {
   // midOff is how far the mid point sits after the detection crossing - the bias the fit now avoids,
   // and the offset the lightshow beats are placed by.
   out += ",\"midOff\":";   out += String((unsigned long)(g_widAvg > 0.0f ? (unsigned long)(g_widAvg / 2.0f) : 0));
-  // BEAT 1 BY WIDTH - see the note at g_beatIdx. b1w against b1rest is the measurement the user asked
-  // for: over the track the downbeat should stand clear as the heavier beat.
-  out += ",\"barPos\":";  out += String((long)(g_fitN % 4));
-  out += ",\"beat1\":";   out += String(g_beat1);
-  out += ",\"b1conf\":";  out += String(g_b1conf, 3);
-  {
-    float mean[4];
-    for (int i = 0; i < 4; i++) mean[i] = (g_barN[i] >= 2) ? (g_barWid[i] / (float)g_barN[i]) : 0.0f;
-    float other = 0.0f; int no = 0;
-    for (int i = 0; i < 4; i++) if (i != g_beat1 && mean[i] > 0.0f) { other += mean[i]; no++; }
-    out += ",\"b1w\":";    out += String(mean[g_beat1 >= 0 ? g_beat1 : 0], 1);
-    out += ",\"b1rest\":"; out += String(no > 0 ? (other / (float)no) : 0.0f, 1);
-    out += ",\"barN\":";   out += String((unsigned long)(g_barN[0] + g_barN[1] + g_barN[2] + g_barN[3]));
-  }
   out += ",\"widN\":";     out += String((unsigned long)g_widN);
   out += ",\"conf\":";     out += String((double)g_conf, 3);
   out += ",\"fitBpm\":";   out += String((long)(g_fitPer ? (60000L / (long)g_fitPer) : 0));
@@ -6896,11 +6716,6 @@ void handleTrav() {
   // been made; if it swings widely the replies are too variable to calibrate from.
   out += ",\"tapOff\":";   out += String((long)g_tapOffMed);
   out += ",\"tapOffN\":";  out += String((unsigned long)g_tapOffN);
-  // The bar model position (0 = beat 1) and its confidence. Together with beat1 this says whether the
-  // beat-1 indicator is firing at the right moments.
-  out += ",\"barPos\":";   out += String((long)g_barPos);
-  out += ",\"barStable\":"; out += String((long)g_barBeats);
-  // (barPos is already published by the bar block; the duplicate is removed.)
   out += ",\"tmRej\":";    out += String((unsigned long)g_tmRej);
   out += ",\"tmWorst\":";  out += String((long)g_tmWorst);
   // How long since the last half-beat correction, in seconds, and how many the dot has reversed on.
