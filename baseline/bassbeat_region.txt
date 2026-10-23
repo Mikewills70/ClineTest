@@ -896,6 +896,24 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
       for (uint8_t b = 0; b + 1 < m - a; b++)
         if (iv[b] > iv[b + 1]) { unsigned long s2 = iv[b]; iv[b] = iv[b + 1]; iv[b + 1] = s2; }
     g_fitPer = iv[m / 2];
+    // ---- CLOCK 2's OWN PREDICTIVE MONITORING AND BPM CORRECTION (23 Oct 2026, user-authorised) ------
+    // The user's design, and it is the SAME loop Clock 1 runs: predict where the next beat should be
+    // from the period it currently believes, measure the error against where the beat ACTUALLY landed,
+    // and put a SIXTEENTH of that error into the period. It walks into line over a few beats instead of
+    // snapping, and it keeps doing it for as long as the clock runs - which is what "it never really
+    // locks onto anything other than a predicted time gap that will move slightly all the time" means.
+    // Until now Clock 2 had NO correction at all: it took a mean (and then a median) of its accepted
+    // intervals and that was the end of it, so a wrong period stayed wrong forever. That is the drift.
+    // The rejection is the same as Clock 1's: an error beyond a third of a beat is not a beat, so the
+    // period does not move. A real beat needs only a tiny correction and is followed.
+    {
+      unsigned long prev = g_fitMs[(uint8_t)((g_fitI + FIT_N - 2) % FIT_N)];
+      long e2  = (long)stamp - (long)(prev + g_fitPer);   // ACTUAL midpoint vs PREDICTED beat
+      long ae2 = (e2 < 0) ? -e2 : e2;
+      if (ae2 <= (long)(g_fitPer / 3)) {
+        g_fitPer = clampBeatPeriod((unsigned long)((long)g_fitPer + e2 / 16));
+      }
+    }
     // THE HARD GATE: a fitted period outside the disco range is not a beat and is not used at all.
     if (!periodInDiscoRange(g_fitPer)) { g_fitReject++; g_fitPer = 0; g_fitN = 0; g_fitI = 0; return; }
     // THE CONFIDENCE: the measurement first, the prior only as a nudge.

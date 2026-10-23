@@ -4179,6 +4179,24 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
       for (uint8_t b = 0; b + 1 < m - a; b++)
         if (iv[b] > iv[b + 1]) { unsigned long s2 = iv[b]; iv[b] = iv[b + 1]; iv[b + 1] = s2; }
     g_fitPer = iv[m / 2];
+    // ---- CLOCK 2's OWN PREDICTIVE MONITORING AND BPM CORRECTION (23 Oct 2026, user-authorised) ------
+    // The user's design, and it is the SAME loop Clock 1 runs: predict where the next beat should be
+    // from the period it currently believes, measure the error against where the beat ACTUALLY landed,
+    // and put a SIXTEENTH of that error into the period. It walks into line over a few beats instead of
+    // snapping, and it keeps doing it for as long as the clock runs - which is what "it never really
+    // locks onto anything other than a predicted time gap that will move slightly all the time" means.
+    // Until now Clock 2 had NO correction at all: it took a mean (and then a median) of its accepted
+    // intervals and that was the end of it, so a wrong period stayed wrong forever. That is the drift.
+    // The rejection is the same as Clock 1's: an error beyond a third of a beat is not a beat, so the
+    // period does not move. A real beat needs only a tiny correction and is followed.
+    {
+      unsigned long prev = g_fitMs[(uint8_t)((g_fitI + FIT_N - 2) % FIT_N)];
+      long e2  = (long)stamp - (long)(prev + g_fitPer);   // ACTUAL midpoint vs PREDICTED beat
+      long ae2 = (e2 < 0) ? -e2 : e2;
+      if (ae2 <= (long)(g_fitPer / 3)) {
+        g_fitPer = clampBeatPeriod((unsigned long)((long)g_fitPer + e2 / 16));
+      }
+    }
     // THE HARD GATE: a fitted period outside the disco range is not a beat and is not used at all.
     if (!periodInDiscoRange(g_fitPer)) { g_fitReject++; g_fitPer = 0; g_fitN = 0; g_fitI = 0; return; }
     // THE CONFIDENCE: the measurement first, the prior only as a nudge.
@@ -4406,7 +4424,18 @@ static void listeningStep() {
               // where beats ACTUALLY landed, so it is steadier than any periodicity estimate - and the
               // clock firing it is what makes the metronome smooth. Until there is a lock, the search
               // above carries the clock as before.
-              if (g_fitPer > 0 && g_fitN >= 2) base = clampBeatPeriod(g_fitPer);
+              // THE HANDOVER, GATED ON CONFIDENCE (23 Oct 2026, user-authorised). Clock 2 takes the
+              // period only when it is genuinely confident, and KEEPS it until its confidence falls well
+              // below - so the two clocks cannot flick the pairing between 1-and-3 and 2-and-4, which is
+              // the fault the notes below record. Before this it took over unconditionally after two
+              // accepted onsets, which is why the outcome was a race: the first two onsets decided the
+              // track, right or wrong, forever.
+              static bool fitOwns = false;
+              if (g_fitPer > 0 && g_fitN >= 2) {
+                if (!fitOwns && g_conf >= 0.20f)      fitOwns = true;    // confident: hand over
+                else if (fitOwns && g_conf < 0.10f)   fitOwns = false;   // lost it: hand back (hysteresis)
+                if (fitOwns) base = clampBeatPeriod(g_fitPer);
+              }
                 if (g_perAvg <= 0) g_perAvg = (long)base;
                 else                g_perAvg += ((long)base - g_perAvg) / 8;
                 L.ivMs = clampBeatPeriod((unsigned long)g_perAvg);
@@ -4474,9 +4503,12 @@ static void listeningStep() {
               // detection, which is the "advancing" the user sees. A fitted constant period cannot drift
               // on its own; this was what moved it. The fit owns the clock while it is locked, and the
               // old steering only runs while there is no lock.
-              if (!(g_fitPer > 0 && g_fitN >= 2)) {
-                L.clkNext = (unsigned long)((long)L.clkNext + err / 4);
-              }
+              // PHASE PULL - ALWAYS (23 Oct 2026, user-authorised). This used to be skipped while the
+              // fit was locked, which left the phase with NO correction at all and let the timing drift.
+              // The user's design is that BOTH clocks predict, measure the error against the actual
+              // midpoint, and walk into line - so the phase is corrected every beat, whichever clock
+              // currently owns the period.
+              L.clkNext = (unsigned long)((long)L.clkNext + err / 4);
               L.ivMs    = clampBeatPeriod((unsigned long)((long)L.ivMs + err / 16));
               g_tmFixed++;
               if (ae > g_tmWorst) g_tmWorst = (int32_t)ae;
