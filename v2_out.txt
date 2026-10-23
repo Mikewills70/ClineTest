@@ -1,0 +1,10 @@
+beats in log: 512   1673434..1797409 ms
+music beats kept: 506 of 512
+  music span 1673434..1795409 ms
+taps: 68 of the last run are INSIDE the beat log (offset -30308588 from the pairs)
+BEST FIT: drift -0.0020 (-0.20 per cent)   offset -202 ms   mean tap-to-beat distance 495 ms
+labelled 28 of 68 taps (within half a beat)
+
+CURRENT MODEL: 70 of 112 = 62.5 per cent
+  (a model that always guessed would get 25 per cent; a model that never changed would get about 25 too)
+wrote beat1_labelled_TEST.csv

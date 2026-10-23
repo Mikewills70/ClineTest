@@ -158,6 +158,27 @@ while ($true) {
   Start-Sleep -Milliseconds $PollMs
 }
 
+# SAVE THE BOARD'S BEAT LOG NOW (22 Oct). The board keeps only a 512-beat ring (~227 s), so if this is
+# left until later the beats for the run are overwritten and the offline alignment cannot be done at all -
+# which is exactly what happened on the first attempt. Saving here, at the moment the run ends, is the
+# only reliable point.
+Write-Host ''
+Write-Host '  Saving the board beat log...' -ForegroundColor Gray
+try {
+  $bp = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'beat1_beats_TEST.csv'
+  $beats = (Invoke-WebRequest ("http://" + $Board + "/beats") -UseBasicParsing -TimeoutSec 25).Content
+  [System.IO.File]::WriteAllText($bp, $beats, (New-Object System.Text.UTF8Encoding($false)))
+  $nb = ($beats -split "`n" | Where-Object { $_ -match '^[0-9]' }).Count
+  Write-Host ('  saved beat1_beats_TEST.csv with ' + $nb + ' beats') -ForegroundColor DarkGreen
+} catch {
+  Write-Host '  WARNING: could not save the beat log - the run cannot be aligned without it.' -ForegroundColor Red
+}
+try {
+  $pp = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'beat1_pairs_TEST.csv'
+  $pairs = (Invoke-WebRequest ("http://" + $Board + "/pairs") -UseBasicParsing -TimeoutSec 25).Content
+  [System.IO.File]::WriteAllText($pp, $pairs, (New-Object System.Text.UTF8Encoding($false)))
+  Write-Host '  saved beat1_pairs_TEST.csv' -ForegroundColor DarkGreen
+} catch { }
 Write-Host ''
 Write-Host '=====================================================================' -ForegroundColor Cyan
 Write-Host ("  DONE.  presses recorded {0}" -f $n) -ForegroundColor Cyan

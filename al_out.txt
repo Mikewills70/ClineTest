@@ -1,0 +1,25 @@
+beats: 512   labelled: 110
+
+--- the current model (bar column == 0) ---
+  73 of 110 = 66.4 per cent
+
+--- A: lowest snare reading in the bar ---
+  88 of 110 = 80.0 per cent
+
+--- B: biggest mid-band change in the bar ---
+  71 of 110 = 64.5 per cent
+
+--- D: snare contrast voted over a window of bars ---
+  window +/- 1 bars: 85 of 110 = 77.3 per cent
+  window +/- 2 bars: 86 of 110 = 78.2 per cent
+  window +/- 4 bars: 79 of 110 = 71.8 per cent
+  window +/- 8 bars: 91 of 110 = 82.7 per cent
+
+--- E: A corrected by the window vote (window 4) ---
+  79 of 110 = 71.8 per cent
+
+--- C: low snare AND a mid-band change (weighted) ---
+  weight 0.25: 71 of 110 = 64.5 per cent
+  weight  0.5: 71 of 110 = 64.5 per cent
+  weight    1: 69 of 110 = 62.7 per cent
+  weight    2: 67 of 110 = 60.9 per cent
