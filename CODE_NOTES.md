@@ -107,6 +107,15 @@ never large locals.
 
 ## 3. Traps that have cost real time
 
+- **A flash leaves the display DARK and IO48 silent, and it looks exactly like a broken beat.**
+  `listeningStep()` — the whole beat engine, the fit and the clock — is called at the *bottom* of the
+  `} else if (displayActive) {` branch in `loop()`. So with no pattern selected, **the beat detector
+  does not run at all**: `p0clk` stays 0, `io48` stays 0, and the strips and 240V stay dark. Three
+  outputs dead at once is ONE gate, not three faults. `displayActive` starts `false` after every boot
+  by design ("quiet startup: nothing is displayed until a pattern is selected in the UI"), so **after
+  every flash the pattern must be re-selected before anything is judged**. Cost a full false alarm on
+  23 Oct, where a real code fault was suspected and the guard had to be used to rule it out.
+  **Check `displayActive` in `/diag` FIRST** — if it is 0, nothing else you read means anything.
 - **`doc["x"] | 1.0f` returns the DEFAULT for a JSON string.** The page sends most values as
   strings, so use `jsonNumF()` / `jsonNumI()`. This silently discarded the timeline delay
   (the show always ran at 20 s while the grid said 10 s) and would have done the same to the
