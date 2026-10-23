@@ -4119,26 +4119,50 @@ static inline float bpmPrior(unsigned long ms) {
 }
 
 static void fitBeatStep(unsigned long stamp, unsigned long per) {
-  if (per < 120 || per > 1200) return;
-  unsigned long win = per / 4;                        // the window: a quarter of a beat either side
-  if (g_fitPer > 0 && g_fitN > 0) {
-    unsigned long last = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
-    unsigned long pred = last + g_fitPer;             // WHERE THE NEXT BEAT IS EXPECTED
-    unsigned long d = (stamp > pred) ? (stamp - pred) : (pred - stamp);
-    if (d > win) { g_fitReject++; return; }           // nothing should be there: ignored outright
+  // ---- CLOCK 2 IS INDEPENDENT FROM HERE (23 Oct 2026, USER-AUTHORISED under Rule 10) ---------------
+  // WHAT WAS WRONG. This function was handed CLOCK 1's period and accepted an onset only if it landed
+  // within per/4 of ITS OWN running prediction. Both made it confirm whatever it had already locked:
+  // an onset carrying the true beat - the one thing that would correct a wrong lock - was the very
+  // onset it threw away. MEASURED 23 Oct: fitAcc 14 against fitRej 321, i.e. 96 per cent rejected, with
+  // the period stuck at 128 BPM while the music was 134.5 BPM (446 ms). That is 22 ms per beat, which
+  // slips a full beat every ~20 beats (about 9 seconds) - the reported "ran slow and drifted out of
+  // time". It could never correct because it never looked at the raw data; it only looked at itself.
+  // WHAT IT DOES NOW. Each onset is judged against the RAW INTERVAL from the last accepted onset: an
+  // interval that is a plausible beat (the hard 95-135 BPM range, 444-632 ms) is accepted, anything
+  // else is not. The detector fires on the beat AND the off-beat, so a half-beat interval (~223 ms) is
+  // refused and the next beat onset (~446 ms) is accepted - which is how it finds the beat WITHOUT
+  // being told Clock 1's period. The period is then the MEDIAN of those intervals, so one wild interval
+  // cannot swing it the way a mean can.
+  // `per` (Clock 1's period) is now deliberately UNUSED. It is kept in the signature only so the call
+  // site does not have to change, and so the change is confined to this one function.
+  // THE RUNAWAY THIS DOES NOT RECREATE: the fault the old note at "deliberately NOT copying
+  // clockPeriod" warns about was feeding a clock period back into the DETECTOR's refractory. Nothing
+  // here touches the detector: the refractory is the constant ODF_MIN_GAP (90 ms), and this function
+  // only reads onset stamps and writes a period. The hard 444-632 ms gate bounds every accepted
+  // interval, and the median cannot shrink away, so the collapse to ~140 ms cannot recur.
+  (void)per;
+  if (g_fitN > 0) {
+    unsigned long lastA = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
+    if (stamp <= lastA) return;                              // out of order or duplicate: learn nothing
+    unsigned long iv = stamp - lastA;
+    if (!periodInDiscoRange(iv)) { g_fitReject++; return; }   // not a beat interval: refused outright
   }
   g_fitMs[g_fitI] = stamp;
   g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
   if (g_fitN < FIT_N) g_fitN++;
   g_fitAccept++;
   if (g_fitN >= 2) {
-    unsigned long sum = 0;
+    // THE MEDIAN, not the mean: a mean is dragged by one bad beat, a median is not.
+    unsigned long iv[FIT_N];
     for (uint8_t k = 1; k < g_fitN; k++) {
-      unsigned long a = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1 - k) % FIT_N)];
-      unsigned long b = g_fitMs[(uint8_t)((g_fitI + FIT_N - k) % FIT_N)];
-      sum += (a - b);
+      iv[k - 1] = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1 - k) % FIT_N)] -
+                  g_fitMs[(uint8_t)((g_fitI + FIT_N - k) % FIT_N)];
     }
-    g_fitPer = sum / (unsigned long)(g_fitN - 1);
+    uint8_t m = (uint8_t)(g_fitN - 1);
+    for (uint8_t a = 0; a + 1 < m; a++)
+      for (uint8_t b = 0; b + 1 < m - a; b++)
+        if (iv[b] > iv[b + 1]) { unsigned long s2 = iv[b]; iv[b] = iv[b + 1]; iv[b + 1] = s2; }
+    g_fitPer = iv[m / 2];
     // THE HARD GATE: a fitted period outside the disco range is not a beat and is not used at all.
     if (!periodInDiscoRange(g_fitPer)) { g_fitReject++; g_fitPer = 0; g_fitN = 0; g_fitI = 0; return; }
     // THE CONFIDENCE: the measurement first, the prior only as a nudge.
@@ -4666,7 +4690,7 @@ static void listeningStep() {
 // beat is used because this onset's own width is not known until its envelope falls; the widths change
 // slowly, so that is a good estimate. g_widLast is 0 until the first width is measured, which simply
 // means the earliest beats are fitted on their leading edge as before.
-if (onsNew) fitBeatStep(onsStamp + (g_widLast / 2), beatListen[0].ivMs);
+if (onsNew) fitBeatStep(onsStamp + (g_widAvg / 2), beatListen[0].ivMs);
 if (onsNew) onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr);   // INSTRUMENT: the line
   if (anyReal) g_onsetReal++;
 }
