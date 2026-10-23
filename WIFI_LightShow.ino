@@ -17,27 +17,6 @@
 const char* apSSID = "ESP32-LightShow";
 const char* apPassword = "12345678";
 const int AUDIO_PIN = 2;                        // MAX9814 microphone (ADC1)
-// ===================================================================================================
-// *** TEMPORARY IO48-ONLY ISOLATION - REMOVE BEFORE RELEASE ***
-// ===================================================================================================
-// USER, 22 Oct: "Temporarily switch off both the LED Strips and 240V displays. Add something in the code
-// that reminds you to remove these switches when we have completed the IO48 code. I do not want these
-// lines of code left by accident."
-//
-// WHY: nothing must distract from getting the IO48 beat right, and dark strips remove any chance of the
-// display work confusing the measurement. IO48 is POWER_LED_PIN (48, the ONBOARD STATUS LED) which is not
-// part of either output, so it keeps flashing exactly as before and remains the only thing to watch.
-//
-// TO REMOVE, when the IO48 timing is correct:
-//   1. delete this block
-//   2. delete the two blocks marked [IO48-ONLY] - one in the strip transmit, one in the 240V output
-//   3. the #warning below appears in EVERY build until you do the above
-// ===================================================================================================
-#define WLS_IO48_ONLY 1
-#if WLS_IO48_ONLY
-#warning "WLS_IO48_ONLY is ON: LED strips and 240V displays are DISABLED for the IO48 timing work. Remove this temporary switch when IO48 is finished."
-#endif
-static bool g_stripDark = false;      // [IO48-ONLY] the one-time clear of the strips
 
 const int POWER_LED_PIN = 48;                   // Onboard status LED
 
@@ -138,20 +117,6 @@ volatile bool musicFullMode = false;   // "FULL RANGE" selected (audio task read
 unsigned long lastStepTime = 0;
 unsigned long lastBeatTime = 0;
 unsigned long powerLedOffAt = 0;   // IO48 flash-off timestamp (0 = already off)
-// ===================================================================================================
-// *** TEST FEATURE: BEAT 1 ON 240V CHANNEL 10 - REMOVE WHEN THE COMPARISON IS DONE ***
-// USER, 22 Oct: "I want you to try and detect beat 1, and when you think the beat you are listening to
-// is beat 1, flash 240V channel 10 only for the same length of time IO48 is on, so I can compare your
-// timing to reality."
-// Channel 10 is channelPins[9] (pin 42). The flash is driven ONLY from the beat block below, and the
-// 240V render SKIPS this pin, so the pattern output cannot fight the indicator.
-// Beat 1 is the BAR MODEL position 0 - the same model that reached 88 per cent confidence.
-// TO REMOVE: this block, the flash in the rawBeatFlag block, the off block beside the IO48 one, and
-// the skip in the 240V channel loop.
-// ===================================================================================================
-#define BEAT1_CHAN_IDX 9
-static unsigned long beat1OffAt = 0;      // beat-1 indicator flash-off timestamp (0 = off)
-static uint32_t      g_beat1Flashes = 0;  // how many times beat 1 has been flashed
 int dotPos240 = 0;
 int dotDirection = 1;
 // A beat must be LATCHED: the 240V display steps at its own rate, so a beat
@@ -1525,17 +1490,7 @@ void ledShowAll() {
   }
   int64_t t1 = esp_timer_get_time();
   for (int p = 0; p < NUM_PORTS; p++) {
-    // [IO48-ONLY] Strips are kept DARK for the IO48 timing work - see the switch block near the top of
-    // this file. They are cleared once and then never transmitted again, so they stay black and the
-    // display work cannot be mistaken for the beat. Remove this block with the switch.
-    if (WLS_IO48_ONLY) {
-      if (!g_stripDark) {
-        g_stripDark = true;
-        for (uint8_t q = 0; q < NUM_PORTS; q++) {
-          if (g_strip[q]) { g_strip[q]->ClearTo(RgbColor(0, 0, 0)); g_strip[q]->Show(); }
-        }
-      }
-    } else if (g_strip[p]) g_strip[p]->Show();
+    if (g_strip[p]) g_strip[p]->Show();
   }
   int64_t t2 = esp_timer_get_time();
   // TRANSMISSION LOG (rate-limited). Moved to AFTER the Show loop.
@@ -5788,14 +5743,7 @@ void executePatternStep(bool beatHeard) {
   if (invert240V) {
     for (int i = 0; i < N; i++) on[i] = !on[i];
   }
-  // [IO48-ONLY] The 240V displays are held OFF for the IO48 timing work - see the switch block near the
-  // top of this file. Every relay channel is driven LOW regardless of the pattern. Remove this block
-  // with the switch; the line below it is the original and is untouched when the switch is off.
-  if (WLS_IO48_ONLY) {
-    for (int i = 0; i < N; i++) { if (i == BEAT1_CHAN_IDX) continue; digitalWrite(channelPins[i], LOW); }
-    return;
-  }
-  for (int i = 0; i < N; i++) { if (i == BEAT1_CHAN_IDX) continue; digitalWrite(channelPins[i], on[i] ? HIGH : LOW); }
+  for (int i = 0; i < N; i++) digitalWrite(channelPins[i], on[i] ? HIGH : LOW);
 }
 
 void run240VDisplayPattern(bool beat) {
@@ -6903,7 +6851,6 @@ void handleTrav() {
   // climbs fast means the rejection bound is too tight; a tmWorst that stays small means the timer is
   // already sitting on the music.
   out += ",\"tmFixed\":";  out += String((unsigned long)g_tmFixed);
-  out += ",\"beat1\":";    out += String((unsigned long)g_beat1Flashes);
   // THE WINDOW FIT (23 Oct): fitPer is the fitted period in ms, fitAcc the beats accepted because
   // they landed inside the predicted window, fitRej those REFUSED because they did not. A high fitRej
   // is healthy - it is spurious beats and off-beats being kept out. A fitPer that sits still means the
@@ -7986,13 +7933,6 @@ void loop() {
       if (fl < 60) fl = 60;
       powerLedOffAt = millis() + fl;
       g_io48Beats++;
-      // THE BEAT-1 INDICATOR (see the block near the top). SAME fl, so the two flashes are directly
-      // comparable side by side: IO48 on every beat, channel 10 only when the bar model says beat 1.
-      if (g_barPos == 0) {
-        digitalWrite(channelPins[BEAT1_CHAN_IDX], HIGH);
-        beat1OffAt = millis() + fl;
-        g_beat1Flashes++;
-      }
     }
     // THE FLASH IS TURNED OFF HERE (21 Oct). It used to be turned off ONLY inside the 240V
     // engine step (executePatternStep), so with the 240V display OFF - the normal case for
@@ -8011,16 +7951,6 @@ void loop() {
       } else {
         digitalWrite(POWER_LED_PIN, LOW);
         powerLedOffAt = 0;
-      }
-    }
-    // AND THE SAME FOR THE BEAT-1 INDICATOR, held high until its own end time exactly as IO48 is, so
-    // nothing else writing the pin can cut the pulse short.
-    if (beat1OffAt != 0) {
-      if ((long)(millis() - beat1OffAt) < 0) {
-        if (digitalRead(channelPins[BEAT1_CHAN_IDX]) == LOW) digitalWrite(channelPins[BEAT1_CHAN_IDX], HIGH);
-      } else {
-        digitalWrite(channelPins[BEAT1_CHAN_IDX], LOW);
-        beat1OffAt = 0;
       }
     }
 
