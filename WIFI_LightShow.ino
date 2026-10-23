@@ -4757,7 +4757,33 @@ static void listeningStep() {
 // leading-to-trailing midpoint, the one the rules define. Recording both, and their difference d, lets us
 // watch on a real track whether they diverge. Nothing here times anything: the same value is passed to
 // fitBeatStep exactly as before.
-unsigned long fitIn = onsStamp + (g_widAvg / 2);
+// THE FIT'S MIDPOINT, FROM THE RING'S OWN MEASUREMENT (23 Oct 2026, user-authorised).
+// WHAT WAS WRONG, AND IT IS NOW MEASURED, NOT ARGUED. The fit used to be handed
+// onsStamp + (g_widAvg / 2). g_widAvg is a mean of widths timed as millis() - g_widStart, where
+// g_widStart is set to the RECORD moment - NOT the onset's leading edge, which is what onsStamp is. So
+// two different time bases were being added, and the running mean had also soaked up the silence values
+// (w <= 2000 let in readings of 1835 and 1949 ms against real beat widths of 15-89 ms).
+// THE PROOF, from fitIn and d= in /onsets on the user's own track (411 onsets):
+//     d = fitIn - mid ranged from -14 to +714 ms, sd 113.7 ms, on a 446 ms beat,
+//     and it grew MONOTONICALLY WITH ONSET STRENGTH:  median d = -14 ms at nov 10-15,
+//     +17 at 15-20, +144 at 20-25, +182 at 25-30. Stable over time (94/84/85 across the run).
+// The rules require that "larger and smaller bass beats will still have the same overall timing" - a
+// strength-dependent offset of up to 714 ms is the exact opposite, and it is why X could never settle.
+// THE FIX. Use the PREVIOUS completed onset's width FROM THE RING: fallMs - ms, which is the leading
+// edge to trailing edge of an actual beat, measured from one origin. The ring's widths are 15-89 ms, so
+// there is no silence pollution to soak up.
+// The one-beat lag is unavoidable - this beat's trailing edge is not known until it falls - and it is the
+// SAME lag the old code had, only now with the right number in it.
+// With no closed width yet the fit is given the LEADING EDGE, which is the documented earlier behaviour.
+unsigned long widPrev = 0;
+if (onsHead > 0) {
+  const OnsRec &prev = onsRing[(onsHead - 1) % ONS_RING];
+  if (prev.fallMs > prev.ms) {
+    unsigned long wp = prev.fallMs - prev.ms;
+    if (wp <= 400) widPrev = wp;    // a beat's half-length cannot exceed 200 ms at this tempo
+  }
+}
+unsigned long fitIn = onsStamp + (widPrev / 2);
 if (onsNew) fitBeatStep(fitIn, beatListen[0].ivMs);
 if (onsNew) onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr, (uint32_t)fitIn);   // INSTRUMENT
   if (anyReal) g_onsetReal++;
