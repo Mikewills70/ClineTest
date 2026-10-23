@@ -1,599 +1,498 @@
 # raw /onsets lines, as fetched. Each fetch is preceded by a cursor marker.
-# fetch at 18:57:47  since=0
-# onsets since=0 sent=33 next=33 head=33
-ms=143116 fall=143146 mid=143131 fitIn=143116 d=-15 mask=7ff nov=22.734 thr=12.767 rise=-0.1 band=61-250
-ms=143345 fall=143373 mid=143359 fitIn=143360 d=1 mask=7ff nov=25.119 thr=14.107 rise=-2.6 band=61-250
-ms=143587 fall=143612 mid=143599 fitIn=143601 d=2 mask=7ff nov=20.640 thr=13.678 rise=4.5 band=61-250
-ms=143693 fall=143712 mid=143702 fitIn=143705 d=3 mask=7ff nov=15.345 thr=13.521 rise=-0.1 band=61-250
-ms=143839 fall=143859 mid=143849 fitIn=143848 d=-1 mask=7ff nov=23.911 thr=13.428 rise=-7.0 band=61-250
-ms=144016 fall=144055 mid=144035 fitIn=144026 d=-9 mask=7ff nov=30.899 thr=17.353 rise=-3.0 band=61-250
-ms=144220 fall=144239 mid=144229 fitIn=144239 d=10 mask=7ff nov=21.695 thr=16.932 rise=3.8 band=61-250
-ms=144447 fall=144498 mid=144472 fitIn=144456 d=-16 mask=7ff nov=25.204 thr=19.978 rise=3.2 band=61-250
-ms=144718 fall=144757 mid=144737 fitIn=144743 d=6 mask=7ff nov=19.684 thr=19.332 rise=1.5 band=61-250
-ms=144911 fall=144949 mid=144930 fitIn=144930 d=0 mask=7ff nov=36.371 thr=20.426 rise=-2.9 band=61-250
-ms=145029 fall=145059 mid=145044 fitIn=145048 d=4 mask=7ff nov=34.585 thr=20.151 rise=-0.4 band=61-250
-ms=145146 fall=0 mid=-1 fitIn=145161 d=0 mask=7fe nov=23.255 thr=19.907 rise=0.4 band=61-250
-ms=145146 fall=145178 mid=145162 fitIn=145146 d=-16 mask=001 nov=23.255 thr=19.907 rise=0.4 band=61-250
-ms=145362 fall=145382 mid=145372 fitIn=145378 d=6 mask=7ff nov=24.903 thr=19.367 rise=0.1 band=61-250
-ms=145590 fall=0 mid=-1 fitIn=145600 d=0 mask=7c0 nov=28.987 thr=18.796 rise=-3.3 band=61-250
-ms=145590 fall=145619 mid=145604 fitIn=145590 d=-14 mask=03f nov=28.987 thr=18.796 rise=-3.3 band=61-250
-ms=145957 fall=145976 mid=145966 fitIn=145971 d=5 mask=7ff nov=22.573 thr=17.943 rise=-1.3 band=61-250
-ms=146073 fall=146103 mid=146088 fitIn=146082 d=-6 mask=7ff nov=32.740 thr=18.387 rise=0.5 band=61-250
-ms=146386 fall=146417 mid=146401 fitIn=146401 d=0 mask=7ff nov=19.270 thr=17.649 rise=8.9 band=61-250
-ms=146622 fall=146642 mid=146632 fitIn=146637 d=5 mask=7ff nov=17.161 thr=17.138 rise=-2.9 band=61-250
-ms=146785 fall=146800 mid=146792 fitIn=146795 d=3 mask=7ff nov=17.504 thr=16.816 rise=10.0 band=61-250
-ms=146883 fall=146921 mid=146902 fitIn=146890 d=-12 mask=7ff nov=18.798 thr=16.583 rise=-12.5 band=61-250
-ms=146978 fall=147017 mid=146997 fitIn=146997 d=0 mask=7ff nov=25.947 thr=16.381 rise=-1.9 band=61-250
-ms=147380 fall=147399 mid=147389 fitIn=147399 d=10 mask=7ff nov=21.530 thr=15.578 rise=-4.6 band=61-250
-ms=147652 fall=147671 mid=147661 fitIn=147661 d=0 mask=7ff nov=18.825 thr=15.069 rise=10.1 band=61-250
-ms=147815 fall=147839 mid=147827 fitIn=147824 d=-3 mask=7ff nov=15.316 thr=14.738 rise=-0.9 band=61-250
-ms=147909 fall=147925 mid=147917 fitIn=147921 d=4 mask=7ff nov=27.987 thr=15.718 rise=6.5 band=61-250
-ms=148567 fall=148587 mid=148577 fitIn=148575 d=-2 mask=7ff nov=18.508 thr=14.332 rise=0.6 band=61-250
-ms=148803 fall=148841 mid=148822 fitIn=148813 d=-9 mask=7ff nov=26.740 thr=15.017 rise=-1.2 band=61-250
-ms=148899 fall=148919 mid=148909 fitIn=148918 d=9 mask=7ff nov=14.927 thr=14.856 rise=-2.0 band=61-250
-ms=148988 fall=149008 mid=148998 fitIn=148998 d=0 mask=7ff nov=18.294 thr=14.689 rise=0.3 band=61-250
-ms=149175 fall=149205 mid=149190 fitIn=149185 d=-5 mask=7ff nov=21.519 thr=14.328 rise=-4.9 band=61-250
-ms=149378 fall=149416 mid=149397 fitIn=149393 d=-4 mask=7ff nov=20.800 thr=13.970 rise=6.8 band=61-250
+# fetch at 19:12:14  since=0
+# onsets since=0 sent=8 next=8 head=8
+ms=162263 fall=162302 mid=162282 fitIn=162263 d=-19 mask=7ff nov=8.456 thr=5.000 rise=-0.2 band=61-250
+ms=162479 fall=162518 mid=162498 fitIn=162498 d=0 mask=7ff nov=15.989 thr=10.809 rise=-3.0 band=61-250
+ms=162725 fall=162751 mid=162738 fitIn=162744 d=6 mask=7ff nov=18.652 thr=10.496 rise=-8.7 band=61-250
+ms=162929 fall=162991 mid=162960 fitIn=162942 d=-18 mask=7ff nov=14.925 thr=12.255 rise=10.4 band=61-250
+ms=163168 fall=163188 mid=163178 fitIn=163199 d=21 mask=7ff nov=65.920 thr=37.021 rise=-1.6 band=61-250
+ms=163396 fall=163415 mid=163405 fitIn=163406 d=1 mask=7ff nov=51.415 thr=35.910 rise=-7.6 band=61-250
+ms=164250 fall=164271 mid=164260 fitIn=164259 d=-1 mask=7ff nov=39.823 thr=31.953 rise=-4.0 band=61-250
+ms=165202 fall=165231 mid=165216 fitIn=165212 d=-4 mask=7ff nov=30.458 thr=28.072 rise=-2.4 band=61-250
 
-# fetch at 18:57:52  since=33
-# onsets since=33 sent=17 next=50 head=50
-ms=149494 fall=149514 mid=149504 fitIn=149513 d=9 mask=7ff nov=23.803 thr=13.811 rise=-0.9 band=61-250
-ms=149813 fall=149839 mid=149826 fitIn=149823 d=-3 mask=7ff nov=15.267 thr=13.269 rise=-4.9 band=61-250
-ms=149916 fall=149935 mid=149925 fitIn=149929 d=4 mask=7ff nov=15.132 thr=13.078 rise=-0.3 band=61-250
-ms=150300 fall=150319 mid=150309 fitIn=150309 d=0 mask=7ff nov=25.203 thr=14.154 rise=-1.8 band=61-250
-ms=150512 fall=150532 mid=150522 fitIn=150521 d=-1 mask=7ff nov=37.386 thr=20.996 rise=6.5 band=61-250
-ms=150630 fall=150649 mid=150639 fitIn=150640 d=1 mask=7ff nov=22.643 thr=20.687 rise=2.9 band=61-250
-ms=150799 fall=150819 mid=150809 fitIn=150808 d=-1 mask=7ff nov=30.421 thr=20.282 rise=17.9 band=61-250
-ms=151234 fall=151254 mid=151244 fitIn=151244 d=0 mask=7ff nov=21.827 thr=21.100 rise=-3.4 band=61-250
-ms=151391 fall=0 mid=-1 fitIn=151401 d=0 mask=780 nov=23.176 thr=20.675 rise=-3.8 band=61-250
-ms=151391 fall=151440 mid=151415 fitIn=151391 d=-24 mask=07f nov=23.176 thr=20.675 rise=-3.8 band=61-250
-ms=151752 fall=151781 mid=151766 fitIn=151776 d=10 mask=7ff nov=32.198 thr=19.740 rise=-5.5 band=61-250
-ms=151840 fall=151879 mid=151859 fitIn=151854 d=-5 mask=7ff nov=25.336 thr=19.530 rise=-8.0 band=61-250
-ms=152076 fall=152096 mid=152086 fitIn=152095 d=9 mask=7ff nov=23.259 thr=18.965 rise=-0.9 band=61-250
-ms=152293 fall=152322 mid=152307 fitIn=152303 d=-4 mask=7ff nov=33.077 thr=18.576 rise=-10.3 band=61-250
-ms=152429 fall=152449 mid=152439 fitIn=152443 d=4 mask=7ff nov=20.204 thr=18.289 rise=-6.4 band=61-250
-ms=152517 fall=152556 mid=152536 fitIn=152527 d=-9 mask=7ff nov=27.121 thr=18.069 rise=3.5 band=61-250
-ms=152977 fall=152996 mid=152986 fitIn=152996 d=10 mask=7ff nov=19.458 thr=17.052 rise=3.3 band=61-250
+# fetch at 19:12:20  since=8
+# onsets since=8 sent=13 next=21 head=21
+ms=166782 fall=166811 mid=166796 fitIn=166796 d=0 mask=7ff nov=27.201 thr=22.722 rise=-4.9 band=61-250
+ms=167788 fall=167816 mid=167802 fitIn=167802 d=0 mask=7ff nov=27.612 thr=19.784 rise=5.9 band=61-250
+ms=167942 fall=167985 mid=167963 fitIn=167956 d=-7 mask=7ff nov=28.827 thr=19.348 rise=-5.2 band=61-250
+ms=168326 fall=168354 mid=168340 fitIn=168347 d=7 mask=7ff nov=19.103 thr=18.373 rise=3.3 band=61-250
+ms=168551 fall=168571 mid=168561 fitIn=168565 d=4 mask=7ff nov=21.669 thr=17.884 rise=1.0 band=61-250
+ms=168955 fall=168974 mid=168964 fitIn=168965 d=1 mask=7ff nov=17.393 thr=16.977 rise=7.3 band=61-250
+ms=169447 fall=169477 mid=169462 fitIn=169456 d=-6 mask=7ff nov=36.710 thr=20.617 rise=-6.4 band=61-250
+ms=169663 fall=169693 mid=169678 fitIn=169678 d=0 mask=7ff nov=41.936 thr=23.551 rise=-7.3 band=61-250
+ms=169930 fall=0 mid=-1 fitIn=169945 d=0 mask=7fe nov=26.738 thr=22.798 rise=-1.2 band=61-250
+ms=169930 fall=169949 mid=169939 fitIn=169930 d=-9 mask=001 nov=26.738 thr=22.798 rise=-1.2 band=61-250
+ms=170256 fall=170283 mid=170269 fitIn=170265 d=-4 mask=7ff nov=23.738 thr=21.873 rise=9.1 band=61-250
+ms=170360 fall=0 mid=-1 fitIn=170373 d=0 mask=7fe nov=41.514 thr=23.314 rise=-1.0 band=61-250
+ms=170360 fall=170389 mid=170374 fitIn=170360 d=-14 mask=001 nov=41.514 thr=23.314 rise=-1.0 band=61-250
 
-# fetch at 18:57:58  since=50
-# onsets since=50 sent=2 next=52 head=52
-ms=158127 fall=158146 mid=158136 fitIn=158136 d=0 mask=7ff nov=53.683 thr=42.814 rise=-1.7 band=61-250
-ms=158580 fall=158603 mid=158591 fitIn=158589 d=-2 mask=7ff nov=42.607 thr=40.172 rise=-1.6 band=61-250
+# fetch at 19:12:26  since=21
+# onsets since=21 sent=6 next=27 head=27
+ms=170853 fall=170873 mid=170863 fitIn=170867 d=4 mask=7ff nov=35.838 thr=21.894 rise=6.9 band=61-250
+ms=171006 fall=171022 mid=171014 fitIn=171016 d=2 mask=7ff nov=69.164 thr=38.843 rise=2.8 band=61-250
+ms=172040 fall=172058 mid=172049 fitIn=172048 d=-1 mask=7ff nov=47.534 thr=33.624 rise=10.8 band=61-250
+ms=172173 fall=172202 mid=172187 fitIn=172182 d=-5 mask=7ff nov=102.917 thr=57.798 rise=-3.8 band=61-250
+ms=172401 fall=172419 mid=172410 fitIn=172415 d=5 mask=7ff nov=72.668 thr=56.101 rise=-3.8 band=61-250
+ms=174574 fall=174615 mid=174594 fitIn=174583 d=-11 mask=7ff nov=44.904 thr=41.630 rise=-1.0 band=61-250
 
-# fetch at 18:58:03  since=52
-# onsets since=52 sent=21 next=73 head=73
-ms=159025 fall=159044 mid=159034 fitIn=159036 d=2 mask=7ff nov=48.785 thr=37.801 rise=0.2 band=61-250
-ms=159914 fall=159934 mid=159924 fitIn=159923 d=-1 mask=7ff nov=35.328 thr=33.367 rise=0.5 band=61-250
-ms=161492 fall=0 mid=-1 fitIn=161502 d=0 mask=600 nov=33.456 thr=26.883 rise=4.2 band=61-250
-ms=161492 fall=161511 mid=161501 fitIn=161492 d=-9 mask=1ff nov=33.456 thr=26.883 rise=4.2 band=61-250
-ms=161688 fall=161717 mid=161702 fitIn=161697 d=-5 mask=7ff nov=32.137 thr=26.221 rise=-1.7 band=61-250
-ms=161923 fall=0 mid=-1 fitIn=161937 d=0 mask=7f8 nov=30.444 thr=25.426 rise=-3.1 band=61-250
-ms=161923 fall=161962 mid=161942 fitIn=161923 d=-19 mask=007 nov=30.444 thr=25.426 rise=-3.1 band=61-250
-ms=162394 fall=0 mid=-1 fitIn=162413 d=0 mask=400 nov=26.298 thr=23.877 rise=-1.7 band=61-250
-ms=162394 fall=162413 mid=162403 fitIn=162394 d=-9 mask=3ff nov=26.298 thr=23.877 rise=-1.7 band=61-250
-ms=162590 fall=162630 mid=162610 fitIn=162599 d=-11 mask=7ff nov=61.354 thr=34.456 rise=-10.1 band=61-250
-ms=162858 fall=162877 mid=162867 fitIn=162878 d=11 mask=7ff nov=66.780 thr=37.503 rise=-2.4 band=61-250
-ms=162946 fall=162997 mid=162971 fitIn=162955 d=-16 mask=7ff nov=59.456 thr=37.009 rise=11.6 band=61-250
-ms=163047 fall=163078 mid=163062 fitIn=163072 d=10 mask=7ff nov=42.848 thr=36.600 rise=-22.6 band=61-250
-ms=163320 fall=163340 mid=163330 fitIn=163335 d=5 mask=7ff nov=53.558 thr=35.492 rise=-0.6 band=61-250
-ms=163498 fall=163548 mid=163523 fitIn=163508 d=-15 mask=7ff nov=36.017 thr=34.533 rise=-2.6 band=61-250
-ms=163763 fall=163791 mid=163777 fitIn=163788 d=11 mask=7ff nov=35.010 thr=33.443 rise=0.4 band=61-250
-ms=164184 fall=164214 mid=164199 fitIn=164198 d=-1 mask=7ff nov=32.522 thr=31.706 rise=-3.3 band=61-250
-ms=164244 fall=164293 mid=164268 fitIn=164259 d=-9 mask=7ff nov=39.856 thr=31.419 rise=-3.7 band=61-250
-ms=164353 fall=164372 mid=164362 fitIn=164377 d=15 mask=7ff nov=89.313 thr=50.158 rise=1.4 band=61-250
-ms=164467 fall=164495 mid=164481 fitIn=164476 d=-5 mask=7ff nov=57.516 thr=49.429 rise=1.0 band=61-250
-ms=164615 fall=164654 mid=164634 fitIn=164629 d=-5 mask=7ff nov=62.632 thr=48.543 rise=-9.6 band=61-250
+# fetch at 19:12:35  since=27
+# onsets since=27 sent=22 next=49 head=49
+ms=177491 fall=177521 mid=177506 fitIn=177511 d=5 mask=7ff nov=29.042 thr=27.827 rise=1.0 band=61-250
+ms=177730 fall=177759 mid=177744 fitIn=177745 d=1 mask=7ff nov=40.480 thr=27.007 rise=-3.6 band=61-250
+ms=178162 fall=178202 mid=178182 fitIn=178176 d=-6 mask=7ff nov=29.642 thr=25.391 rise=-1.8 band=61-250
+ms=178459 fall=178489 mid=178474 fitIn=178479 d=5 mask=7ff nov=28.130 thr=24.443 rise=3.7 band=61-250
+ms=178628 fall=178647 mid=178637 fitIn=178643 d=6 mask=7ff nov=51.641 thr=29.001 rise=-9.1 band=61-250
+ms=179068 fall=179088 mid=179078 fitIn=179077 d=-1 mask=7ff nov=28.718 thr=27.292 rise=-4.7 band=61-250
+ms=179870 fall=179890 mid=179880 fitIn=179880 d=0 mask=7ff nov=33.728 thr=24.549 rise=4.0 band=61-250
+ms=179969 fall=179983 mid=179976 fitIn=179979 d=3 mask=7ff nov=27.581 thr=24.264 rise=8.0 band=61-250
+ms=180624 fall=180654 mid=180639 fitIn=180631 d=-8 mask=7ff nov=23.775 thr=22.174 rise=-2.4 band=61-250
+ms=180850 fall=180880 mid=180865 fitIn=180865 d=0 mask=7ff nov=33.243 thr=21.560 rise=-3.5 band=61-250
+ms=181088 fall=181107 mid=181097 fitIn=181103 d=6 mask=7ff nov=65.931 thr=37.027 rise=-4.9 band=61-250
+ms=181740 fall=181769 mid=181754 fitIn=181749 d=-5 mask=7ff nov=33.895 thr=33.794 rise=-1.5 band=61-250
+ms=182080 fall=182109 mid=182094 fitIn=182094 d=0 mask=7ff nov=41.438 thr=32.287 rise=7.2 band=61-250
+ms=182192 fall=182222 mid=182207 fitIn=182206 d=-1 mask=7ff nov=44.200 thr=39.104 rise=-1.0 band=61-250
+ms=182447 fall=182477 mid=182462 fitIn=182462 d=0 mask=7ff nov=39.501 thr=37.835 rise=13.2 band=61-250
+ms=182685 fall=182706 mid=182695 fitIn=182700 d=5 mask=7ff nov=65.499 thr=36.784 rise=-1.5 band=61-250
+ms=182933 fall=182950 mid=182941 fitIn=182943 d=2 mask=7ff nov=43.305 thr=35.572 rise=6.3 band=61-250
+ms=183197 fall=183227 mid=183212 fitIn=183205 d=-7 mask=7ff nov=39.873 thr=34.400 rise=-9.6 band=61-250
+ms=183501 fall=183521 mid=183511 fitIn=183516 d=5 mask=7ff nov=64.696 thr=36.334 rise=-2.9 band=61-250
+ms=183721 fall=183760 mid=183740 fitIn=183731 d=-9 mask=7ff nov=44.080 thr=35.347 rise=-4.8 band=61-250
+ms=184648 fall=184688 mid=184668 fitIn=184667 d=-1 mask=7ff nov=103.008 thr=79.321 rise=-3.6 band=61-250
+ms=185089 fall=185139 mid=185114 fitIn=185109 d=-5 mask=7ff nov=77.002 thr=74.443 rise=6.6 band=61-250
 
-# fetch at 18:58:11  since=73
-# onsets since=73 sent=22 next=95 head=95
-ms=165042 fall=165078 mid=165060 fitIn=165061 d=1 mask=7ff nov=76.208 thr=57.558 rise=4.2 band=61-250
-ms=165498 fall=165537 mid=165517 fitIn=165516 d=-1 mask=7ff nov=58.366 thr=54.173 rise=-7.6 band=61-250
-ms=165942 fall=165987 mid=165964 fitIn=165961 d=-3 mask=7ff nov=61.222 thr=50.986 rise=-8.3 band=61-250
-ms=166373 fall=166422 mid=166397 fitIn=166395 d=-2 mask=7ff nov=99.697 thr=55.990 rise=-1.8 band=61-250
-ms=166834 fall=166872 mid=166853 fitIn=166858 d=5 mask=7ff nov=70.684 thr=52.665 rise=-1.5 band=61-250
-ms=167287 fall=167325 mid=167306 fitIn=167306 d=0 mask=7ff nov=92.097 thr=51.721 rise=8.2 band=61-250
-ms=167747 fall=167774 mid=167760 fitIn=167766 d=6 mask=7ff nov=75.584 thr=48.649 rise=-11.0 band=61-250
-ms=168076 fall=168105 mid=168090 fitIn=168089 d=-1 mask=7ff nov=62.432 thr=46.498 rise=-3.1 band=61-250
-ms=168184 fall=168223 mid=168203 fitIn=168198 d=-5 mask=7ff nov=60.213 thr=45.882 rise=1.9 band=61-250
-ms=168625 fall=168667 mid=168646 fitIn=168644 d=-2 mask=7ff nov=82.938 thr=46.578 rise=3.2 band=61-250
-ms=168857 fall=168874 mid=168865 fitIn=168878 d=13 mask=7ff nov=55.909 thr=45.210 rise=-15.4 band=61-250
-ms=169067 fall=169115 mid=169091 fitIn=169075 d=-16 mask=7ff nov=65.363 thr=43.857 rise=-3.6 band=61-250
-ms=169526 fall=169566 mid=169546 fitIn=169550 d=4 mask=7ff nov=95.617 thr=53.699 rise=7.3 band=61-250
-ms=169866 fall=169883 mid=169874 fitIn=169886 d=12 mask=7ff nov=53.102 thr=51.421 rise=-0.2 band=61-250
-ms=169990 fall=170018 mid=170004 fitIn=169998 d=-6 mask=7ff nov=151.117 thr=84.868 rise=-2.1 band=61-250
-ms=170424 fall=170462 mid=170443 fitIn=170438 d=-5 mask=7ff nov=83.998 thr=79.754 rise=-1.1 band=61-250
-ms=170872 fall=170920 mid=170896 fitIn=170891 d=-5 mask=7ff nov=105.593 thr=74.893 rise=0.7 band=61-250
-ms=171333 fall=171361 mid=171347 fitIn=171357 d=10 mask=7ff nov=127.809 thr=71.778 rise=1.7 band=61-250
-ms=171785 fall=171817 mid=171801 fitIn=171799 d=-2 mask=7ff nov=92.238 thr=67.593 rise=1.7 band=61-250
-ms=172232 fall=172251 mid=172241 fitIn=172248 d=7 mask=7ff nov=157.575 thr=88.494 rise=-7.4 band=61-250
-ms=172670 fall=172719 mid=172694 fitIn=172679 d=-15 mask=7ff nov=103.114 thr=83.008 rise=1.4 band=61-250
-ms=173112 fall=173161 mid=173136 fitIn=173136 d=0 mask=7ff nov=108.868 thr=77.947 rise=1.1 band=61-250
+# fetch at 19:12:41  since=49
+# onsets since=49 sent=11 next=60 head=60
+ms=185541 fall=185588 mid=185564 fitIn=185566 d=2 mask=7ff nov=83.841 thr=70.040 rise=-4.2 band=61-250
+ms=185986 fall=186026 mid=186006 fitIn=186009 d=3 mask=7ff nov=139.605 thr=78.402 rise=-9.6 band=61-250
+ms=186882 fall=0 mid=-1 fitIn=186902 d=0 mask=7fe nov=107.377 thr=69.260 rise=2.6 band=61-250
+ms=186882 fall=186932 mid=186907 fitIn=186882 d=-25 mask=001 nov=107.377 thr=69.260 rise=2.6 band=61-250
+ms=187326 fall=187373 mid=187349 fitIn=187351 d=2 mask=7ff nov=103.832 thr=65.103 rise=-4.8 band=61-250
+ms=187764 fall=187823 mid=187793 fitIn=187787 d=-6 mask=7ff nov=78.962 thr=61.203 rise=-3.1 band=61-250
+ms=188676 fall=188725 mid=188700 fitIn=188705 d=5 mask=7ff nov=57.931 thr=54.214 rise=6.2 band=61-250
+ms=189131 fall=189169 mid=189150 fitIn=189155 d=5 mask=7ff nov=107.369 thr=60.298 rise=7.9 band=61-250
+ms=189587 fall=189613 mid=189600 fitIn=189606 d=6 mask=7ff nov=160.929 thr=90.378 rise=1.9 band=61-250
+ms=190935 fall=190964 mid=190949 fitIn=190948 d=-1 mask=7ff nov=124.733 thr=74.774 rise=1.2 band=61-250
+ms=191378 fall=191412 mid=191395 fitIn=191392 d=-3 mask=7ff nov=74.407 thr=70.301 rise=1.3 band=61-250
 
-# fetch at 18:58:17  since=95
-# onsets since=95 sent=8 next=103 head=103
-ms=173560 fall=173609 mid=173584 fitIn=173584 d=0 mask=7ff nov=95.201 thr=73.250 rise=-3.9 band=61-250
-ms=174029 fall=174048 mid=174038 fitIn=174053 d=15 mask=7ff nov=166.090 thr=93.276 rise=12.7 band=61-250
-ms=174902 fall=174952 mid=174927 fitIn=174911 d=-16 mask=7ff nov=97.568 thr=82.250 rise=-18.7 band=61-250
-ms=175804 fall=175833 mid=175818 fitIn=175829 d=11 mask=7ff nov=79.390 thr=72.667 rise=-7.8 band=61-250
-ms=176699 fall=176739 mid=176719 fitIn=176713 d=-6 mask=7ff nov=88.729 thr=64.237 rise=-17.5 band=61-250
-ms=177848 fall=177860 mid=177854 fitIn=177868 d=14 mask=7ff nov=64.377 thr=54.970 rise=6.3 band=61-250
-ms=178473 fall=178512 mid=178492 fitIn=178479 d=-13 mask=7ff nov=85.338 thr=50.205 rise=-2.5 band=61-250
-ms=178909 fall=178982 mid=178945 fitIn=178928 d=-17 mask=7ff nov=109.350 thr=61.411 rise=-5.3 band=61-250
+# fetch at 19:12:47  since=60
+# onsets since=60 sent=12 next=72 head=72
+ms=191833 fall=191868 mid=191850 fitIn=191850 d=0 mask=7ff nov=116.547 thr=66.200 rise=3.0 band=61-250
+ms=192274 fall=192303 mid=192288 fitIn=192291 d=3 mask=7ff nov=68.016 thr=62.255 rise=-5.8 band=61-250
+ms=192713 fall=192763 mid=192738 fitIn=192727 d=-11 mask=7ff nov=61.118 thr=58.434 rise=6.1 band=61-250
+ms=193166 fall=0 mid=-1 fitIn=193191 d=0 mask=700 nov=83.624 thr=54.937 rise=-1.3 band=61-250
+ms=193166 fall=193213 mid=193189 fitIn=193166 d=-23 mask=0ff nov=83.624 thr=54.937 rise=-1.3 band=61-250
+ms=193596 fall=193653 mid=193624 fitIn=193619 d=-5 mask=7ff nov=89.675 thr=51.775 rise=-3.5 band=61-250
+ms=194057 fall=194107 mid=194082 fitIn=194085 d=3 mask=7ff nov=77.787 thr=48.662 rise=4.4 band=61-250
+ms=194511 fall=194549 mid=194530 fitIn=194536 d=6 mask=7ff nov=80.400 thr=45.938 rise=-8.9 band=61-250
+ms=194957 fall=194995 mid=194976 fitIn=194976 d=0 mask=7ff nov=90.560 thr=50.858 rise=0.9 band=61-250
+ms=195397 fall=195448 mid=195422 fitIn=195416 d=-6 mask=7ff nov=62.143 thr=47.863 rise=4.5 band=61-250
+ms=195841 fall=195891 mid=195866 fitIn=195866 d=0 mask=7ff nov=118.787 thr=66.711 rise=-5.8 band=61-250
+ms=196191 fall=196207 mid=196199 fitIn=196216 d=17 mask=7ff nov=74.876 thr=63.873 rise=23.2 band=61-250
 
-# fetch at 18:58:22  since=103
-# onsets since=103 sent=9 next=112 head=112
-ms=179374 fall=179423 mid=179398 fitIn=179410 d=12 mask=7ff nov=97.426 thr=57.804 rise=8.1 band=61-250
-ms=179824 fall=179861 mid=179842 fitIn=179848 d=6 mask=7ff nov=112.599 thr=63.236 rise=1.3 band=61-250
-ms=180272 fall=180311 mid=180291 fitIn=180290 d=-1 mask=7ff nov=131.705 thr=73.965 rise=3.8 band=61-250
-ms=180721 fall=180774 mid=180747 fitIn=180740 d=-7 mask=7ff nov=71.842 thr=69.438 rise=1.6 band=61-250
-ms=181166 fall=181215 mid=181190 fitIn=181192 d=2 mask=7ff nov=118.049 thr=66.296 rise=6.8 band=61-250
-ms=181625 fall=181655 mid=181640 fitIn=181649 d=9 mask=7ff nov=156.590 thr=87.941 rise=-1.6 band=61-250
-ms=182073 fall=182099 mid=182086 fitIn=182088 d=2 mask=7ff nov=209.651 thr=117.740 rise=2.3 band=61-250
-ms=182966 fall=183008 mid=182987 fitIn=182979 d=-8 mask=7ff nov=130.665 thr=103.451 rise=1.9 band=61-250
-ms=183420 fall=183449 mid=183434 fitIn=183441 d=7 mask=7ff nov=114.494 thr=97.258 rise=4.6 band=61-250
+# fetch at 19:12:53  since=72
+# onsets since=72 sent=10 next=82 head=82
+ms=197625 fall=197674 mid=197649 fitIn=197633 d=-16 mask=7ff nov=104.029 thr=58.423 rise=-10.2 band=61-250
+ms=198092 fall=0 mid=-1 fitIn=198116 d=0 mask=7fe nov=90.129 thr=54.917 rise=0.0 band=61-250
+ms=198092 fall=198120 mid=198106 fitIn=198092 d=-14 mask=001 nov=90.129 thr=54.917 rise=0.0 band=61-250
+ms=198540 fall=198588 mid=198564 fitIn=198554 d=-10 mask=7ff nov=112.566 thr=63.217 rise=-13.5 band=61-250
+ms=198990 fall=0 mid=-1 fitIn=199014 d=0 mask=7fe nov=116.700 thr=65.539 rise=-1.2 band=61-250
+ms=198990 fall=199028 mid=199009 fitIn=198990 d=-19 mask=001 nov=116.700 thr=65.539 rise=-1.2 band=61-250
+ms=199450 fall=199470 mid=199460 fitIn=199469 d=9 mask=7ff nov=246.220 thr=138.277 rise=-5.6 band=61-250
+ms=202118 fall=202168 mid=202143 fitIn=202128 d=-15 mask=7ff nov=107.728 thr=94.320 rise=5.5 band=61-250
+ms=202569 fall=202617 mid=202593 fitIn=202594 d=1 mask=7ff nov=96.359 thr=88.522 rise=3.6 band=61-250
+ms=203012 fall=203050 mid=203031 fitIn=203036 d=5 mask=7ff nov=225.868 thr=126.847 rise=3.5 band=61-250
 
-# fetch at 18:58:31  since=112
-# onsets since=112 sent=15 next=127 head=127
-ms=184325 fall=184344 mid=184334 fitIn=184339 d=5 mask=7ff nov=187.790 thr=105.463 rise=1.5 band=61-250
-ms=184754 fall=184813 mid=184783 fitIn=184763 d=-20 mask=7ff nov=121.509 thr=98.986 rise=8.1 band=61-250
-ms=185658 fall=185697 mid=185677 fitIn=185687 d=10 mask=7ff nov=139.986 thr=87.234 rise=-0.1 band=61-250
-ms=186110 fall=186139 mid=186124 fitIn=186129 d=5 mask=7ff nov=125.451 thr=81.996 rise=-8.2 band=61-250
-ms=186552 fall=186600 mid=186576 fitIn=186566 d=-10 mask=7ff nov=117.198 thr=76.939 rise=-2.0 band=61-250
-ms=186992 fall=187033 mid=187012 fitIn=187016 d=4 mask=7ff nov=108.254 thr=72.486 rise=-0.0 band=61-250
-ms=187443 fall=187492 mid=187467 fitIn=187463 d=-4 mask=7ff nov=99.671 thr=68.026 rise=-5.6 band=61-250
-ms=187906 fall=187935 mid=187920 fitIn=187930 d=10 mask=7ff nov=106.970 thr=68.405 rise=1.4 band=61-250
-ms=188337 fall=188362 mid=188349 fitIn=188351 d=2 mask=7ff nov=162.636 thr=91.337 rise=8.7 band=61-250
-ms=189235 fall=189273 mid=189254 fitIn=189247 d=-7 mask=7ff nov=80.569 thr=80.403 rise=0.5 band=61-250
-ms=190131 fall=190162 mid=190146 fitIn=190150 d=4 mask=7ff nov=157.438 thr=88.417 rise=-0.8 band=61-250
-ms=191018 fall=191070 mid=191044 fitIn=191033 d=-11 mask=7ff nov=94.428 thr=77.978 rise=-1.6 band=61-250
-ms=191472 fall=191510 mid=191491 fitIn=191498 d=7 mask=7ff nov=107.878 thr=73.272 rise=-1.6 band=61-250
-ms=191920 fall=191950 mid=191935 fitIn=191939 d=4 mask=7ff nov=125.734 thr=70.612 rise=2.9 band=61-250
-ms=192355 fall=192421 mid=192388 fitIn=192370 d=-18 mask=7ff nov=78.457 thr=66.418 rise=2.3 band=61-250
+# fetch at 19:12:59  since=82
+# onsets since=82 sent=10 next=92 head=92
+ms=203902 fall=203949 mid=203925 fitIn=203921 d=-4 mask=7ff nov=126.210 thr=111.859 rise=-19.1 band=61-250
+ms=204805 fall=204835 mid=204820 fitIn=204828 d=8 mask=7ff nov=101.667 thr=98.610 rise=0.2 band=61-250
+ms=205691 fall=205728 mid=205709 fitIn=205706 d=-3 mask=7ff nov=109.227 thr=86.951 rise=-6.0 band=61-250
+ms=206581 fall=206620 mid=206600 fitIn=206599 d=-1 mask=7ff nov=114.403 thr=76.607 rise=-9.1 band=61-250
+ms=207040 fall=0 mid=-1 fitIn=207059 d=0 mask=7f8 nov=111.414 thr=72.066 rise=-0.7 band=61-250
+ms=207040 fall=207078 mid=207059 fitIn=207040 d=-19 mask=007 nov=111.414 thr=72.066 rise=-0.7 band=61-250
+ms=207477 fall=207517 mid=207497 fitIn=207496 d=-1 mask=7ff nov=185.622 thr=104.245 rise=-5.8 band=61-250
+ms=207929 fall=207967 mid=207948 fitIn=207949 d=1 mask=7ff nov=98.955 thr=97.854 rise=0.5 band=61-250
+ms=208378 fall=208419 mid=208398 fitIn=208397 d=-1 mask=7ff nov=104.678 thr=91.875 rise=-6.1 band=61-250
+ms=209273 fall=209319 mid=209296 fitIn=209293 d=-3 mask=7ff nov=106.749 thr=80.990 rise=-4.2 band=61-250
 
-# fetch at 18:58:40  since=127
-# onsets since=127 sent=20 next=147 head=147
-ms=192812 fall=192842 mid=192827 fitIn=192845 d=18 mask=7ff nov=126.229 thr=70.890 rise=-0.4 band=61-250
-ms=193260 fall=193309 mid=193284 fitIn=193275 d=-9 mask=7ff nov=73.515 thr=66.592 rise=-2.0 band=61-250
-ms=193693 fall=193751 mid=193722 fitIn=193717 d=-5 mask=7ff nov=119.931 thr=67.353 rise=7.0 band=61-250
-ms=194152 fall=194190 mid=194171 fitIn=194181 d=10 mask=7ff nov=107.891 thr=63.258 rise=1.8 band=61-250
-ms=194615 fall=194644 mid=194629 fitIn=194634 d=5 mask=7ff nov=87.737 thr=59.491 rise=3.2 band=61-250
-ms=195056 fall=195095 mid=195075 fitIn=195070 d=-5 mask=7ff nov=110.012 thr=101.495 rise=-0.3 band=61-250
-ms=195505 fall=195524 mid=195514 fitIn=195524 d=10 mask=7ff nov=134.087 thr=95.150 rise=-3.6 band=61-250
-ms=196397 fall=196445 mid=196421 fitIn=196406 d=-15 mask=7ff nov=114.035 thr=83.902 rise=1.3 band=61-250
-ms=196857 fall=0 mid=-1 fitIn=196881 d=0 mask=700 nov=160.630 thr=90.210 rise=-3.0 band=61-250
-ms=196857 fall=196876 mid=196866 fitIn=196857 d=-9 mask=0ff nov=160.630 thr=90.210 rise=-3.0 band=61-250
-ms=197275 fall=197336 mid=197305 fitIn=197284 d=-21 mask=7ff nov=124.257 thr=84.768 rise=-0.3 band=61-250
-ms=197741 fall=197779 mid=197760 fitIn=197771 d=11 mask=7ff nov=107.654 thr=79.767 rise=-8.2 band=61-250
-ms=198181 fall=198241 mid=198211 fitIn=198200 d=-11 mask=7ff nov=117.763 thr=74.888 rise=-2.2 band=61-250
-ms=198651 fall=198680 mid=198665 fitIn=198681 d=16 mask=7ff nov=187.154 thr=105.106 rise=4.1 band=61-250
-ms=199087 fall=199126 mid=199106 fitIn=199101 d=-5 mask=7ff nov=105.612 thr=98.859 rise=5.3 band=61-250
-ms=199537 fall=199577 mid=199557 fitIn=199556 d=-1 mask=7ff nov=113.072 thr=92.770 rise=1.5 band=61-250
-ms=199966 fall=200028 mid=199997 fitIn=199986 d=-11 mask=7ff nov=114.015 thr=87.294 rise=8.9 band=61-250
-ms=200424 fall=200471 mid=200447 fitIn=200455 d=8 mask=7ff nov=154.628 thr=86.839 rise=5.7 band=61-250
-ms=200867 fall=200915 mid=200891 fitIn=200890 d=-1 mask=7ff nov=113.707 thr=81.726 rise=10.5 band=61-250
-ms=201327 fall=201366 mid=201346 fitIn=201351 d=5 mask=7ff nov=97.410 thr=76.764 rise=-1.2 band=61-250
+# fetch at 19:13:05  since=92
+# onsets since=92 sent=14 next=106 head=106
+ms=209724 fall=209771 mid=209747 fitIn=209747 d=0 mask=7ff nov=93.205 thr=76.205 rise=2.0 band=61-250
+ms=210176 fall=210225 mid=210200 fitIn=210199 d=-1 mask=7ff nov=110.370 thr=71.506 rise=-1.1 band=61-250
+ms=210627 fall=210657 mid=210642 fitIn=210651 d=9 mask=7ff nov=120.454 thr=67.647 rise=1.4 band=61-250
+ms=211066 fall=211112 mid=211089 fitIn=211081 d=-8 mask=7ff nov=121.067 thr=67.991 rise=8.9 band=61-250
+ms=211523 fall=211571 mid=211547 fitIn=211546 d=-1 mask=7ff nov=71.769 thr=63.837 rise=-8.4 band=61-250
+ms=211972 fall=212011 mid=211991 fitIn=211996 d=5 mask=7ff nov=78.711 thr=60.019 rise=4.5 band=61-250
+ms=212208 fall=212227 mid=212217 fitIn=212227 d=10 mask=7ff nov=104.418 thr=58.641 rise=-5.9 band=61-250
+ms=212417 fall=212464 mid=212440 fitIn=212426 d=-14 mask=7ff nov=72.383 thr=56.970 rise=-10.1 band=61-250
+ms=212878 fall=212908 mid=212893 fitIn=212901 d=8 mask=7ff nov=138.926 thr=78.021 rise=0.8 band=61-250
+ms=213748 fall=213810 mid=213779 fitIn=213763 d=-16 mask=7ff nov=132.542 thr=74.435 rise=4.2 band=61-250
+ms=214205 fall=214255 mid=214230 fitIn=214236 d=6 mask=7ff nov=95.955 thr=70.077 rise=-11.2 band=61-250
+ms=214667 fall=214686 mid=214676 fitIn=214692 d=16 mask=7ff nov=152.182 thr=85.466 rise=1.2 band=61-250
+ms=215100 fall=215135 mid=215117 fitIn=215109 d=-8 mask=7ff nov=107.456 thr=80.370 rise=1.7 band=61-250
+ms=215563 fall=215594 mid=215578 fitIn=215580 d=2 mask=7ff nov=104.078 thr=75.646 rise=-0.2 band=61-250
 
-# fetch at 18:58:46  since=147
-# onsets since=147 sent=14 next=161 head=161
-ms=201770 fall=201818 mid=201794 fitIn=201789 d=-5 mask=7ff nov=95.053 thr=72.178 rise=-5.1 band=61-250
-ms=202219 fall=202258 mid=202238 fitIn=202243 d=5 mask=7ff nov=73.908 thr=67.857 rise=7.8 band=61-250
-ms=202658 fall=202706 mid=202682 fitIn=202677 d=-5 mask=7ff nov=90.984 thr=63.800 rise=0.8 band=61-250
-ms=203102 fall=203139 mid=203120 fitIn=203126 d=6 mask=7ff nov=146.956 thr=82.531 rise=-1.7 band=61-250
-ms=203551 fall=203592 mid=203571 fitIn=203569 d=-2 mask=7ff nov=80.039 thr=77.526 rise=-10.6 band=61-250
-ms=203995 fall=204050 mid=204022 fitIn=204015 d=-7 mask=7ff nov=98.714 thr=72.879 rise=7.2 band=61-250
-ms=204435 fall=204484 mid=204459 fitIn=204462 d=3 mask=7ff nov=99.957 thr=68.524 rise=-0.3 band=61-250
-ms=204890 fall=204916 mid=204903 fitIn=204914 d=11 mask=7ff nov=128.367 thr=72.091 rise=14.8 band=61-250
-ms=205338 fall=205386 mid=205362 fitIn=205351 d=-11 mask=7ff nov=138.938 thr=78.028 rise=-0.8 band=61-250
-ms=205803 fall=205833 mid=205818 fitIn=205827 d=9 mask=7ff nov=74.495 thr=73.393 rise=4.2 band=61-250
-ms=206236 fall=206274 mid=206255 fitIn=206251 d=-4 mask=7ff nov=89.695 thr=73.093 rise=-7.1 band=61-250
-ms=206675 fall=0 mid=-1 fitIn=206694 d=0 mask=7fe nov=120.376 thr=68.598 rise=4.3 band=61-250
-ms=206675 fall=206734 mid=206704 fitIn=206675 d=-29 mask=001 nov=120.376 thr=68.598 rise=4.3 band=61-250
-ms=207137 fall=207178 mid=207157 fitIn=207166 d=9 mask=7ff nov=136.597 thr=76.713 rise=11.8 band=61-250
+# fetch at 19:13:14  since=106
+# onsets since=106 sent=19 next=125 head=125
+ms=216006 fall=216031 mid=216018 fitIn=216021 d=3 mask=7ff nov=147.230 thr=82.684 rise=-10.9 band=61-250
+ms=216430 fall=216478 mid=216454 fitIn=216442 d=-12 mask=7ff nov=105.739 thr=77.647 rise=-2.2 band=61-250
+ms=216869 fall=216915 mid=216892 fitIn=216893 d=1 mask=7ff nov=126.212 thr=73.071 rise=8.8 band=61-250
+ms=217335 fall=0 mid=-1 fitIn=217358 d=0 mask=7f8 nov=122.362 thr=68.718 rise=-4.0 band=61-250
+ms=217335 fall=217384 mid=217359 fitIn=217335 d=-24 mask=007 nov=122.362 thr=68.718 rise=-4.0 band=61-250
+ms=217781 fall=217831 mid=217806 fitIn=217805 d=-1 mask=7ff nov=89.302 thr=64.628 rise=16.1 band=61-250
+ms=218232 fall=218272 mid=218252 fitIn=218257 d=5 mask=7ff nov=78.953 thr=60.878 rise=3.2 band=61-250
+ms=218684 fall=218703 mid=218693 fitIn=218704 d=11 mask=7ff nov=139.086 thr=78.111 rise=-1.9 band=61-250
+ms=219540 fall=219609 mid=219574 fitIn=219549 d=-25 mask=7ff nov=110.738 thr=68.848 rise=-1.9 band=61-250
+ms=220003 fall=220071 mid=220037 fitIn=220037 d=0 mask=7ff nov=65.644 thr=64.693 rise=4.5 band=61-250
+ms=220461 fall=220510 mid=220485 fitIn=220495 d=10 mask=7ff nov=88.094 thr=60.959 rise=-10.6 band=61-250
+ms=220913 fall=220963 mid=220938 fitIn=220937 d=-1 mask=7ff nov=95.810 thr=57.272 rise=-8.8 band=61-250
+ms=221363 fall=221397 mid=221380 fitIn=221388 d=8 mask=7ff nov=121.464 thr=68.214 rise=-9.8 band=61-250
+ms=221803 fall=221863 mid=221833 fitIn=221820 d=-13 mask=7ff nov=79.825 thr=64.096 rise=-1.6 band=61-250
+ms=222254 fall=222302 mid=222278 fitIn=222284 d=6 mask=7ff nov=83.546 thr=60.222 rise=-0.5 band=61-250
+ms=222714 fall=222744 mid=222729 fitIn=222738 d=9 mask=7ff nov=122.020 thr=68.527 rise=10.5 band=61-250
+ms=223167 fall=223185 mid=223176 fitIn=223182 d=6 mask=7ff nov=171.703 thr=96.429 rise=-6.3 band=61-250
+ms=223603 fall=223663 mid=223633 fitIn=223612 d=-21 mask=7ff nov=105.526 thr=90.511 rise=-2.2 band=61-250
+ms=224050 fall=224105 mid=224077 fitIn=224080 d=3 mask=7ff nov=106.464 thr=84.925 rise=-2.3 band=61-250
 
-# fetch at 18:58:54  since=161
-# onsets since=161 sent=18 next=179 head=179
-ms=207584 fall=207622 mid=207603 fitIn=207604 d=1 mask=7ff nov=111.236 thr=72.093 rise=-12.9 band=61-250
-ms=208033 fall=208073 mid=208053 fitIn=208052 d=-1 mask=7ff nov=124.579 thr=69.964 rise=-0.5 band=61-250
-ms=208481 fall=208510 mid=208495 fitIn=208501 d=6 mask=7ff nov=136.727 thr=76.786 rise=-8.6 band=61-250
-ms=208931 fall=208980 mid=208955 fitIn=208945 d=-10 mask=7ff nov=124.558 thr=72.072 rise=1.2 band=61-250
-ms=209371 fall=209419 mid=209395 fitIn=209395 d=0 mask=7ff nov=130.404 thr=73.235 rise=-2.3 band=61-250
-ms=209832 fall=209860 mid=209846 fitIn=209856 d=10 mask=7ff nov=138.762 thr=77.929 rise=1.5 band=61-250
-ms=210282 fall=210311 mid=210296 fitIn=210296 d=0 mask=7ff nov=80.260 thr=73.250 rise=-1.7 band=61-250
-ms=210711 fall=210754 mid=210732 fitIn=210725 d=-7 mask=7ff nov=93.335 thr=69.056 rise=11.2 band=61-250
-ms=211175 fall=211225 mid=211200 fitIn=211196 d=-4 mask=7ff nov=101.327 thr=64.868 rise=-6.8 band=61-250
-ms=211610 fall=211669 mid=211639 fitIn=211635 d=-4 mask=7ff nov=82.539 thr=61.054 rise=6.6 band=61-250
-ms=212071 fall=212101 mid=212086 fitIn=212100 d=14 mask=7ff nov=175.331 thr=98.466 rise=-6.0 band=61-250
-ms=212512 fall=212573 mid=212542 fitIn=212527 d=-15 mask=7ff nov=133.112 thr=92.365 rise=-14.8 band=61-250
-ms=212961 fall=213009 mid=212985 fitIn=212991 d=6 mask=7ff nov=115.107 thr=86.659 rise=-6.0 band=61-250
-ms=213412 fall=213450 mid=213431 fitIn=213436 d=5 mask=7ff nov=149.939 thr=84.206 rise=7.2 band=61-250
-ms=213856 fall=213897 mid=213876 fitIn=213875 d=-1 mask=7ff nov=157.026 thr=88.186 rise=15.0 band=61-250
-ms=214305 fall=214354 mid=214329 fitIn=214325 d=-4 mask=7ff nov=145.706 thr=82.683 rise=1.2 band=61-250
-ms=214761 fall=214799 mid=214780 fitIn=214785 d=5 mask=7ff nov=79.727 thr=77.702 rise=-1.5 band=61-250
-ms=215209 fall=215229 mid=215219 fitIn=215228 d=9 mask=7ff nov=192.231 thr=107.957 rise=-0.7 band=61-250
+# fetch at 19:13:20  since=125
+# onsets since=125 sent=13 next=138 head=138
+ms=224504 fall=224549 mid=224526 fitIn=224531 d=5 mask=7ff nov=110.470 thr=79.990 rise=0.8 band=61-250
+ms=224949 fall=224993 mid=224971 fitIn=224971 d=0 mask=7ff nov=103.836 thr=75.102 rise=14.9 band=61-250
+ms=225398 fall=225438 mid=225418 fitIn=225420 d=2 mask=7ff nov=71.167 thr=70.619 rise=19.5 band=61-250
+ms=225849 fall=225879 mid=225864 fitIn=225869 d=5 mask=7ff nov=105.516 thr=89.664 rise=-9.4 band=61-250
+ms=226293 fall=226325 mid=226309 fitIn=226308 d=-1 mask=7ff nov=102.937 thr=84.384 rise=11.0 band=61-250
+ms=226742 fall=226782 mid=226762 fitIn=226758 d=-4 mask=7ff nov=120.815 thr=79.140 rise=-0.2 band=61-250
+ms=227205 fall=227233 mid=227219 fitIn=227225 d=6 mask=7ff nov=146.681 thr=82.376 rise=6.5 band=61-250
+ms=227636 fall=227674 mid=227655 fitIn=227650 d=-5 mask=7ff nov=147.545 thr=82.861 rise=7.5 band=61-250
+ms=228098 fall=228116 mid=228107 fitIn=228117 d=10 mask=7ff nov=200.493 thr=112.597 rise=5.4 band=61-250
+ms=228982 fall=229023 mid=229002 fitIn=228991 d=-11 mask=7ff nov=155.358 thr=99.273 rise=7.4 band=61-250
+ms=229874 fall=229913 mid=229893 fitIn=229894 d=1 mask=7ff nov=159.912 thr=89.806 rise=5.0 band=61-250
+ms=230327 fall=0 mid=-1 fitIn=230346 d=0 mask=7fe nov=104.388 thr=84.510 rise=-8.9 band=61-250
+ms=230327 fall=230357 mid=230342 fitIn=230327 d=-15 mask=001 nov=104.388 thr=84.510 rise=-8.9 band=61-250
 
-# fetch at 18:59:00  since=179
-# onsets since=179 sent=15 next=194 head=194
-ms=215655 fall=215679 mid=215667 fitIn=215665 d=-2 mask=7ff nov=124.119 thr=101.421 rise=2.1 band=61-250
-ms=216099 fall=216127 mid=216113 fitIn=216111 d=-2 mask=7ff nov=130.498 thr=95.124 rise=-1.6 band=61-250
-ms=216541 fall=0 mid=-1 fitIn=216555 d=0 mask=7c0 nov=110.410 thr=89.349 rise=13.4 band=61-250
-ms=216541 fall=216588 mid=216564 fitIn=216541 d=-23 mask=03f nov=110.410 thr=89.349 rise=13.4 band=61-250
-ms=216992 fall=217031 mid=217011 fitIn=217015 d=4 mask=7ff nov=127.435 thr=84.012 rise=-8.8 band=61-250
-ms=217451 fall=217470 mid=217460 fitIn=217470 d=10 mask=7ff nov=228.131 thr=128.119 rise=1.6 band=61-250
-ms=217883 fall=217913 mid=217898 fitIn=217892 d=-6 mask=7ff nov=165.783 thr=120.300 rise=-2.8 band=61-250
-ms=218338 fall=218379 mid=218358 fitIn=218353 d=-5 mask=7ff nov=126.955 thr=112.899 rise=3.6 band=61-250
-ms=218782 fall=218812 mid=218797 fitIn=218802 d=5 mask=7ff nov=173.496 thr=106.043 rise=-15.2 band=61-250
-ms=219231 fall=219260 mid=219245 fitIn=219246 d=1 mask=7ff nov=129.216 thr=99.566 rise=-11.8 band=61-250
-ms=219672 fall=219718 mid=219695 fitIn=219686 d=-9 mask=7ff nov=144.222 thr=93.466 rise=-3.3 band=61-250
-ms=220120 fall=220148 mid=220134 fitIn=220143 d=9 mask=7ff nov=135.301 thr=87.870 rise=-0.1 band=61-250
-ms=220569 fall=220617 mid=220593 fitIn=220583 d=-10 mask=7ff nov=96.887 thr=82.488 rise=-2.2 band=61-250
-ms=221019 fall=221048 mid=221033 fitIn=221043 d=10 mask=7ff nov=139.639 thr=78.421 rise=0.2 band=61-250
-ms=221459 fall=221506 mid=221482 fitIn=221473 d=-9 mask=7ff nov=106.713 thr=73.809 rise=8.2 band=61-250
+# fetch at 19:13:26  since=138
+# onsets since=138 sent=12 next=150 head=150
+ms=230768 fall=230797 mid=230782 fitIn=230783 d=1 mask=7ff nov=177.192 thr=99.511 rise=5.5 band=61-250
+ms=231212 fall=231242 mid=231227 fitIn=231226 d=-1 mask=7ff nov=145.093 thr=93.483 rise=-1.9 band=61-250
+ms=231664 fall=231718 mid=231691 fitIn=231679 d=-12 mask=7ff nov=114.049 thr=87.711 rise=1.6 band=61-250
+ms=232112 fall=232153 mid=232132 fitIn=232139 d=7 mask=7ff nov=96.229 thr=82.438 rise=2.9 band=61-250
+ms=232566 fall=232596 mid=232581 fitIn=232586 d=5 mask=7ff nov=120.775 thr=77.564 rise=-1.0 band=61-250
+ms=233010 fall=233040 mid=233025 fitIn=233025 d=0 mask=7ff nov=118.442 thr=72.965 rise=-1.8 band=61-250
+ms=233448 fall=233484 mid=233466 fitIn=233463 d=-3 mask=7ff nov=169.298 thr=95.078 rise=5.5 band=61-250
+ms=234344 fall=234393 mid=234368 fitIn=234362 d=-6 mask=7ff nov=140.413 thr=83.710 rise=3.9 band=61-250
+ms=234806 fall=234836 mid=234821 fitIn=234830 d=9 mask=7ff nov=81.865 thr=78.637 rise=-6.7 band=61-250
+ms=235241 fall=235279 mid=235260 fitIn=235256 d=-4 mask=7ff nov=116.193 thr=79.774 rise=-6.3 band=61-250
+ms=235692 fall=235720 mid=235706 fitIn=235711 d=5 mask=7ff nov=145.067 thr=81.470 rise=-5.9 band=61-250
+ms=236141 fall=236181 mid=236161 fitIn=236155 d=-6 mask=7ff nov=149.116 thr=83.744 rise=-12.5 band=61-250
 
-# fetch at 18:59:09  since=194
-# onsets since=194 sent=20 next=214 head=214
-ms=221911 fall=221946 mid=221928 fitIn=221934 d=6 mask=7ff nov=106.099 thr=69.369 rise=10.0 band=61-250
-ms=222366 fall=222395 mid=222380 fitIn=222383 d=3 mask=7ff nov=143.255 thr=80.452 rise=7.9 band=61-250
-ms=222794 fall=222850 mid=222822 fitIn=222808 d=-14 mask=7ff nov=99.652 thr=75.636 rise=-2.1 band=61-250
-ms=223264 fall=223313 mid=223288 fitIn=223292 d=4 mask=7ff nov=101.074 thr=70.978 rise=2.4 band=61-250
-ms=223716 fall=223746 mid=223731 fitIn=223740 d=9 mask=7ff nov=143.446 thr=80.559 rise=11.0 band=61-250
-ms=224169 fall=224188 mid=224178 fitIn=224184 d=6 mask=7ff nov=234.394 thr=131.636 rise=8.7 band=61-250
-ms=225060 fall=0 mid=-1 fitIn=225069 d=0 mask=7fe nov=131.248 thr=115.602 rise=5.1 band=61-250
-ms=225060 fall=225099 mid=225079 fitIn=225060 d=-19 mask=001 nov=131.248 thr=115.602 rise=5.1 band=61-250
-ms=225520 fall=225549 mid=225534 fitIn=225539 d=5 mask=7ff nov=155.212 thr=108.347 rise=-0.1 band=61-250
-ms=225960 fall=225997 mid=225978 fitIn=225974 d=-4 mask=7ff nov=134.703 thr=102.037 rise=0.3 band=61-250
-ms=226405 fall=226434 mid=226419 fitIn=226423 d=4 mask=7ff nov=173.818 thr=97.616 rise=-6.0 band=61-250
-ms=226844 fall=226903 mid=226873 fitIn=226858 d=-15 mask=7ff nov=106.625 thr=91.628 rise=-1.5 band=61-250
-ms=227294 fall=227344 mid=227319 fitIn=227323 d=4 mask=7ff nov=118.472 thr=86.041 rise=-1.7 band=61-250
-ms=227746 fall=227786 mid=227766 fitIn=227771 d=5 mask=7ff nov=83.889 thr=80.819 rise=2.7 band=61-250
-ms=228196 fall=228226 mid=228211 fitIn=228216 d=5 mask=7ff nov=100.417 thr=81.168 rise=-2.8 band=61-250
-ms=228640 fall=228688 mid=228664 fitIn=228655 d=-9 mask=7ff nov=90.301 thr=76.276 rise=-6.0 band=61-250
-ms=229085 fall=229114 mid=229099 fitIn=229109 d=10 mask=7ff nov=140.130 thr=78.697 rise=-7.0 band=61-250
-ms=229532 fall=229582 mid=229557 fitIn=229546 d=-11 mask=7ff nov=109.469 thr=73.853 rise=10.1 band=61-250
-ms=229993 fall=230012 mid=230002 fitIn=230018 d=16 mask=7ff nov=233.624 thr=131.203 rise=-1.9 band=61-250
-ms=230430 fall=230448 mid=230439 fitIn=230439 d=0 mask=7ff nov=183.977 thr=123.355 rise=11.0 band=61-250
+# fetch at 19:13:32  since=150
+# onsets since=150 sent=15 next=165 head=165
+ms=236925 fall=236943 mid=236934 fitIn=236945 d=11 mask=7ff nov=91.569 thr=75.365 rise=18.1 band=61-250
+ms=237037 fall=237081 mid=237059 fitIn=237046 d=-13 mask=7ff nov=235.814 thr=132.433 rise=-6.6 band=61-250
+ms=237477 fall=237517 mid=237497 fitIn=237499 d=2 mask=7ff nov=142.625 thr=124.267 rise=-6.4 band=61-250
+ms=237932 fall=237978 mid=237955 fitIn=237952 d=-3 mask=7ff nov=152.353 thr=116.618 rise=0.2 band=61-250
+ms=238381 fall=0 mid=-1 fitIn=238404 d=0 mask=7fe nov=149.757 thr=109.351 rise=-13.4 band=61-250
+ms=238381 fall=238421 mid=238401 fitIn=238381 d=-20 mask=001 nov=149.757 thr=109.351 rise=-13.4 band=61-250
+ms=238841 fall=238861 mid=238851 fitIn=238861 d=10 mask=7ff nov=206.468 thr=115.952 rise=-1.0 band=61-250
+ms=239730 fall=239761 mid=239745 fitIn=239740 d=-5 mask=7ff nov=144.434 thr=102.076 rise=-3.7 band=61-250
+ms=240184 fall=240222 mid=240203 fitIn=240199 d=-4 mask=7ff nov=132.832 thr=95.806 rise=-0.8 band=61-250
+ms=240630 fall=240668 mid=240649 fitIn=240649 d=0 mask=7ff nov=108.848 thr=90.100 rise=-2.2 band=61-250
+ms=241076 fall=0 mid=-1 fitIn=241095 d=0 mask=7fe nov=121.993 thr=84.610 rise=1.4 band=61-250
+ms=241076 fall=241106 mid=241091 fitIn=241076 d=-15 mask=001 nov=121.993 thr=84.610 rise=1.4 band=61-250
+ms=241520 fall=241559 mid=241539 fitIn=241535 d=-4 mask=7ff nov=135.825 thr=79.522 rise=-2.4 band=61-250
+ms=241971 fall=242020 mid=241995 fitIn=241990 d=-5 mask=7ff nov=87.920 thr=74.731 rise=10.0 band=61-250
+ms=242430 fall=242470 mid=242450 fitIn=242454 d=4 mask=7ff nov=186.665 thr=104.831 rise=-3.2 band=61-250
 
-# fetch at 18:59:15  since=214
-# onsets since=214 sent=13 next=227 head=227
-ms=230878 fall=230907 mid=230892 fitIn=230887 d=-5 mask=7ff nov=129.931 thr=115.839 rise=0.3 band=61-250
-ms=231318 fall=231366 mid=231342 fitIn=231332 d=-10 mask=7ff nov=133.240 thr=108.600 rise=9.0 band=61-250
-ms=231766 fall=231805 mid=231785 fitIn=231790 d=5 mask=7ff nov=120.010 thr=101.809 rise=-3.6 band=61-250
-ms=232212 fall=232251 mid=232231 fitIn=232231 d=0 mask=7ff nov=205.150 thr=115.212 rise=0.4 band=61-250
-ms=232662 fall=232691 mid=232676 fitIn=232681 d=5 mask=7ff nov=146.234 thr=108.191 rise=9.1 band=61-250
-ms=233102 fall=233153 mid=233127 fitIn=233116 d=-11 mask=7ff nov=125.680 thr=101.519 rise=4.0 band=61-250
-ms=233547 fall=233598 mid=233572 fitIn=233572 d=0 mask=7ff nov=102.772 thr=95.345 rise=3.6 band=61-250
-ms=234008 fall=234036 mid=234022 fitIn=234033 d=11 mask=7ff nov=150.028 thr=89.738 rise=2.9 band=61-250
-ms=234457 fall=234496 mid=234476 fitIn=234471 d=-5 mask=7ff nov=150.689 thr=84.627 rise=-4.0 band=61-250
-ms=234895 fall=234936 mid=234915 fitIn=234914 d=-1 mask=7ff nov=116.224 thr=79.762 rise=8.2 band=61-250
-ms=235336 fall=235396 mid=235366 fitIn=235356 d=-10 mask=7ff nov=118.126 thr=74.869 rise=4.7 band=61-250
-ms=235797 fall=235838 mid=235817 fitIn=235827 d=10 mask=7ff nov=72.196 thr=70.460 rise=-0.7 band=61-250
-ms=236249 fall=236280 mid=236264 fitIn=236269 d=5 mask=7ff nov=85.904 thr=66.348 rise=-0.7 band=61-250
+# fetch at 19:13:38  since=165
+# onsets since=165 sent=13 next=178 head=178
+ms=242866 fall=242906 mid=242886 fitIn=242886 d=0 mask=7ff nov=127.881 thr=98.438 rise=2.5 band=61-250
+ms=243314 fall=243353 mid=243333 fitIn=243334 d=1 mask=7ff nov=138.303 thr=92.578 rise=2.3 band=61-250
+ms=243767 fall=243786 mid=243776 fitIn=243786 d=10 mask=7ff nov=153.089 thr=86.982 rise=-10.1 band=61-250
+ms=244206 fall=244235 mid=244220 fitIn=244215 d=-5 mask=7ff nov=159.723 thr=89.700 rise=-7.7 band=61-250
+ms=244643 fall=244694 mid=244668 fitIn=244657 d=-11 mask=7ff nov=139.312 thr=84.306 rise=-9.6 band=61-250
+ms=245113 fall=245142 mid=245127 fitIn=245138 d=11 mask=7ff nov=138.810 thr=79.158 rise=-8.1 band=61-250
+ms=245544 fall=245588 mid=245566 fitIn=245558 d=-8 mask=7ff nov=121.098 thr=74.372 rise=-10.0 band=61-250
+ms=246000 fall=246018 mid=246009 fitIn=246022 d=13 mask=7ff nov=177.915 thr=99.917 rise=17.8 band=61-250
+ms=246437 fall=246465 mid=246451 fitIn=246446 d=-5 mask=7ff nov=131.816 thr=93.685 rise=3.3 band=61-250
+ms=246882 fall=246929 mid=246905 fitIn=246896 d=-9 mask=7ff nov=92.200 thr=88.012 rise=23.5 band=61-250
+ms=247782 fall=247820 mid=247801 fitIn=247805 d=4 mask=7ff nov=148.226 thr=83.244 rise=-4.1 band=61-250
+ms=248232 fall=248272 mid=248252 fitIn=248251 d=-1 mask=7ff nov=79.736 thr=78.182 rise=-2.7 band=61-250
+ms=248659 fall=248722 mid=248690 fitIn=248679 d=-11 mask=7ff nov=123.654 thr=73.581 rise=6.2 band=61-250
 
-# fetch at 18:59:23  since=227
-# onsets since=227 sent=21 next=248 head=248
-ms=236693 fall=236727 mid=236710 fitIn=236708 d=-2 mask=7ff nov=151.355 thr=85.001 rise=6.5 band=61-250
-ms=237138 fall=237186 mid=237162 fitIn=237155 d=-7 mask=7ff nov=122.773 thr=79.892 rise=1.8 band=61-250
-ms=237597 fall=237626 mid=237611 fitIn=237621 d=10 mask=7ff nov=180.928 thr=101.609 rise=1.2 band=61-250
-ms=238042 fall=238072 mid=238057 fitIn=238056 d=-1 mask=7ff nov=169.224 thr=95.407 rise=4.3 band=61-250
-ms=238493 fall=238532 mid=238512 fitIn=238508 d=-4 mask=7ff nov=133.934 thr=89.587 rise=4.6 band=61-250
-ms=238933 fall=238973 mid=238953 fitIn=238952 d=-1 mask=7ff nov=257.509 thr=144.617 rise=3.0 band=61-250
-ms=239400 fall=239419 mid=239409 fitIn=239420 d=11 mask=7ff nov=293.594 thr=164.882 rise=-1.3 band=61-250
-ms=239845 fall=239864 mid=239854 fitIn=239854 d=0 mask=7ff nov=225.629 thr=154.679 rise=-5.5 band=61-250
-ms=240739 fall=240758 mid=240748 fitIn=240748 d=0 mask=7ff nov=230.498 thr=135.960 rise=-5.5 band=61-250
-ms=241173 fall=241212 mid=241192 fitIn=241182 d=-10 mask=7ff nov=214.045 thr=127.469 rise=-4.6 band=61-250
-ms=241623 fall=241652 mid=241637 fitIn=241642 d=5 mask=7ff nov=174.106 thr=119.657 rise=-2.7 band=61-250
-ms=242069 fall=242119 mid=242094 fitIn=242083 d=-11 mask=7ff nov=125.909 thr=112.315 rise=-7.6 band=61-250
-ms=242517 fall=0 mid=-1 fitIn=242542 d=0 mask=7fe nov=166.521 thr=105.364 rise=-1.8 band=61-250
-ms=242517 fall=242555 mid=242536 fitIn=242517 d=-19 mask=001 nov=166.521 thr=105.364 rise=-1.8 band=61-250
-ms=242977 fall=243005 mid=242991 fitIn=242996 d=5 mask=7ff nov=165.457 thr=98.954 rise=-12.9 band=61-250
-ms=243418 fall=243447 mid=243432 fitIn=243432 d=0 mask=7ff nov=129.479 thr=93.092 rise=6.3 band=61-250
-ms=243862 fall=243898 mid=243880 fitIn=243876 d=-4 mask=7ff nov=117.928 thr=87.731 rise=4.2 band=61-250
-ms=244314 fall=244334 mid=244324 fitIn=244332 d=8 mask=7ff nov=173.437 thr=97.402 rise=-1.0 band=61-250
-ms=244756 fall=244795 mid=244775 fitIn=244766 d=-9 mask=7ff nov=112.190 thr=91.495 rise=2.4 band=61-250
-ms=245216 fall=0 mid=-1 fitIn=245235 d=0 mask=7fe nov=258.908 thr=145.403 rise=-4.6 band=61-250
-ms=245216 fall=245236 mid=245226 fitIn=245216 d=-10 mask=001 nov=258.908 thr=145.403 rise=-4.6 band=61-250
+# fetch at 19:13:44  since=178
+# onsets since=178 sent=13 next=191 head=191
+ms=249123 fall=249176 mid=249149 fitIn=249154 d=5 mask=7ff nov=135.048 thr=75.843 rise=8.4 band=61-250
+ms=249572 fall=249610 mid=249591 fitIn=249598 d=7 mask=7ff nov=164.126 thr=92.173 rise=-2.1 band=61-250
+ms=250004 fall=250053 mid=250028 fitIn=250023 d=-5 mask=7ff nov=146.374 thr=86.657 rise=7.9 band=61-250
+ms=250465 fall=250499 mid=250482 fitIn=250489 d=7 mask=7ff nov=113.515 thr=81.526 rise=4.5 band=61-250
+ms=250918 fall=250957 mid=250937 fitIn=250935 d=-2 mask=7ff nov=112.390 thr=76.429 rise=-0.6 band=61-250
+ms=251380 fall=251409 mid=251394 fitIn=251399 d=5 mask=7ff nov=93.886 thr=71.805 rise=-0.2 band=61-250
+ms=251819 fall=251859 mid=251839 fitIn=251833 d=-6 mask=7ff nov=112.894 thr=106.613 rise=-7.1 band=61-250
+ms=252254 fall=252302 mid=252278 fitIn=252274 d=-4 mask=7ff nov=266.459 thr=149.643 rise=2.0 band=61-250
+ms=252719 fall=252749 mid=252734 fitIn=252743 d=9 mask=7ff nov=160.315 thr=140.544 rise=1.2 band=61-250
+ms=253165 fall=253204 mid=253184 fitIn=253180 d=-4 mask=7ff nov=134.061 thr=131.669 rise=1.0 band=61-250
+ms=253606 fall=253654 mid=253630 fitIn=253625 d=-5 mask=7ff nov=129.099 thr=123.507 rise=-6.9 band=61-250
+ms=254067 fall=254098 mid=254082 fitIn=254091 d=9 mask=7ff nov=183.528 thr=115.915 rise=-10.7 band=61-250
+ms=254522 fall=254546 mid=254534 fitIn=254537 d=3 mask=7ff nov=167.336 thr=109.188 rise=17.3 band=61-250
 
-# fetch at 18:59:28  since=248
-# onsets since=248 sent=12 next=260 head=260
-ms=245660 fall=245677 mid=245668 fitIn=245670 d=2 mask=7ff nov=212.631 thr=136.675 rise=2.9 band=61-250
-ms=246095 fall=246145 mid=246120 fitIn=246103 d=-17 mask=7ff nov=133.218 thr=128.072 rise=2.0 band=61-250
-ms=246545 fall=246585 mid=246565 fitIn=246570 d=5 mask=7ff nov=163.674 thr=120.131 rise=-4.7 band=61-250
-ms=246990 fall=0 mid=-1 fitIn=247010 d=0 mask=7f0 nov=125.826 thr=112.771 rise=-9.9 band=61-250
-ms=246990 fall=247028 mid=247009 fitIn=246990 d=-19 mask=00f nov=125.826 thr=112.771 rise=-9.9 band=61-250
-ms=247446 fall=247475 mid=247460 fitIn=247465 d=5 mask=7ff nov=168.496 thr=105.830 rise=4.4 band=61-250
-ms=247889 fall=247929 mid=247909 fitIn=247903 d=-6 mask=7ff nov=183.536 thr=103.074 rise=4.6 band=61-250
-ms=248336 fall=248384 mid=248360 fitIn=248356 d=-4 mask=7ff nov=185.507 thr=104.181 rise=2.2 band=61-250
-ms=248783 fall=0 mid=-1 fitIn=248807 d=0 mask=7e0 nov=178.539 thr=100.267 rise=2.9 band=61-250
-ms=248783 fall=248822 mid=248802 fitIn=248783 d=-19 mask=01f nov=178.539 thr=100.267 rise=2.9 band=61-250
-ms=249234 fall=249264 mid=249249 fitIn=249253 d=4 mask=7ff nov=97.359 thr=94.270 rise=-9.1 band=61-250
-ms=249669 fall=249743 mid=249706 fitIn=249684 d=-22 mask=7ff nov=105.439 thr=88.526 rise=-10.8 band=61-250
+# fetch at 19:13:50  since=191
+# onsets since=191 sent=11 next=202 head=202
+ms=255408 fall=255437 mid=255422 fitIn=255420 d=-2 mask=7ff nov=108.086 thr=96.093 rise=0.1 band=61-250
+ms=255851 fall=255880 mid=255865 fitIn=255865 d=0 mask=7ff nov=152.071 thr=90.192 rise=-0.6 band=61-250
+ms=256293 fall=256341 mid=256317 fitIn=256307 d=-10 mask=7ff nov=120.772 thr=84.697 rise=11.2 band=61-250
+ms=256747 fall=256786 mid=256766 fitIn=256771 d=5 mask=7ff nov=94.924 thr=79.570 rise=0.9 band=61-250
+ms=257178 fall=257227 mid=257202 fitIn=257197 d=-5 mask=7ff nov=141.621 thr=79.535 rise=-5.5 band=61-250
+ms=257645 fall=0 mid=-1 fitIn=257669 d=0 mask=7c0 nov=219.832 thr=123.458 rise=12.8 band=61-250
+ms=257645 fall=257660 mid=257652 fitIn=257645 d=-7 mask=03f nov=219.832 thr=123.458 rise=12.8 band=61-250
+ms=258533 fall=258583 mid=258558 fitIn=258540 d=-18 mask=7ff nov=115.100 thr=108.315 rise=4.2 band=61-250
+ms=259438 fall=259466 mid=259452 fitIn=259463 d=11 mask=7ff nov=139.454 thr=95.516 rise=-12.7 band=61-250
+ms=259879 fall=259908 mid=259893 fitIn=259893 d=0 mask=7ff nov=111.269 thr=89.772 rise=2.7 band=61-250
+ms=260321 fall=260371 mid=260346 fitIn=260335 d=-11 mask=7ff nov=133.707 thr=84.322 rise=-1.9 band=61-250
 
-# fetch at 18:59:38  since=260
-# onsets since=260 sent=17 next=277 head=277
-ms=250129 fall=0 mid=-1 fitIn=250166 d=0 mask=7f0 nov=100.506 thr=83.438 rise=-13.7 band=61-250
-ms=250129 fall=250170 mid=250149 fitIn=250129 d=-20 mask=00f nov=100.506 thr=83.438 rise=-13.7 band=61-250
-ms=250582 fall=250621 mid=250601 fitIn=250602 d=1 mask=7ff nov=120.359 thr=78.442 rise=10.6 band=61-250
-ms=255277 fall=255315 mid=255296 fitIn=255296 d=0 mask=7ff nov=45.952 thr=40.151 rise=8.3 band=61-250
-ms=255729 fall=255759 mid=255744 fitIn=255748 d=4 mask=7ff nov=38.065 thr=37.707 rise=-3.6 band=61-250
-ms=256193 fall=0 mid=-1 fitIn=256208 d=0 mask=7fe nov=37.940 thr=35.368 rise=-9.6 band=61-250
-ms=256193 fall=256214 mid=256203 fitIn=256193 d=-10 mask=001 nov=37.940 thr=35.368 rise=-9.6 band=61-250
-ms=256626 fall=256655 mid=256640 fitIn=256636 d=-4 mask=7ff nov=33.342 thr=33.336 rise=7.6 band=61-250
-ms=256852 fall=256872 mid=256862 fitIn=256866 d=4 mask=7ff nov=37.081 thr=32.313 rise=-2.2 band=61-250
-ms=257522 fall=257542 mid=257532 fitIn=257532 d=0 mask=7ff nov=48.612 thr=29.514 rise=0.3 band=61-250
-ms=257748 fall=257787 mid=257767 fitIn=257758 d=-9 mask=7ff nov=160.726 thr=90.264 rise=1.3 band=61-250
-ms=258188 fall=258228 mid=258208 fitIn=258207 d=-1 mask=7ff nov=158.951 thr=89.267 rise=5.1 band=61-250
-ms=258633 fall=258671 mid=258652 fitIn=258653 d=1 mask=7ff nov=154.108 thr=86.547 rise=7.2 band=61-250
-ms=259081 fall=259121 mid=259101 fitIn=259100 d=-1 mask=7ff nov=181.828 thr=102.114 rise=4.3 band=61-250
-ms=259531 fall=259561 mid=259546 fitIn=259551 d=5 mask=7ff nov=192.189 thr=107.933 rise=-1.7 band=61-250
-ms=259983 fall=260012 mid=259997 fitIn=259998 d=1 mask=7ff nov=133.786 thr=101.335 rise=0.2 band=61-250
-ms=260432 fall=260469 mid=260450 fitIn=260446 d=-4 mask=7ff nov=187.714 thr=105.420 rise=2.1 band=61-250
+# fetch at 19:13:56  since=202
+# onsets since=202 sent=15 next=217 head=217
+ms=260772 fall=260799 mid=260785 fitIn=260797 d=12 mask=7ff nov=146.554 thr=82.304 rise=11.5 band=61-250
+ms=261216 fall=261265 mid=261240 fitIn=261229 d=-11 mask=7ff nov=122.173 thr=77.399 rise=-8.8 band=61-250
+ms=261667 fall=261706 mid=261686 fitIn=261691 d=5 mask=7ff nov=123.675 thr=72.783 rise=8.2 band=61-250
+ms=262103 fall=262146 mid=262124 fitIn=262122 d=-2 mask=7ff nov=231.593 thr=130.063 rise=9.0 band=61-250
+ms=262562 fall=262593 mid=262577 fitIn=262583 d=6 mask=7ff nov=157.310 thr=121.865 rise=3.2 band=61-250
+ms=263006 fall=263055 mid=263030 fitIn=263021 d=-9 mask=7ff nov=117.653 thr=114.319 rise=9.1 band=61-250
+ms=263442 fall=0 mid=-1 fitIn=263466 d=0 mask=7fe nov=151.231 thr=107.546 rise=4.4 band=61-250
+ms=263442 fall=263499 mid=263470 fitIn=263442 d=-28 mask=001 nov=151.231 thr=107.546 rise=4.4 band=61-250
+ms=263916 fall=263949 mid=263932 fitIn=263944 d=12 mask=7ff nov=112.072 thr=100.786 rise=-5.0 band=61-250
+ms=264357 fall=264376 mid=264366 fitIn=264373 d=7 mask=7ff nov=168.987 thr=98.609 rise=-6.1 band=61-250
+ms=264799 fall=264829 mid=264814 fitIn=264808 d=-6 mask=7ff nov=143.758 thr=92.556 rise=2.2 band=61-250
+ms=265247 fall=265293 mid=265270 fitIn=265262 d=-8 mask=7ff nov=149.639 thr=87.017 rise=11.0 band=61-250
+ms=265705 fall=265734 mid=265719 fitIn=265728 d=9 mask=7ff nov=221.641 thr=124.474 rise=-1.3 band=61-250
+ms=266149 fall=266178 mid=266163 fitIn=266163 d=0 mask=7ff nov=159.447 thr=117.009 rise=7.0 band=61-250
+ms=266585 fall=266629 mid=266607 fitIn=266599 d=-8 mask=7ff nov=120.535 thr=109.901 rise=20.6 band=61-250
 
-# fetch at 18:59:44  since=277
-# onsets since=277 sent=9 next=286 head=286
-ms=260870 fall=260909 mid=260889 fitIn=260888 d=-1 mask=7ff nov=133.787 thr=99.026 rise=-8.8 band=61-250
-ms=261326 fall=261356 mid=261341 fitIn=261345 d=4 mask=7ff nov=137.643 thr=92.855 rise=5.4 band=61-250
-ms=261768 fall=261803 mid=261785 fitIn=261783 d=-2 mask=7ff nov=144.993 thr=87.243 rise=8.5 band=61-250
-ms=262216 fall=262246 mid=262231 fitIn=262233 d=2 mask=7ff nov=196.338 thr=110.263 rise=0.5 band=61-250
-ms=262665 fall=262703 mid=262684 fitIn=262680 d=-4 mask=7ff nov=224.423 thr=126.036 rise=1.9 band=61-250
-ms=263130 fall=263144 mid=263137 fitIn=263149 d=12 mask=7ff nov=207.815 thr=118.712 rise=14.0 band=61-250
-ms=263573 fall=263593 mid=263583 fitIn=263580 d=-3 mask=7ff nov=167.051 thr=111.138 rise=-10.7 band=61-250
-ms=264002 fall=264060 mid=264031 fitIn=264012 d=-19 mask=7ff nov=136.763 thr=104.254 rise=-12.2 band=61-250
-ms=264461 fall=264491 mid=264476 fitIn=264490 d=14 mask=7ff nov=140.190 thr=97.868 rise=8.2 band=61-250
+# fetch at 19:14:02  since=217
+# onsets since=217 sent=6 next=223 head=223
+ms=267029 fall=267074 mid=267051 fitIn=267051 d=0 mask=7ff nov=133.231 thr=103.339 rise=10.1 band=61-250
+ms=267483 fall=267533 mid=267508 fitIn=267505 d=-3 mask=7ff nov=107.009 thr=96.944 rise=3.8 band=61-250
+ms=267935 fall=267974 mid=267954 fitIn=267960 d=6 mask=7ff nov=108.520 thr=91.091 rise=3.2 band=61-250
+ms=268400 fall=0 mid=-1 fitIn=268419 d=0 mask=7f8 nov=269.068 thr=151.108 rise=-7.1 band=61-250
+ms=268400 fall=268419 mid=268409 fitIn=268400 d=-9 mask=007 nov=269.068 thr=151.108 rise=-7.1 band=61-250
+ms=268840 fall=268869 mid=268854 fitIn=268849 d=-5 mask=7ff nov=159.247 thr=141.738 rise=2.8 band=61-250
 
-# fetch at 18:59:49  since=286
-# onsets since=286 sent=0 next=286 head=286
+# fetch at 19:14:08  since=223
+# onsets since=223 sent=5 next=228 head=228
+ms=276892 fall=276920 mid=276906 fitIn=276906 d=0 mask=7ff nov=67.833 thr=44.763 rise=-7.7 band=61-250
+ms=277338 fall=277384 mid=277361 fitIn=277352 d=-9 mask=7ff nov=81.949 thr=71.491 rise=2.7 band=61-250
+ms=277798 fall=277817 mid=277807 fitIn=277821 d=14 mask=7ff nov=221.627 thr=124.466 rise=2.1 band=61-250
+ms=278230 fall=278260 mid=278245 fitIn=278239 d=-6 mask=7ff nov=186.880 thr=116.875 rise=0.2 band=61-250
+ms=278689 fall=278732 mid=278710 fitIn=278704 d=-6 mask=7ff nov=140.304 thr=109.595 rise=-1.7 band=61-250
 
-# fetch at 18:59:55  since=286
-# onsets since=286 sent=29 next=315 head=315
-ms=271249 fall=271269 mid=271259 fitIn=271264 d=5 mask=7ff nov=38.837 thr=37.719 rise=-3.4 band=61-250
-ms=271819 fall=271838 mid=271828 fitIn=271829 d=1 mask=7ff nov=35.873 thr=34.997 rise=-0.8 band=61-250
-ms=271957 fall=271977 mid=271967 fitIn=271966 d=-1 mask=7ff nov=43.162 thr=34.439 rise=-1.6 band=61-250
-ms=272086 fall=272116 mid=272101 fitIn=272096 d=-5 mask=7ff nov=49.576 thr=33.909 rise=-3.2 band=61-250
-ms=272203 fall=272242 mid=272222 fitIn=272218 d=-4 mask=7ff nov=33.477 thr=33.409 rise=2.9 band=61-250
-ms=272448 fall=272479 mid=272463 fitIn=272467 d=4 mask=7ff nov=72.713 thr=40.835 rise=5.8 band=61-250
-ms=272578 fall=272606 mid=272592 fitIn=272593 d=1 mask=7ff nov=70.361 thr=40.242 rise=3.3 band=61-250
-ms=272698 fall=272715 mid=272706 fitIn=272712 d=6 mask=7ff nov=52.760 thr=40.395 rise=7.4 band=61-250
-ms=272903 fall=272922 mid=272912 fitIn=272911 d=-1 mask=7ff nov=95.721 thr=53.757 rise=-1.8 band=61-250
-ms=273119 fall=273158 mid=273138 fitIn=273128 d=-10 mask=7ff nov=84.478 thr=52.109 rise=4.0 band=61-250
-ms=273405 fall=273424 mid=273414 fitIn=273424 d=10 mask=7ff nov=58.228 thr=50.284 rise=3.6 band=61-250
-ms=273680 fall=273700 mid=273690 fitIn=273689 d=-1 mask=7ff nov=49.295 thr=48.465 rise=7.3 band=61-250
-ms=273880 fall=273903 mid=273891 fitIn=273890 d=-1 mask=7ff nov=52.898 thr=47.209 rise=-5.5 band=61-250
-ms=273991 fall=274026 mid=274008 fitIn=274002 d=-6 mask=7ff nov=50.973 thr=46.576 rise=6.2 band=61-250
-ms=274150 fall=274166 mid=274158 fitIn=274167 d=9 mask=7ff nov=55.047 thr=45.781 rise=4.1 band=61-250
-ms=274256 fall=274275 mid=274265 fitIn=274264 d=-1 mask=7ff nov=72.851 thr=45.236 rise=-4.5 band=61-250
-ms=274426 fall=274444 mid=274435 fitIn=274435 d=0 mask=7ff nov=49.160 thr=44.232 rise=-2.7 band=61-250
-ms=274551 fall=274580 mid=274565 fitIn=274560 d=-5 mask=7ff nov=56.407 thr=43.493 rise=4.9 band=61-250
-ms=274758 fall=274777 mid=274767 fitIn=274772 d=5 mask=7ff nov=52.476 thr=42.494 rise=1.8 band=61-250
-ms=274864 fall=274884 mid=274874 fitIn=274873 d=-1 mask=7ff nov=58.408 thr=41.927 rise=-7.7 band=61-250
-ms=275021 fall=0 mid=-1 fitIn=275031 d=0 mask=7f8 nov=44.615 thr=41.157 rise=0.2 band=61-250
-ms=275021 fall=275051 mid=275036 fitIn=275021 d=-15 mask=007 nov=44.615 thr=41.157 rise=0.2 band=61-250
-ms=275139 fall=275158 mid=275148 fitIn=275154 d=6 mask=7ff nov=58.303 thr=40.636 rise=-1.4 band=61-250
-ms=275274 fall=275293 mid=275283 fitIn=275283 d=0 mask=7ff nov=45.722 thr=39.963 rise=0.7 band=61-250
-ms=275411 fall=275432 mid=275421 fitIn=275420 d=-1 mask=7ff nov=44.479 thr=39.259 rise=2.6 band=61-250
-ms=275541 fall=275570 mid=275555 fitIn=275551 d=-4 mask=7ff nov=41.937 thr=38.589 rise=-4.1 band=61-250
-ms=275678 fall=275697 mid=275687 fitIn=275692 d=5 mask=7ff nov=40.813 thr=37.980 rise=3.0 band=61-250
-ms=275800 fall=275849 mid=275824 fitIn=275809 d=-15 mask=7ff nov=54.692 thr=37.272 rise=4.3 band=61-250
-ms=275976 fall=276000 mid=275988 fitIn=276000 d=12 mask=7ff nov=54.329 thr=36.581 rise=-4.7 band=61-250
+# fetch at 19:14:14  since=228
+# onsets since=228 sent=12 next=240 head=240
+ms=279104 fall=279154 mid=279129 fitIn=279125 d=-4 mask=7ff nov=190.877 thr=107.196 rise=4.6 band=61-250
+ms=279581 fall=279610 mid=279595 fitIn=279606 d=11 mask=7ff nov=140.078 thr=100.488 rise=0.6 band=61-250
+ms=280024 fall=0 mid=-1 fitIn=280038 d=0 mask=7e0 nov=147.643 thr=94.338 rise=-3.3 band=61-250
+ms=280024 fall=280053 mid=280038 fitIn=280024 d=-14 mask=01f nov=147.643 thr=94.338 rise=-3.3 band=61-250
+ms=280476 fall=280516 mid=280496 fitIn=280490 d=-6 mask=7ff nov=116.706 thr=88.492 rise=-0.4 band=61-250
+ms=280921 fall=280969 mid=280945 fitIn=280941 d=-4 mask=7ff nov=99.844 thr=83.067 rise=-5.0 band=61-250
+ms=281376 fall=281405 mid=281390 fitIn=281400 d=10 mask=7ff nov=236.370 thr=132.745 rise=-9.1 band=61-250
+ms=281826 fall=0 mid=-1 fitIn=281840 d=0 mask=780 nov=135.619 thr=124.453 rise=1.1 band=61-250
+ms=281826 fall=281856 mid=281841 fitIn=281826 d=-15 mask=07f nov=135.619 thr=124.453 rise=1.1 band=61-250
+ms=282268 fall=282307 mid=282287 fitIn=282283 d=-4 mask=7ff nov=156.096 thr=116.782 rise=-10.2 band=61-250
+ms=282717 fall=282761 mid=282739 fitIn=282736 d=-3 mask=7ff nov=132.508 thr=109.884 rise=3.1 band=61-250
+ms=283175 fall=283204 mid=283189 fitIn=283197 d=8 mask=7ff nov=239.368 thr=134.429 rise=-9.5 band=61-250
 
-# fetch at 19:00:04  since=315
-# onsets since=315 sent=37 next=352 head=352
-ms=276246 fall=276285 mid=276265 fitIn=276258 d=-7 mask=7ff nov=41.437 thr=35.261 rise=-3.3 band=61-250
-ms=276434 fall=276495 mid=276464 fitIn=276453 d=-11 mask=7ff nov=37.410 thr=34.462 rise=4.3 band=61-250
-ms=276572 fall=276588 mid=276580 fitIn=276602 d=22 mask=7ff nov=48.550 thr=34.038 rise=11.0 band=61-250
-ms=276721 fall=276740 mid=276730 fitIn=276729 d=-1 mask=7ff nov=77.324 thr=43.425 rise=6.1 band=61-250
-ms=276967 fall=276996 mid=276981 fitIn=276976 d=-5 mask=7ff nov=47.647 thr=41.999 rise=9.6 band=61-250
-ms=277135 fall=277182 mid=277158 fitIn=277149 d=-9 mask=7ff nov=41.899 thr=40.989 rise=-0.2 band=61-250
-ms=278944 fall=278964 mid=278954 fitIn=278967 d=13 mask=7ff nov=32.395 thr=32.045 rise=-4.0 band=61-250
-ms=279239 fall=279298 mid=279268 fitIn=279249 d=-19 mask=7ff nov=82.623 thr=46.401 rise=-5.1 band=61-250
-ms=279759 fall=279775 mid=279767 fitIn=279788 d=21 mask=7ff nov=49.228 thr=43.458 rise=7.9 band=61-250
-ms=279903 fall=279921 mid=279912 fitIn=279911 d=-1 mask=7ff nov=47.179 thr=42.716 rise=8.9 band=61-250
-ms=280107 fall=280125 mid=280116 fitIn=280116 d=0 mask=7ff nov=47.168 thr=41.563 rise=4.0 band=61-250
-ms=280249 fall=280268 mid=280258 fitIn=280258 d=0 mask=7ff nov=49.396 thr=40.777 rise=1.6 band=61-250
-ms=280583 fall=280613 mid=280598 fitIn=280592 d=-6 mask=7ff nov=57.549 thr=38.922 rise=-0.6 band=61-250
-ms=280681 fall=280709 mid=280695 fitIn=280696 d=1 mask=7ff nov=38.499 thr=38.488 rise=-4.5 band=61-250
-ms=280790 fall=280804 mid=280797 fitIn=280804 d=7 mask=7ff nov=39.640 thr=37.990 rise=20.6 band=61-250
-ms=281025 fall=281065 mid=281045 fitIn=281032 d=-13 mask=7ff nov=50.515 thr=36.684 rise=-6.8 band=61-250
-ms=281241 fall=281291 mid=281266 fitIn=281261 d=-5 mask=7ff nov=38.604 thr=35.702 rise=-11.6 band=61-250
-ms=281704 fall=281723 mid=281713 fitIn=281729 d=16 mask=7ff nov=53.064 thr=33.634 rise=-0.9 band=61-250
-ms=282029 fall=282068 mid=282048 fitIn=282038 d=-10 mask=7ff nov=49.139 thr=32.128 rise=-0.3 band=61-250
-ms=282146 fall=282163 mid=282154 fitIn=282165 d=11 mask=7ff nov=47.919 thr=31.744 rise=2.1 band=61-250
-ms=282490 fall=282510 mid=282500 fitIn=282498 d=-2 mask=7ff nov=49.378 thr=30.261 rise=3.7 band=61-250
-ms=282924 fall=0 mid=-1 fitIn=282934 d=0 mask=7f8 nov=40.648 thr=28.569 rise=0.7 band=61-250
-ms=282924 fall=282942 mid=282933 fitIn=282924 d=-9 mask=007 nov=40.648 thr=28.569 rise=0.7 band=61-250
-ms=283101 fall=283130 mid=283115 fitIn=283110 d=-5 mask=7ff nov=70.270 thr=39.463 rise=1.0 band=61-250
-ms=283275 fall=283294 mid=283284 fitIn=283289 d=5 mask=7ff nov=62.220 thr=40.358 rise=-4.6 band=61-250
-ms=283384 fall=283402 mid=283393 fitIn=283393 d=0 mask=7ff nov=49.207 thr=39.839 rise=13.1 band=61-250
-ms=283501 fall=283521 mid=283511 fitIn=283510 d=-1 mask=7ff nov=40.625 thr=39.247 rise=-7.7 band=61-250
-ms=283706 fall=283735 mid=283720 fitIn=283716 d=-4 mask=7ff nov=47.596 thr=38.247 rise=16.4 band=61-250
-ms=283822 fall=283842 mid=283832 fitIn=283836 d=4 mask=7ff nov=38.285 thr=37.683 rise=4.0 band=61-250
-ms=284166 fall=284186 mid=284176 fitIn=284176 d=0 mask=7ff nov=65.137 thr=36.581 rise=-1.9 band=61-250
-ms=284264 fall=284303 mid=284283 fitIn=284274 d=-9 mask=7ff nov=66.050 thr=37.094 rise=-6.1 band=61-250
-ms=284384 fall=284423 mid=284403 fitIn=284403 d=0 mask=7ff nov=54.698 thr=36.529 rise=2.4 band=61-250
-ms=284618 fall=284647 mid=284632 fitIn=284637 d=5 mask=7ff nov=46.619 thr=35.431 rise=3.1 band=61-250
-ms=284940 fall=284990 mid=284965 fitIn=284954 d=-11 mask=7ff nov=41.620 thr=33.887 rise=1.0 band=61-250
-ms=285069 fall=285094 mid=285081 fitIn=285094 d=13 mask=7ff nov=49.704 thr=33.418 rise=7.2 band=61-250
-ms=285207 fall=285233 mid=285220 fitIn=285219 d=-1 mask=7ff nov=37.746 thr=32.835 rise=-12.9 band=61-250
-ms=285358 fall=285417 mid=285387 fitIn=285371 d=-16 mask=7ff nov=40.299 thr=39.888 rise=8.4 band=61-250
+# fetch at 19:14:20  since=240
+# onsets since=240 sent=2 next=242 head=242
+ms=290510 fall=290541 mid=290525 fitIn=290524 d=-1 mask=7ff nov=53.990 thr=47.314 rise=7.6 band=61-250
+ms=290846 fall=290879 mid=290862 fitIn=290861 d=-1 mask=7ff nov=48.274 thr=45.300 rise=-9.3 band=61-250
 
-# fetch at 19:00:09  since=352
-# onsets since=352 sent=7 next=359 head=359
-ms=285492 fall=285541 mid=285516 fitIn=285521 d=5 mask=7ff nov=54.558 thr=39.187 rise=-3.5 band=61-250
-ms=285708 fall=285737 mid=285722 fitIn=285732 d=10 mask=7ff nov=50.483 thr=38.227 rise=1.3 band=61-250
-ms=286293 fall=286333 mid=286313 fitIn=286307 d=-6 mask=7ff nov=37.034 thr=35.336 rise=0.2 band=61-250
-ms=286401 fall=286439 mid=286420 fitIn=286421 d=1 mask=7ff nov=138.040 thr=77.523 rise=5.7 band=61-250
-ms=289992 fall=290011 mid=290001 fitIn=290011 d=10 mask=7ff nov=65.377 thr=46.923 rise=-6.0 band=61-250
-ms=290424 fall=290454 mid=290439 fitIn=290433 d=-6 mask=7ff nov=60.663 thr=44.283 rise=-0.4 band=61-250
-ms=290761 fall=290798 mid=290779 fitIn=290776 d=-3 mask=7ff nov=44.928 thr=42.357 rise=8.6 band=61-250
+# fetch at 19:14:29  since=242
+# onsets since=242 sent=33 next=275 head=275
+ms=291163 fall=0 mid=-1 fitIn=291179 d=0 mask=700 nov=52.922 thr=43.562 rise=12.4 band=61-250
+ms=291163 fall=291179 mid=291171 fitIn=291163 d=-8 mask=0ff nov=52.922 thr=43.562 rise=12.4 band=61-250
+ms=291541 fall=291559 mid=291550 fitIn=291549 d=-1 mask=7ff nov=41.551 thr=41.446 rise=7.8 band=61-250
+ms=291674 fall=291694 mid=291684 fitIn=291683 d=-1 mask=7ff nov=51.510 thr=40.777 rise=3.0 band=61-250
+ms=291850 fall=291880 mid=291865 fitIn=291860 d=-5 mask=7ff nov=52.377 thr=49.268 rise=3.2 band=61-250
+ms=292412 fall=292430 mid=292421 fitIn=292427 d=6 mask=7ff nov=50.122 thr=45.754 rise=3.9 band=61-250
+ms=292630 fall=292649 mid=292639 fitIn=292639 d=0 mask=7ff nov=72.039 thr=44.584 rise=13.6 band=61-250
+ms=292727 fall=292756 mid=292741 fitIn=292736 d=-5 mask=7ff nov=56.235 thr=43.977 rise=-6.0 band=61-250
+ms=293073 fall=293092 mid=293082 fitIn=293087 d=5 mask=7ff nov=45.729 thr=42.012 rise=4.3 band=61-250
+ms=293210 fall=293230 mid=293220 fitIn=293219 d=-1 mask=7ff nov=53.130 thr=41.292 rise=-0.9 band=61-250
+ms=293347 fall=293367 mid=293357 fitIn=293357 d=0 mask=7ff nov=51.216 thr=40.577 rise=-0.1 band=61-250
+ms=293485 fall=293505 mid=293495 fitIn=293495 d=0 mask=7ff nov=57.778 thr=39.881 rise=-6.5 band=61-250
+ms=293888 fall=0 mid=-1 fitIn=293898 d=0 mask=600 nov=56.987 thr=37.917 rise=11.7 band=61-250
+ms=293888 fall=293908 mid=293898 fitIn=293888 d=-10 mask=1ff nov=56.987 thr=37.917 rise=11.7 band=61-250
+ms=294105 fall=294136 mid=294120 fitIn=294115 d=-5 mask=7ff nov=39.081 thr=36.903 rise=10.5 band=61-250
+ms=294309 fall=294329 mid=294319 fitIn=294324 d=5 mask=7ff nov=56.049 thr=35.966 rise=-0.7 band=61-250
+ms=294448 fall=294467 mid=294457 fitIn=294458 d=1 mask=7ff nov=40.858 thr=35.367 rise=-1.1 band=61-250
+ms=294585 fall=294604 mid=294594 fitIn=294594 d=0 mask=7ff nov=39.798 thr=34.785 rise=2.5 band=61-250
+ms=294751 fall=294781 mid=294766 fitIn=294760 d=-6 mask=7ff nov=38.187 thr=34.026 rise=-5.2 band=61-250
+ms=294949 fall=294997 mid=294973 fitIn=294964 d=-9 mask=7ff nov=65.085 thr=36.552 rise=-4.2 band=61-250
+ms=295421 fall=295440 mid=295430 fitIn=295445 d=15 mask=7ff nov=56.666 thr=34.488 rise=-1.8 band=61-250
+ms=295605 fall=295645 mid=295625 fitIn=295614 d=-11 mask=7ff nov=54.610 thr=33.711 rise=-3.4 band=61-250
+ms=295696 fall=295726 mid=295711 fitIn=295716 d=5 mask=7ff nov=61.716 thr=34.660 rise=10.6 band=61-250
+ms=295794 fall=295814 mid=295804 fitIn=295809 d=5 mask=7ff nov=78.524 thr=44.099 rise=4.4 band=61-250
+ms=295892 fall=295924 mid=295908 fitIn=295902 d=-6 mask=7ff nov=47.557 thr=43.608 rise=3.0 band=61-250
+ms=296120 fall=296149 mid=296134 fitIn=296136 d=2 mask=7ff nov=44.944 thr=42.290 rise=-6.7 band=61-250
+ms=296307 fall=296326 mid=296316 fitIn=296321 d=5 mask=7ff nov=51.187 thr=41.245 rise=5.9 band=61-250
+ms=296611 fall=296644 mid=296627 fitIn=296620 d=-7 mask=7ff nov=41.872 thr=39.654 rise=2.9 band=61-250
+ms=298391 fall=298451 mid=298421 fitIn=298407 d=-14 mask=7ff nov=33.699 thr=31.033 rise=8.0 band=61-250
+ms=298922 fall=298942 mid=298932 fitIn=298952 d=20 mask=7ff nov=52.615 thr=29.548 rise=-2.3 band=61-250
+ms=299102 fall=299121 mid=299111 fitIn=299112 d=1 mask=7ff nov=33.408 thr=28.871 rise=-0.0 band=61-250
+ms=299247 fall=299264 mid=299255 fitIn=299256 d=1 mask=7ff nov=54.177 thr=30.426 rise=6.5 band=61-250
+ms=299354 fall=299382 mid=299368 fitIn=299362 d=-6 mask=7ff nov=57.447 thr=32.262 rise=3.6 band=61-250
 
-# fetch at 19:00:15  since=359
-# onsets since=359 sent=22 next=381 head=381
-ms=291056 fall=291074 mid=291065 fitIn=291074 d=9 mask=7ff nov=46.904 thr=40.891 rise=9.0 band=61-250
-ms=291557 fall=291575 mid=291566 fitIn=291566 d=0 mask=7ff nov=52.359 thr=38.248 rise=12.7 band=61-250
-ms=291859 fall=291907 mid=291883 fitIn=291868 d=-15 mask=7ff nov=39.430 thr=36.618 rise=-0.5 band=61-250
-ms=292004 fall=292041 mid=292022 fitIn=292028 d=6 mask=7ff nov=53.778 thr=36.082 rise=9.2 band=61-250
-ms=292235 fall=0 mid=-1 fitIn=292253 d=0 mask=600 nov=43.888 thr=34.963 rise=-7.2 band=61-250
-ms=292235 fall=292264 mid=292249 fitIn=292235 d=-14 mask=1ff nov=43.888 thr=34.963 rise=-7.2 band=61-250
-ms=292334 fall=292363 mid=292348 fitIn=292348 d=0 mask=7ff nov=40.075 thr=34.483 rise=5.0 band=61-250
-ms=292443 fall=292472 mid=292457 fitIn=292457 d=0 mask=7ff nov=66.549 thr=37.374 rise=-2.2 band=61-250
-ms=292659 fall=292698 mid=292678 fitIn=292673 d=-5 mask=7ff nov=64.545 thr=36.251 rise=-1.3 band=61-250
-ms=292896 fall=292924 mid=292910 fitIn=292915 d=5 mask=7ff nov=39.431 thr=35.227 rise=-1.0 band=61-250
-ms=293003 fall=293023 mid=293013 fitIn=293017 d=4 mask=7ff nov=38.508 thr=34.714 rise=-1.5 band=61-250
-ms=293111 fall=0 mid=-1 fitIn=293121 d=0 mask=7fe nov=108.263 thr=60.801 rise=0.2 band=61-250
-ms=293111 fall=293151 mid=293131 fitIn=293111 d=-20 mask=001 nov=108.263 thr=60.801 rise=0.2 band=61-250
-ms=293557 fall=293592 mid=293574 fitIn=293577 d=3 mask=7ff nov=140.391 thr=78.843 rise=5.9 band=61-250
-ms=293998 fall=294046 mid=294022 fitIn=294015 d=-7 mask=7ff nov=80.851 thr=74.058 rise=3.1 band=61-250
-ms=294457 fall=294498 mid=294477 fitIn=294481 d=4 mask=7ff nov=104.960 thr=76.274 rise=1.0 band=61-250
-ms=294915 fall=294934 mid=294924 fitIn=294935 d=11 mask=7ff nov=172.784 thr=97.036 rise=-0.1 band=61-250
-ms=295350 fall=0 mid=-1 fitIn=295359 d=0 mask=700 nov=161.990 thr=91.209 rise=-1.8 band=61-250
-ms=295350 fall=295379 mid=295364 fitIn=295350 d=-14 mask=0ff nov=161.990 thr=91.209 rise=-1.8 band=61-250
-ms=295799 fall=295829 mid=295814 fitIn=295813 d=-1 mask=7ff nov=98.029 thr=85.608 rise=0.6 band=61-250
-ms=296250 fall=296288 mid=296269 fitIn=296265 d=-4 mask=7ff nov=111.557 thr=80.403 rise=-11.3 band=61-250
-ms=296695 fall=296741 mid=296718 fitIn=296714 d=-4 mask=7ff nov=107.708 thr=75.653 rise=-1.6 band=61-250
+# fetch at 19:14:35  since=275
+# onsets since=275 sent=39 next=314 head=314
+ms=299619 fall=299637 mid=299628 fitIn=299633 d=5 mask=7ff nov=38.293 thr=31.167 rise=5.6 band=61-250
+ms=299731 fall=299774 mid=299752 fitIn=299740 d=-12 mask=7ff nov=41.750 thr=30.610 rise=-3.4 band=61-250
+ms=299885 fall=299911 mid=299898 fitIn=299906 d=8 mask=7ff nov=32.603 thr=30.136 rise=5.3 band=61-250
+ms=300066 fall=300086 mid=300076 fitIn=300079 d=3 mask=7ff nov=31.584 thr=29.471 rise=2.3 band=61-250
+ms=300183 fall=300211 mid=300197 fitIn=300193 d=-4 mask=7ff nov=42.374 thr=29.017 rise=4.7 band=61-250
+ms=300390 fall=300439 mid=300414 fitIn=300404 d=-10 mask=7ff nov=32.130 thr=28.177 rise=5.2 band=61-250
+ms=300639 fall=300658 mid=300648 fitIn=300663 d=15 mask=7ff nov=49.360 thr=27.721 rise=-1.5 band=61-250
+ms=300734 fall=300763 mid=300748 fitIn=300743 d=-5 mask=7ff nov=32.013 thr=27.299 rise=-4.3 band=61-250
+ms=300852 fall=300888 mid=300870 fitIn=300866 d=-4 mask=7ff nov=39.171 thr=26.934 rise=-0.3 band=61-250
+ms=300953 fall=0 mid=-1 fitIn=300971 d=0 mask=7fe nov=36.729 thr=26.563 rise=10.1 band=61-250
+ms=300953 fall=300981 mid=300967 fitIn=300953 d=-14 mask=001 nov=36.729 thr=26.563 rise=10.1 band=61-250
+ms=301080 fall=301109 mid=301094 fitIn=301094 d=0 mask=7ff nov=36.207 thr=26.165 rise=1.1 band=61-250
+ms=301172 fall=0 mid=-1 fitIn=301186 d=0 mask=7e0 nov=52.027 thr=29.218 rise=15.6 band=61-250
+ms=301172 fall=301207 mid=301189 fitIn=301172 d=-17 mask=01f nov=52.027 thr=29.218 rise=15.6 band=61-250
+ms=301295 fall=301324 mid=301309 fitIn=301312 d=3 mask=7ff nov=38.962 thr=28.814 rise=-4.3 band=61-250
+ms=301411 fall=301440 mid=301425 fitIn=301425 d=0 mask=7ff nov=54.078 thr=30.370 rise=2.2 band=61-250
+ms=301621 fall=301661 mid=301641 fitIn=301635 d=-6 mask=7ff nov=45.374 thr=29.449 rise=-1.8 band=61-250
+ms=301729 fall=301767 mid=301748 fitIn=301749 d=1 mask=7ff nov=31.154 thr=29.004 rise=2.7 band=61-250
+ms=301865 fall=301884 mid=301874 fitIn=301884 d=10 mask=7ff nov=37.056 thr=28.553 rise=-3.3 band=61-250
+ms=301963 fall=301983 mid=301973 fitIn=301972 d=-1 mask=7ff nov=31.825 thr=28.157 rise=2.8 band=61-250
+ms=302061 fall=302100 mid=302080 fitIn=302071 d=-9 mask=7ff nov=36.721 thr=27.724 rise=1.5 band=61-250
+ms=302228 fall=302248 mid=302238 fitIn=302247 d=9 mask=7ff nov=27.421 thr=27.206 rise=2.9 band=61-250
+ms=302327 fall=302356 mid=302341 fitIn=302337 d=-4 mask=7ff nov=57.559 thr=32.909 rise=0.9 band=61-250
+ms=302463 fall=302482 mid=302472 fitIn=302477 d=5 mask=7ff nov=41.227 thr=32.386 rise=-0.3 band=61-250
+ms=302680 fall=302703 mid=302691 fitIn=302689 d=-2 mask=7ff nov=46.567 thr=31.532 rise=3.3 band=61-250
+ms=302883 fall=302902 mid=302892 fitIn=302894 d=2 mask=7ff nov=35.987 thr=30.832 rise=6.4 band=61-250
+ms=303192 fall=303218 mid=303205 fitIn=303201 d=-4 mask=7ff nov=32.760 thr=29.642 rise=14.2 band=61-250
+ms=303324 fall=303344 mid=303334 fitIn=303337 d=3 mask=7ff nov=77.126 thr=43.314 rise=0.5 band=61-250
+ms=303540 fall=303560 mid=303550 fitIn=303550 d=0 mask=7ff nov=56.514 thr=42.081 rise=1.1 band=61-250
+ms=303764 fall=303784 mid=303774 fitIn=303774 d=0 mask=7ff nov=48.039 thr=40.770 rise=-3.7 band=61-250
+ms=304322 fall=0 mid=-1 fitIn=304332 d=0 mask=7f8 nov=40.633 thr=37.810 rise=-2.0 band=61-250
+ms=304322 fall=304341 mid=304331 fitIn=304322 d=-9 mask=007 nov=40.633 thr=37.810 rise=-2.0 band=61-250
+ms=304419 fall=0 mid=-1 fitIn=304428 d=0 mask=7f8 nov=49.472 thr=37.248 rise=5.5 band=61-250
+ms=304419 fall=304461 mid=304440 fitIn=304419 d=-21 mask=007 nov=49.472 thr=37.248 rise=5.5 band=61-250
+ms=304534 fall=304551 mid=304542 fitIn=304555 d=13 mask=7ff nov=59.474 thr=36.830 rise=0.1 band=61-250
+ms=304636 fall=304686 mid=304661 fitIn=304644 d=-17 mask=7ff nov=42.623 thr=36.215 rise=2.8 band=61-250
+ms=304849 fall=304889 mid=304869 fitIn=304874 d=5 mask=7ff nov=36.274 thr=35.295 rise=8.6 band=61-250
+ms=305202 fall=305241 mid=305221 fitIn=305222 d=1 mask=7ff nov=39.695 thr=33.654 rise=1.6 band=61-250
+ms=305557 fall=305585 mid=305571 fitIn=305576 d=5 mask=7ff nov=159.121 thr=89.362 rise=-0.3 band=61-250
 
-# fetch at 19:00:21  since=381
-# onsets since=381 sent=12 next=393 head=393
-ms=297148 fall=297185 mid=297166 fitIn=297171 d=5 mask=7ff nov=154.472 thr=86.751 rise=3.9 band=61-250
-ms=297594 fall=297623 mid=297608 fitIn=297612 d=4 mask=7ff nov=189.775 thr=106.577 rise=16.1 band=61-250
-ms=298034 fall=298075 mid=298054 fitIn=298048 d=-6 mask=7ff nov=157.914 thr=100.093 rise=3.4 band=61-250
-ms=298486 fall=298516 mid=298501 fitIn=298506 d=5 mask=7ff nov=112.335 thr=93.968 rise=-6.5 band=61-250
-ms=298936 fall=298974 mid=298955 fitIn=298951 d=-4 mask=7ff nov=89.980 thr=88.181 rise=7.3 band=61-250
-ms=299360 fall=299415 mid=299387 fitIn=299379 d=-8 mask=7ff nov=161.790 thr=90.861 rise=4.9 band=61-250
-ms=299831 fall=299860 mid=299845 fitIn=299858 d=13 mask=7ff nov=121.816 thr=85.401 rise=-3.3 band=61-250
-ms=300280 fall=300321 mid=300300 fitIn=300294 d=-6 mask=7ff nov=168.504 thr=94.632 rise=5.4 band=61-250
-ms=300735 fall=300763 mid=300749 fitIn=300755 d=6 mask=7ff nov=120.357 thr=88.979 rise=-5.7 band=61-250
-ms=301166 fall=301206 mid=301186 fitIn=301180 d=-6 mask=7ff nov=108.928 thr=83.797 rise=-3.6 band=61-250
-ms=301615 fall=301656 mid=301635 fitIn=301635 d=0 mask=7ff nov=112.880 thr=78.764 rise=-4.6 band=61-250
-ms=302067 fall=302086 mid=302076 fitIn=302087 d=11 mask=7ff nov=193.751 thr=108.811 rise=6.3 band=61-250
+# fetch at 19:14:41  since=314
+# onsets since=314 sent=16 next=330 head=330
+ms=309167 fall=309186 mid=309176 fitIn=309181 d=5 mask=7ff nov=59.086 thr=53.761 rise=0.3 band=61-250
+ms=309594 fall=309614 mid=309604 fitIn=309603 d=-1 mask=7ff nov=64.473 thr=50.830 rise=-1.9 band=61-250
+ms=310028 fall=310068 mid=310048 fitIn=310038 d=-10 mask=7ff nov=51.007 thr=47.766 rise=1.9 band=61-250
+ms=310476 fall=0 mid=-1 fitIn=310496 d=0 mask=7fe nov=66.846 thr=45.139 rise=7.2 band=61-250
+ms=310476 fall=310497 mid=310486 fitIn=310476 d=-10 mask=001 nov=66.846 thr=45.139 rise=7.2 band=61-250
+ms=310713 fall=310743 mid=310728 fitIn=310723 d=-5 mask=7ff nov=62.780 thr=43.714 rise=-7.2 band=61-250
+ms=311037 fall=311056 mid=311046 fitIn=311052 d=6 mask=7ff nov=47.297 thr=41.886 rise=0.6 band=61-250
+ms=311497 fall=311528 mid=311512 fitIn=311506 d=-6 mask=7ff nov=45.894 thr=39.298 rise=4.9 band=61-250
+ms=311704 fall=311744 mid=311724 fitIn=311719 d=-5 mask=7ff nov=42.526 thr=38.207 rise=0.0 band=61-250
+ms=311812 fall=311849 mid=311830 fitIn=311832 d=2 mask=7ff nov=60.682 thr=37.698 rise=-3.4 band=61-250
+ms=311924 fall=311949 mid=311936 fitIn=311942 d=6 mask=7ff nov=45.007 thr=37.181 rise=18.5 band=61-250
+ms=312148 fall=312176 mid=312162 fitIn=312160 d=-2 mask=7ff nov=42.717 thr=36.124 rise=8.1 band=61-250
+ms=312264 fall=312303 mid=312283 fitIn=312278 d=-5 mask=7ff nov=131.008 thr=73.574 rise=-5.3 band=61-250
+ms=312709 fall=312748 mid=312728 fitIn=312728 d=0 mask=7ff nov=157.651 thr=88.537 rise=2.3 band=61-250
+ms=313162 fall=0 mid=-1 fitIn=313181 d=0 mask=600 nov=122.162 thr=83.237 rise=-0.6 band=61-250
+ms=313162 fall=313201 mid=313181 fitIn=313162 d=-19 mask=1ff nov=122.162 thr=83.237 rise=-0.6 band=61-250
 
-# fetch at 19:00:30  since=393
-# onsets since=393 sent=21 next=414 head=414
-ms=302962 fall=302998 mid=302980 fitIn=302971 d=-9 mask=7ff nov=165.750 thr=95.912 rise=-3.7 band=61-250
-ms=303418 fall=303447 mid=303432 fitIn=303436 d=4 mask=7ff nov=155.527 thr=90.147 rise=13.7 band=61-250
-ms=303633 fall=303653 mid=303643 fitIn=303647 d=4 mask=7ff nov=88.664 thr=87.524 rise=-3.2 band=61-250
-ms=303860 fall=303888 mid=303874 fitIn=303870 d=-4 mask=7ff nov=166.277 thr=93.381 rise=5.5 band=61-250
-ms=304300 fall=304331 mid=304315 fitIn=304314 d=-1 mask=7ff nov=121.889 thr=87.681 rise=0.3 band=61-250
-ms=304753 fall=304791 mid=304772 fitIn=304768 d=-4 mask=7ff nov=94.483 thr=82.435 rise=16.1 band=61-250
-ms=305201 fall=305235 mid=305218 fitIn=305220 d=2 mask=7ff nov=187.506 thr=105.303 rise=-5.2 band=61-250
-ms=305645 fall=305674 mid=305659 fitIn=305662 d=3 mask=7ff nov=156.742 thr=98.947 rise=-0.1 band=61-250
-ms=306094 fall=306133 mid=306113 fitIn=306108 d=-5 mask=7ff nov=154.251 thr=92.785 rise=-0.3 band=61-250
-ms=306544 fall=306584 mid=306564 fitIn=306563 d=-1 mask=7ff nov=109.690 thr=87.113 rise=-6.4 band=61-250
-ms=306991 fall=307039 mid=307015 fitIn=307011 d=-4 mask=7ff nov=121.779 thr=81.794 rise=0.6 band=61-250
-ms=307452 fall=307471 mid=307461 fitIn=307476 d=15 mask=7ff nov=202.650 thr=113.808 rise=-0.8 band=61-250
-ms=307889 fall=307925 mid=307907 fitIn=307898 d=-9 mask=7ff nov=119.074 thr=106.915 rise=11.4 band=61-250
-ms=308332 fall=308363 mid=308347 fitIn=308350 d=3 mask=7ff nov=167.292 thr=100.503 rise=1.3 band=61-250
-ms=308783 fall=308823 mid=308803 fitIn=308798 d=-5 mask=7ff nov=207.624 thr=116.602 rise=-2.4 band=61-250
-ms=309233 fall=309262 mid=309247 fitIn=309253 d=6 mask=7ff nov=129.608 thr=109.536 rise=5.9 band=61-250
-ms=309682 fall=309721 mid=309701 fitIn=309696 d=-5 mask=7ff nov=126.804 thr=102.737 rise=-4.0 band=61-250
-ms=310130 fall=310160 mid=310145 fitIn=310149 d=4 mask=7ff nov=130.979 thr=96.794 rise=-5.4 band=61-250
-ms=310586 fall=310616 mid=310601 fitIn=310601 d=0 mask=7ff nov=100.342 thr=90.892 rise=-3.6 band=61-250
-ms=311026 fall=311055 mid=311040 fitIn=311041 d=1 mask=7ff nov=142.484 thr=85.551 rise=17.4 band=61-250
-ms=311471 fall=311516 mid=311493 fitIn=311485 d=-8 mask=7ff nov=101.639 thr=80.328 rise=11.8 band=61-250
+# fetch at 19:14:47  since=330
+# onsets since=330 sent=9 next=339 head=339
+ms=313605 fall=313647 mid=313626 fitIn=313624 d=-2 mask=7ff nov=119.827 thr=78.208 rise=7.5 band=61-250
+ms=314047 fall=314087 mid=314067 fitIn=314068 d=1 mask=7ff nov=154.950 thr=87.020 rise=-1.7 band=61-250
+ms=314499 fall=314528 mid=314513 fitIn=314519 d=6 mask=7ff nov=152.069 thr=85.402 rise=-2.7 band=61-250
+ms=314949 fall=314998 mid=314973 fitIn=314963 d=-10 mask=7ff nov=96.256 thr=80.252 rise=-1.0 band=61-250
+ms=315399 fall=315430 mid=315414 fitIn=315423 d=9 mask=7ff nov=108.621 thr=75.431 rise=5.1 band=61-250
+ms=315840 fall=315871 mid=315855 fitIn=315855 d=0 mask=7ff nov=177.701 thr=99.797 rise=-0.8 band=61-250
+ms=316295 fall=316324 mid=316309 fitIn=316310 d=1 mask=7ff nov=124.978 thr=93.697 rise=-8.8 band=61-250
+ms=316734 fall=316774 mid=316754 fitIn=316748 d=-6 mask=7ff nov=155.002 thr=87.939 rise=3.1 band=61-250
+ms=317195 fall=317224 mid=317209 fitIn=317215 d=6 mask=7ff nov=98.242 thr=82.593 rise=-1.2 band=61-250
 
-# fetch at 19:00:38  since=414
-# onsets since=414 sent=23 next=437 head=437
-ms=311926 fall=311945 mid=311935 fitIn=311948 d=13 mask=7ff nov=206.938 thr=116.217 rise=-1.5 band=61-250
-ms=312368 fall=312407 mid=312387 fitIn=312377 d=-10 mask=7ff nov=157.191 thr=109.098 rise=2.4 band=61-250
-ms=312799 fall=312839 mid=312819 fitIn=312818 d=-1 mask=7ff nov=155.091 thr=102.627 rise=-4.9 band=61-250
-ms=313262 fall=313291 mid=313276 fitIn=313282 d=6 mask=7ff nov=136.664 thr=96.324 rise=-5.8 band=61-250
-ms=313704 fall=313754 mid=313729 fitIn=313718 d=-11 mask=7ff nov=149.194 thr=90.611 rise=-8.4 band=61-250
-ms=314158 fall=314197 mid=314177 fitIn=314183 d=6 mask=7ff nov=112.117 thr=85.164 rise=-1.4 band=61-250
-ms=314612 fall=314641 mid=314626 fitIn=314631 d=5 mask=7ff nov=212.570 thr=119.379 rise=-5.5 band=61-250
-ms=315052 fall=0 mid=-1 fitIn=315066 d=0 mask=7fe nov=138.866 thr=112.169 rise=12.0 band=61-250
-ms=315052 fall=315082 mid=315067 fitIn=315052 d=-15 mask=001 nov=138.866 thr=112.169 rise=12.0 band=61-250
-ms=315495 fall=315543 mid=315519 fitIn=315510 d=-9 mask=7ff nov=131.031 thr=105.308 rise=-10.9 band=61-250
-ms=315946 fall=315988 mid=315967 fitIn=315970 d=3 mask=7ff nov=192.448 thr=108.079 rise=1.7 band=61-250
-ms=316393 fall=316432 mid=316412 fitIn=316414 d=2 mask=7ff nov=134.921 thr=101.416 rise=1.2 band=61-250
-ms=316846 fall=316875 mid=316860 fitIn=316865 d=5 mask=7ff nov=132.092 thr=95.357 rise=3.5 band=61-250
-ms=317289 fall=317339 mid=317314 fitIn=317303 d=-11 mask=7ff nov=110.639 thr=89.644 rise=1.1 band=61-250
-ms=317742 fall=0 mid=-1 fitIn=317767 d=0 mask=7fe nov=116.734 thr=84.292 rise=2.4 band=61-250
-ms=317742 fall=317781 mid=317761 fitIn=317742 d=-19 mask=001 nov=116.734 thr=84.292 rise=2.4 band=61-250
-ms=318183 fall=318222 mid=318202 fitIn=318202 d=0 mask=7ff nov=277.809 thr=156.017 rise=-4.0 band=61-250
-ms=318643 fall=318664 mid=318653 fitIn=318662 d=9 mask=7ff nov=186.540 thr=146.379 rise=-5.8 band=61-250
-ms=319092 fall=0 mid=-1 fitIn=319102 d=0 mask=7f0 nov=196.831 thr=137.481 rise=1.9 band=61-250
-ms=319092 fall=319116 mid=319104 fitIn=319092 d=-12 mask=00f nov=196.831 thr=137.481 rise=1.9 band=61-250
-ms=319534 fall=319563 mid=319548 fitIn=319546 d=-2 mask=7ff nov=144.137 thr=128.900 rise=2.0 band=61-250
-ms=319984 fall=320023 mid=320003 fitIn=319998 d=-5 mask=7ff nov=139.121 thr=121.011 rise=1.4 band=61-250
-ms=320427 fall=320475 mid=320451 fitIn=320446 d=-5 mask=7ff nov=136.926 thr=113.378 rise=2.5 band=61-250
+# fetch at 19:14:53  since=339
+# onsets since=339 sent=14 next=353 head=353
+ms=317644 fall=317674 mid=317659 fitIn=317658 d=-1 mask=7ff nov=148.187 thr=83.222 rise=-6.1 band=61-250
+ms=318083 fall=318110 mid=318096 fitIn=318098 d=2 mask=7ff nov=106.615 thr=78.397 rise=7.0 band=61-250
+ms=318527 fall=318556 mid=318541 fitIn=318540 d=-1 mask=7ff nov=138.385 thr=77.717 rise=6.8 band=61-250
+ms=318981 fall=319021 mid=319001 fitIn=318995 d=-6 mask=7ff nov=147.263 thr=82.703 rise=1.7 band=61-250
+ms=319421 fall=319457 mid=319439 fitIn=319441 d=2 mask=7ff nov=142.365 thr=79.952 rise=1.6 band=61-250
+ms=319876 fall=319905 mid=319890 fitIn=319894 d=4 mask=7ff nov=142.988 thr=80.302 rise=10.9 band=61-250
+ms=320317 fall=320357 mid=320337 fitIn=320331 d=-6 mask=7ff nov=144.697 thr=81.262 rise=5.1 band=61-250
+ms=320765 fall=320819 mid=320792 fitIn=320785 d=-7 mask=7ff nov=89.285 thr=76.452 rise=3.4 band=61-250
+ms=321215 fall=321256 mid=321235 fitIn=321242 d=7 mask=7ff nov=107.304 thr=71.941 rise=15.4 band=61-250
+ms=321677 fall=321696 mid=321686 fitIn=321697 d=11 mask=7ff nov=216.235 thr=121.437 rise=-4.7 band=61-250
+ms=322117 fall=322146 mid=322131 fitIn=322126 d=-5 mask=7ff nov=145.433 thr=113.984 rise=-0.0 band=61-250
+ms=322562 fall=322601 mid=322581 fitIn=322576 d=-5 mask=7ff nov=139.091 thr=106.979 rise=-7.8 band=61-250
+ms=323009 fall=323048 mid=323028 fitIn=323028 d=0 mask=7ff nov=135.760 thr=100.498 rise=-7.4 band=61-250
+ms=323462 fall=323497 mid=323479 fitIn=323481 d=2 mask=7ff nov=140.395 thr=94.436 rise=2.9 band=61-250
 
-# fetch at 19:00:44  since=437
-# onsets since=437 sent=11 next=448 head=448
-ms=320882 fall=320913 mid=320897 fitIn=320906 d=9 mask=7ff nov=180.470 thr=106.771 rise=2.0 band=61-250
-ms=321326 fall=321355 mid=321340 fitIn=321341 d=1 mask=7ff nov=133.016 thr=100.289 rise=-1.2 band=61-250
-ms=321775 fall=321814 mid=321794 fitIn=321789 d=-5 mask=7ff nov=130.597 thr=94.233 rise=6.1 band=61-250
-ms=322680 fall=322699 mid=322689 fitIn=322699 d=10 mask=7ff nov=307.216 thr=172.533 rise=0.4 band=61-250
-ms=323115 fall=323144 mid=323129 fitIn=323124 d=-5 mask=7ff nov=181.199 thr=161.852 rise=1.4 band=61-250
-ms=323566 fall=323604 mid=323585 fitIn=323580 d=-5 mask=7ff nov=162.965 thr=151.889 rise=14.0 band=61-250
-ms=324462 fall=324493 mid=324477 fitIn=324481 d=4 mask=7ff nov=164.328 thr=133.550 rise=1.3 band=61-250
-ms=324909 fall=324944 mid=324926 fitIn=324924 d=-2 mask=7ff nov=213.254 thr=125.465 rise=6.1 band=61-250
-ms=325352 fall=325390 mid=325371 fitIn=325369 d=-2 mask=7ff nov=129.208 thr=117.635 rise=-1.9 band=61-250
-ms=325795 fall=325843 mid=325819 fitIn=325814 d=-5 mask=7ff nov=162.525 thr=110.502 rise=11.7 band=61-250
-ms=326244 fall=326283 mid=326263 fitIn=326268 d=5 mask=7ff nov=189.015 thr=106.151 rise=-3.9 band=61-250
+# fetch at 19:14:59  since=353
+# onsets since=353 sent=13 next=366 head=366
+ms=323907 fall=323948 mid=323927 fitIn=323924 d=-3 mask=7ff nov=104.701 thr=88.842 rise=-7.4 band=61-250
+ms=324344 fall=324392 mid=324368 fitIn=324364 d=-4 mask=7ff nov=230.198 thr=129.279 rise=-0.5 band=61-250
+ms=325247 fall=325290 mid=325268 fitIn=325271 d=3 mask=7ff nov=133.954 thr=113.947 rise=5.7 band=61-250
+ms=325699 fall=325737 mid=325718 fitIn=325720 d=2 mask=7ff nov=124.228 thr=106.971 rise=6.4 band=61-250
+ms=326153 fall=326181 mid=326167 fitIn=326172 d=5 mask=7ff nov=206.052 thr=115.719 rise=2.5 band=61-250
+ms=326607 fall=326625 mid=326616 fitIn=326621 d=5 mask=7ff nov=213.519 thr=119.913 rise=-6.5 band=61-250
+ms=327045 fall=327068 mid=327056 fitIn=327054 d=-2 mask=7ff nov=120.920 thr=112.575 rise=-6.8 band=61-250
+ms=327486 fall=327516 mid=327501 fitIn=327497 d=-4 mask=7ff nov=146.368 thr=105.599 rise=-0.4 band=61-250
+ms=327938 fall=327977 mid=327957 fitIn=327953 d=-4 mask=7ff nov=160.277 thr=99.150 rise=7.5 band=61-250
+ms=328383 fall=328421 mid=328402 fitIn=328402 d=0 mask=7ff nov=119.049 thr=93.287 rise=6.3 band=61-250
+ms=328834 fall=328865 mid=328849 fitIn=328853 d=4 mask=7ff nov=168.028 thr=94.364 rise=-3.0 band=61-250
+ms=329274 fall=329303 mid=329288 fitIn=329289 d=1 mask=7ff nov=136.043 thr=88.666 rise=-2.8 band=61-250
+ms=329724 fall=329750 mid=329737 fitIn=329738 d=1 mask=7ff nov=113.643 thr=83.469 rise=14.7 band=61-250
 
-# fetch at 19:00:50  since=448
-# onsets since=448 sent=11 next=459 head=459
-ms=326700 fall=326719 mid=326709 fitIn=326719 d=10 mask=7ff nov=205.809 thr=115.582 rise=-13.3 band=61-250
-ms=327144 fall=327172 mid=327158 fitIn=327153 d=-5 mask=7ff nov=123.781 thr=108.522 rise=2.0 band=61-250
-ms=327592 fall=327631 mid=327611 fitIn=327606 d=-5 mask=7ff nov=111.513 thr=101.756 rise=5.3 band=61-250
-ms=328038 fall=328078 mid=328058 fitIn=328057 d=-1 mask=7ff nov=103.017 thr=95.726 rise=2.4 band=61-250
-ms=328490 fall=328519 mid=328504 fitIn=328510 d=6 mask=7ff nov=137.806 thr=90.037 rise=-7.0 band=61-250
-ms=328931 fall=328979 mid=328955 fitIn=328945 d=-10 mask=7ff nov=135.107 thr=84.575 rise=3.7 band=61-250
-ms=329383 fall=0 mid=-1 fitIn=329407 d=0 mask=600 nov=188.589 thr=105.912 rise=-4.9 band=61-250
-ms=329383 fall=329412 mid=329397 fitIn=329383 d=-14 mask=1ff nov=188.589 thr=105.912 rise=-4.9 band=61-250
-ms=329831 fall=329860 mid=329845 fitIn=329845 d=0 mask=7ff nov=147.962 thr=99.458 rise=0.3 band=61-250
-ms=330281 fall=330310 mid=330295 fitIn=330295 d=0 mask=7ff nov=133.144 thr=93.373 rise=-1.0 band=61-250
-ms=330726 fall=330772 mid=330749 fitIn=330740 d=-9 mask=7ff nov=107.961 thr=87.920 rise=12.5 band=61-250
+# fetch at 19:15:05  since=366
+# onsets since=366 sent=11 next=377 head=377
+ms=330176 fall=330204 mid=330190 fitIn=330189 d=-1 mask=7ff nov=116.594 thr=78.398 rise=3.9 band=61-250
+ms=330624 fall=330653 mid=330638 fitIn=330638 d=0 mask=7ff nov=172.520 thr=96.887 rise=8.3 band=61-250
+ms=331067 fall=331107 mid=331087 fitIn=331081 d=-6 mask=7ff nov=101.155 thr=90.981 rise=2.6 band=61-250
+ms=331526 fall=331546 mid=331536 fitIn=331546 d=10 mask=7ff nov=253.803 thr=142.536 rise=7.9 band=61-250
+ms=332409 fall=332449 mid=332429 fitIn=332419 d=-10 mask=7ff nov=183.913 thr=125.432 rise=1.8 band=61-250
+ms=332860 fall=332892 mid=332876 fitIn=332880 d=4 mask=7ff nov=155.892 thr=118.061 rise=-1.9 band=61-250
+ms=333753 fall=333793 mid=333773 fitIn=333769 d=-4 mask=7ff nov=125.171 thr=103.993 rise=-18.7 band=61-250
+ms=334206 fall=334245 mid=334225 fitIn=334226 d=1 mask=7ff nov=120.378 thr=97.704 rise=-4.6 band=61-250
+ms=334650 fall=334698 mid=334674 fitIn=334669 d=-5 mask=7ff nov=132.902 thr=91.756 rise=8.3 band=61-250
+ms=335097 fall=335136 mid=335116 fitIn=335121 d=5 mask=7ff nov=133.139 thr=86.317 rise=11.0 band=61-250
+ms=335562 fall=335588 mid=335575 fitIn=335581 d=6 mask=7ff nov=104.161 thr=81.284 rise=2.1 band=61-250
 
-# fetch at 19:00:59  since=459
-# onsets since=459 sent=13 next=472 head=472
-ms=331179 fall=331203 mid=331191 fitIn=331202 d=11 mask=7ff nov=139.021 thr=82.920 rise=5.0 band=61-250
-ms=331624 fall=331653 mid=331638 fitIn=331636 d=-2 mask=7ff nov=83.658 thr=77.736 rise=0.9 band=61-250
-ms=332075 fall=332119 mid=332097 fitIn=332089 d=-8 mask=7ff nov=118.107 thr=83.709 rise=0.2 band=61-250
-ms=332515 fall=332554 mid=332534 fitIn=332537 d=3 mask=7ff nov=299.906 thr=168.427 rise=6.0 band=61-250
-ms=332965 fall=332995 mid=332980 fitIn=332984 d=4 mask=7ff nov=178.093 thr=158.064 rise=-9.9 band=61-250
-ms=333417 fall=333456 mid=333436 fitIn=333432 d=-4 mask=7ff nov=172.871 thr=148.175 rise=-0.9 band=61-250
-ms=333876 fall=333907 mid=333891 fitIn=333895 d=4 mask=7ff nov=187.424 thr=138.928 rise=3.5 band=61-250
-ms=334300 fall=334350 mid=334325 fitIn=334315 d=-10 mask=7ff nov=209.052 thr=130.658 rise=-8.2 band=61-250
-ms=334764 fall=334791 mid=334777 fitIn=334789 d=12 mask=7ff nov=231.073 thr=129.771 rise=9.0 band=61-250
-ms=335210 fall=335240 mid=335225 fitIn=335223 d=-2 mask=7ff nov=142.822 thr=121.838 rise=2.2 band=61-250
-ms=335651 fall=335684 mid=335667 fitIn=335666 d=-1 mask=7ff nov=154.367 thr=114.405 rise=10.0 band=61-250
-ms=336098 fall=336145 mid=336121 fitIn=336114 d=-7 mask=7ff nov=150.051 thr=107.476 rise=2.4 band=61-250
-ms=336560 fall=336588 mid=336574 fitIn=336583 d=9 mask=7ff nov=182.451 thr=102.465 rise=16.2 band=61-250
+# fetch at 19:15:11  since=377
+# onsets since=377 sent=11 next=388 head=388
+ms=335987 fall=336034 mid=336010 fitIn=336000 d=-10 mask=7ff nov=152.501 thr=85.645 rise=9.5 band=61-250
+ms=336449 fall=336479 mid=336464 fitIn=336472 d=8 mask=7ff nov=171.102 thr=96.091 rise=0.4 band=61-250
+ms=336899 fall=336929 mid=336914 fitIn=336914 d=0 mask=7ff nov=106.051 thr=90.269 rise=-0.7 band=61-250
+ms=337346 fall=337384 mid=337365 fitIn=337361 d=-4 mask=7ff nov=202.653 thr=113.810 rise=-0.2 band=61-250
+ms=337795 fall=337834 mid=337814 fitIn=337814 d=0 mask=7ff nov=144.402 thr=106.810 rise=5.4 band=61-250
+ms=338235 fall=338274 mid=338254 fitIn=338254 d=0 mask=7ff nov=213.981 thr=120.172 rise=-0.7 band=61-250
+ms=338697 fall=338717 mid=338707 fitIn=338716 d=9 mask=7ff nov=234.836 thr=131.884 rise=-10.5 band=61-250
+ms=339586 fall=339625 mid=339605 fitIn=339596 d=-9 mask=7ff nov=120.921 thr=116.323 rise=-1.9 band=61-250
+ms=340028 fall=340077 mid=340052 fitIn=340047 d=-5 mask=7ff nov=117.957 thr=109.189 rise=-10.8 band=61-250
+ms=340491 fall=340511 mid=340501 fitIn=340515 d=14 mask=7ff nov=271.258 thr=152.338 rise=-7.1 band=61-250
+ms=341376 fall=341418 mid=341397 fitIn=341386 d=-11 mask=7ff nov=149.740 thr=134.147 rise=-1.1 band=61-250
 
-# fetch at 19:01:04  since=472
-# onsets since=472 sent=0 next=472 head=472
-
-# fetch at 19:01:10  since=472
-# onsets since=472 sent=8 next=480 head=480
-ms=346439 fall=346458 mid=346448 fitIn=346453 d=5 mask=7ff nov=34.354 thr=25.194 rise=6.0 band=61-250
-ms=346881 fall=346904 mid=346892 fitIn=346890 d=-2 mask=7ff nov=25.840 thr=23.765 rise=-0.8 band=61-250
-ms=349394 fall=349421 mid=349407 fitIn=349405 d=-2 mask=7ff nov=23.496 thr=17.028 rise=9.4 band=61-250
-ms=350077 fall=350106 mid=350091 fitIn=350090 d=-1 mask=7ff nov=28.264 thr=15.873 rise=7.1 band=61-250
-ms=350214 fall=350243 mid=350228 fitIn=350228 d=0 mask=7ff nov=17.730 thr=15.591 rise=2.7 band=61-250
-ms=350312 fall=350331 mid=350321 fitIn=350326 d=5 mask=7ff nov=19.321 thr=15.415 rise=3.5 band=61-250
-ms=350420 fall=350469 mid=350444 fitIn=350429 d=-15 mask=7ff nov=24.392 thr=15.194 rise=3.6 band=61-250
-ms=350882 fall=350912 mid=350897 fitIn=350906 d=9 mask=7ff nov=158.335 thr=88.921 rise=-3.0 band=61-250
-
-# fetch at 19:01:18  since=480
-# onsets since=480 sent=16 next=496 head=496
-ms=351311 fall=351357 mid=351334 fitIn=351326 d=-8 mask=7ff nov=202.556 thr=113.756 rise=-6.0 band=61-250
-ms=351753 fall=351802 mid=351777 fitIn=351776 d=-1 mask=7ff nov=119.134 thr=106.885 rise=2.8 band=61-250
-ms=352219 fall=352250 mid=352234 fitIn=352243 d=9 mask=7ff nov=143.578 thr=100.442 rise=0.7 band=61-250
-ms=352668 fall=352706 mid=352687 fitIn=352683 d=-4 mask=7ff nov=96.066 thr=94.523 rise=2.4 band=61-250
-ms=353114 fall=353154 mid=353134 fitIn=353133 d=-1 mask=7ff nov=123.916 thr=88.684 rise=3.3 band=61-250
-ms=353545 fall=353590 mid=353567 fitIn=353565 d=-2 mask=7ff nov=163.151 thr=91.626 rise=-3.2 band=61-250
-ms=353987 fall=354044 mid=354015 fitIn=354009 d=-6 mask=7ff nov=93.496 thr=86.106 rise=-5.0 band=61-250
-ms=354457 fall=0 mid=-1 fitIn=354485 d=0 mask=7fe nov=115.730 thr=80.919 rise=2.5 band=61-250
-ms=354457 fall=354496 mid=354476 fitIn=354457 d=-19 mask=001 nov=115.730 thr=80.919 rise=2.5 band=61-250
-ms=355351 fall=355390 mid=355370 fitIn=355370 d=0 mask=7ff nov=95.319 thr=71.784 rise=-2.7 band=61-250
-ms=355799 fall=355829 mid=355814 fitIn=355818 d=4 mask=7ff nov=109.955 thr=67.578 rise=0.2 band=61-250
-ms=356251 fall=356288 mid=356269 fitIn=356266 d=-3 mask=7ff nov=124.154 thr=69.725 rise=16.9 band=61-250
-ms=356690 fall=356738 mid=356714 fitIn=356708 d=-6 mask=7ff nov=92.908 thr=70.642 rise=-1.6 band=61-250
-ms=357157 fall=357186 mid=357171 fitIn=357181 d=10 mask=7ff nov=152.567 thr=85.681 rise=-5.3 band=61-250
-ms=357595 fall=357624 mid=357609 fitIn=357609 d=0 mask=7ff nov=116.391 thr=80.640 rise=-2.2 band=61-250
-ms=358036 fall=358070 mid=358053 fitIn=358050 d=-3 mask=7ff nov=80.220 thr=76.214 rise=14.5 band=61-250
-
-# fetch at 19:01:25  since=496
-# onsets since=496 sent=3 next=499 head=499
-ms=364743 fall=364798 mid=364770 fitIn=364760 d=-10 mask=7ff nov=108.332 thr=60.839 rise=-0.4 band=61-250
-ms=365198 fall=365247 mid=365222 fitIn=365225 d=3 mask=7ff nov=165.307 thr=92.837 rise=-0.1 band=61-250
-ms=366425 fall=366483 mid=366454 fitIn=366449 d=-5 mask=7ff nov=85.691 thr=77.778 rise=-1.9 band=61-250
+# fetch at 19:15:19  since=388
+# onsets since=388 sent=19 next=407 head=407
+ms=341819 fall=341844 mid=341831 fitIn=341840 d=9 mask=7ff nov=137.801 thr=126.193 rise=10.4 band=61-250
+ms=342265 fall=342294 mid=342279 fitIn=342277 d=-2 mask=7ff nov=136.338 thr=118.205 rise=-5.6 band=61-250
+ms=342715 fall=342756 mid=342735 fitIn=342729 d=-6 mask=7ff nov=149.249 thr=111.004 rise=1.1 band=61-250
+ms=343169 fall=343188 mid=343178 fitIn=343189 d=11 mask=7ff nov=182.773 thr=104.350 rise=3.5 band=61-250
+ms=343608 fall=343637 mid=343622 fitIn=343617 d=-5 mask=7ff nov=149.372 thr=98.251 rise=3.7 band=61-250
+ms=344061 fall=344100 mid=344080 fitIn=344075 d=-5 mask=7ff nov=152.418 thr=92.215 rise=5.2 band=61-250
+ms=344488 fall=344537 mid=344512 fitIn=344507 d=-5 mask=7ff nov=165.769 thr=93.096 rise=5.5 band=61-250
+ms=344955 fall=344985 mid=344970 fitIn=344979 d=9 mask=7ff nov=168.956 thr=94.886 rise=-10.2 band=61-250
+ms=345407 fall=345427 mid=345417 fitIn=345422 d=5 mask=7ff nov=260.994 thr=146.574 rise=-11.9 band=61-250
+ms=345843 fall=345882 mid=345862 fitIn=345853 d=-9 mask=7ff nov=194.515 thr=138.092 rise=9.0 band=61-250
+ms=346296 fall=346325 mid=346310 fitIn=346315 d=5 mask=7ff nov=130.531 thr=129.788 rise=-13.9 band=61-250
+ms=346748 fall=346787 mid=346767 fitIn=346762 d=-5 mask=7ff nov=138.999 thr=121.711 rise=1.4 band=61-250
+ms=347192 fall=347231 mid=347211 fitIn=347211 d=0 mask=7ff nov=147.983 thr=114.289 rise=10.5 band=61-250
+ms=347641 fall=347671 mid=347656 fitIn=347660 d=4 mask=7ff nov=169.068 thr=107.295 rise=-0.3 band=61-250
+ms=348090 fall=348116 mid=348103 fitIn=348105 d=2 mask=7ff nov=163.413 thr=100.964 rise=10.4 band=61-250
+ms=348536 fall=348565 mid=348550 fitIn=348549 d=-1 mask=7ff nov=127.232 thr=94.627 rise=-3.1 band=61-250
+ms=348978 fall=349026 mid=349002 fitIn=348992 d=-10 mask=7ff nov=132.321 thr=88.919 rise=10.1 band=61-250
+ms=349449 fall=0 mid=-1 fitIn=349473 d=0 mask=7f8 nov=90.117 thr=83.564 rise=4.7 band=61-250
+ms=349449 fall=349473 mid=349461 fitIn=349449 d=-12 mask=007 nov=90.117 thr=83.564 rise=4.7 band=61-250
 
