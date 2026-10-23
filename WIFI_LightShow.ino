@@ -4483,7 +4483,13 @@ static void listeningStep() {
           // times per onset is what stalled the display (see the note in beatPeriodComb).
           unsigned long p = 0;
           if (i == 0) { p = beatPeriodComb(lin, cnt); }   // the shared value is set AFTER the median
-          else if (g_beatPeriodMs >= 200) { L.ivMs = clampBeatPeriod(fixHalfBeat(g_beatPeriodMs)); g_idlePace = false; }
+          else if (g_beatPeriodMs >= 200) {
+            // THE FIT WINS IF IT IS LOCKED (23 Oct) - see the note at the phase pull. This path had no
+            // override, so a shared period from the tempo search could overwrite a good fit.
+            if (g_fitPer > 0 && g_fitN >= 2) L.ivMs = clampBeatPeriod(g_fitPer);
+            else                             L.ivMs = clampBeatPeriod(fixHalfBeat(g_beatPeriodMs));
+            g_idlePace = false;
+          }
           if (p >= 200) {
             // A MEDIAN OVER THE LAST 3 COMB RESULTS. The comb occasionally returns a wrong
             // value for a single window (measured outliers of 350, 370 and 660 ms against a
@@ -4578,7 +4584,14 @@ static void listeningStep() {
             if (ae <= rej) {
               // A REAL BEAT. A quarter of the phase error and a sixteenth of it into the period: both
               // far too small to see on one beat, and together they converge in a few beats.
-              L.clkNext = (unsigned long)((long)L.clkNext + err / 4);
+              // DISABLED WHILE THE FIT IS LOCKED (23 Oct). This line moved the beat schedule by a quarter
+              // of every onset's error, and the onsets jitter - so the beats were nudged on every
+              // detection, which is the "advancing" the user sees. A fitted constant period cannot drift
+              // on its own; this was what moved it. The fit owns the clock while it is locked, and the
+              // old steering only runs while there is no lock.
+              if (!(g_fitPer > 0 && g_fitN >= 2)) {
+                L.clkNext = (unsigned long)((long)L.clkNext + err / 4);
+              }
               L.ivMs    = clampBeatPeriod((unsigned long)((long)L.ivMs + err / 16));
               g_tmFixed++;
               if (ae > g_tmWorst) g_tmWorst = (int32_t)ae;
@@ -6815,6 +6828,9 @@ void handleTrav() {
   // is healthy - it is spurious beats and off-beats being kept out. A fitPer that sits still means the
   // tempo is locked.
   out += ",\"fitPer\":";  out += String((unsigned long)g_fitPer);
+  // locked = 1 means the fit owns the clock: the period is the fit and NOTHING pulls the phase. If
+  // locked is 1 and the timing still advances, then a write I have not found is doing it.
+  out += ",\"locked\":";   out += String((long)((g_fitPer > 0 && g_fitN >= 2) ? 1 : 0));
   // THE WIDTH AND THE CONFIDENCE (23 Oct). wid is the last beat width in ms - a real beat is wide, a
   // transient narrow. conf is the fit confidence: the width, the rejection rate against the expected
   // ~50 per cent, the interval spread, and the BPM bell as a nudge. bpm is what the fit implies.
