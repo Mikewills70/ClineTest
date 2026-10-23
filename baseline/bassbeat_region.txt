@@ -1,0 +1,895 @@
+// ==== BASS BEAT PROTECTED REGION - START - DO NOT EDIT BELOW THIS LINE (RULE 10) ====
+// ---------------------------------------------------------------------------
+// ONSET DETECTION FUNCTION - the spectral-flux equivalent
+//
+// Professional beat detectors do NOT use an amplitude envelope. They compute
+// SPECTRAL FLUX: the sum of positive bin-to-bin changes between frames. It works
+// because a beat IS a change - a sustained bass note produces zero flux, overall
+// level is irrelevant, and uncorrelated noise cancels.
+//
+// A real spectral flux needs ~50-100 frames/second. Our FFT runs at 17/second
+// (one 1024-point transform per 58 ms), far too coarse to time beats. So this is
+// the single-band time-domain equivalent, evaluated every 10 ms:
+//
+//     band-pass 40-250 Hz  ->  rectify  ->  NORMALISE by running level
+//                          ->  positive first difference  ->  short averager
+//
+// Normalising BEFORE differencing is the crucial step: it makes the detector
+// immune to volume, which the envelope follower could never be. That is why
+// silence and music both measured p2p=6-8 on the old scheme, and why silence
+// fired 4 beats a second.
+//
+// Replaces: low-pass -> peak-to-peak -> compare to half a running average.
+// ---------------------------------------------------------------------------
+#define ODF_HP_HZ    40.0f      // band bottom: removes rumble and DC
+#define ODF_LP_HZ   250.0f      // band top: keeps the kick, rejects snare/hat/vocal
+#define ODF_HIST      32        // 320 ms of novelty history for the local mean
+#define ODF_K        0.85f      // trigger at local_mean * ODF_K + beatSens
+#define ODF_MIN_GAP    90UL     // minimum ms between onsets
+// THE ADAPTIVE THRESHOLD (21 Oct). The threshold is a FRACTION of the chain slow novelty
+// peak, so it scales with the music instead of being an absolute ADC count.
+#define NOV_PEAK_DECAY 0.0017f  // per 10 ms frame: the peak falls with tau about 6 s
+#define ODF_THR_FLOOR  5.0f     // counts: never listen to the room (the old floor)
+#define NOV_RISE_EPS   1.0f     // counts: below this the band is quiet, so a rise has
+                                // started (the leading-edge timestamp, see odfEvaluate)
+#define RISE_LOOKBACK  120UL    // ms: never stamp an onset further back than this
+#define ODF_RECOVER    0.5f     // the SECOND CHANCE bar: see listeningStep
+// THE PLAUSIBLE BEAT BAND: the clock may only run inside it (80-171 BPM). MEASURED on
+// Fisher - Losing It (125 BPM): the detector fires on the BEAT and on the OFF-BEAT, so
+// the onset intervals are a mix of about 480 and about 240 ms and the period is genuinely
+// ambiguous - the octave correction adopted 240 and the clock ran at twice the beat rate.
+// A band excludes BOTH ways the period can be wrong (half the beat, and twice the beat)
+// while covering every track here (121-138 BPM = 435-496 ms) with room at both ends.
+#define CLK_MIN_MS     350UL    // 171 BPM
+#define CLK_MAX_MS     750UL    // 80 BPM
+#define SENS_FRAC_MAX  0.60f    // sens 0.01 (strictest): 60% of the music novelty peak
+#define SENS_FRAC_MIN  0.12f    // sens 1.00 (most sensitive): 12%
+
+// BEAT SENSITIVITY - the absolute part of the threshold, and the control that
+// actually matters.
+//
+// thr = local_mean * ODF_K + beatSens
+//
+// The novelty curve spends most of its time near zero, so local_mean sits around
+// 0.11 and the adaptive term contributes almost nothing. A delta of 0.02 put the
+// threshold at ~0.12 while peaks reach 0.43 - so nearly every peak fired, giving
+// 4-5 detections a SECOND. Raised to 0.15 the threshold sits mid-peak and the
+// detector fires on real kicks only.
+//
+// Exposed to the UI as "Beat Sensitivity" (declared with the globals near the top).
+
+// Level-follower coefficient. This was 0.001 (~60 ms), which LAGGED the kick and
+// flattened the normalised ratio - measured peaks 0.116 against a local mean of
+// 0.126, i.e. the peaks were BELOW the mean, so no value of ODF_K above ~0.9
+// could ever trigger. 0.004 is ~15 ms: fast enough to track the kick's own
+// envelope so the PEAK stands proud of the average instead of being smoothed into
+// it. This is the difference between "detects some beats" and "detects the beat".
+#define ODF_LEVEL_A  0.004f
+
+// ---------------------------------------------------------------------------
+// LISTENING CHAINS - the audio engine MEASURES, it does not decide.
+//
+// One chain per distinct band in use. CHAIN 0 IS ALWAYS THE BASELINE BAND (the
+// Frequency setting), so the 15/10 response is always available and is produced by
+// exactly the arithmetic that produced it: the same six one-poles, in the same
+// order, with the same coefficients and the same 10 ms frame boundary. Extra chains
+// exist only because some pattern asked for a different band.
+//
+// Each chain PUBLISHES, once per 10 ms frame: its novelty (the frame-to-frame change
+// in band energy) and a sequence number. Who acts on that is decided by the PATTERN,
+// in the render loop, against its own threshold - see the listening step there.
+// ---------------------------------------------------------------------------
+#define ODF_CHAINS 6    // 0 = the kick band, 1-3 listeners, 4 = snare, 5 = mid (22 Oct)
+struct OdfChain {
+  bool  used = false;
+  float hpHz = ODF_HP_HZ;      // this chain's band lower edge
+  float aLo  = 0.0f;           // its high-pass coefficient (derived from hpHz)
+  // THE LOW-PASS IS PER CHAIN NOW (22 Oct). It used to be shared (odfAHi, fixed at 250 Hz), so a
+  // chain could only vary its bottom edge - fine while every band was a kick band, useless for a
+  // snare or mid band whose whole point is the TOP of the range.
+  float lpHz = ODF_LP_HZ;      // this chain's band upper edge
+  float aLp  = 0.0f;           // its low-pass coefficient (derived from lpHz)
+  // Filter state: the same six one-poles as the baseline, per chain.
+  float hp1 = 0, hp1Prev = 0, hp2 = 0, hp2Prev = 0;
+  float lp1 = 0, lp2 = 0, lp3 = 0, lp4 = 0;
+  // 10 ms frame accumulation
+  float winMax = 0, prevWin = 0;
+  // Published once per frame.
+  volatile float    novelty = 0.0f;
+  volatile uint32_t seq     = 0;
+  // THE ADAPTIVE THRESHOLD STATE: a slow peak of this chain novelty (see odfEvaluate).
+  float             novPeak = 0.0f;
+  float             lastNov = 0.0f;   // previous frame novelty, to spot the rise START
+  uint32_t          riseAtMs = 0;     // when the current rise began, for the timestamp
+};
+OdfChain odfChain[ODF_CHAINS];
+uint16_t odfChainUse = 0;                 // bitmask of chains currently in use
+float    odfAHi = 0.0f;                   // shared low-pass coefficient (250 Hz)
+
+// Chain 0's numbers keep their original names: the heartbeat's "onset nov=… thr=…"
+// line must go on meaning exactly what it always meant.
+// (odfDisplayBeat is gone: a beat is per PATTERN now, so the pending state lives in
+// each BeatListener - see listeningStep().)
+float odfThr = 0.0f;            // logged, so the threshold can be read directly
+float odfNovelty = 0.0f;        // chain 0's last novelty (the logged value)
+
+// The high-pass coefficient for a band edge. THE SAME FORMULA as the baseline used
+// per sample; it is simply hoisted to the 10 ms frame, because audioFs (and therefore
+// the coefficient) only changes once per FFT window anyway.
+float odfBandCoeff(float hpHz) {
+  float dt = 1.0f / (audioFs > 1.0f ? audioFs : 1.0f);
+  float rc = 1.0f / (2.0f * 3.14159265f * hpHz);
+  return rc / (rc + dt);
+}
+
+// ---------------------------------------------------------------------------
+// LISTENERS - the PATTERN decides what is a beat for it.
+//
+// One listener per port, plus one for the 240V controller. Each holds its own band
+// (which chain it reads), its own threshold, and whether it takes the half-way
+// beats. VU and EQ ports are NOT listeners: they are level-driven, so they cost
+// nothing here - which is why the number of chains stays small.
+//
+// This is the step that is "recalculated for each playlist item in real time": when
+// a timeline cell is adopted, rebuildListening() gives its port that cell's band,
+// threshold and multiplier.
+// ---------------------------------------------------------------------------
+struct BeatListener {
+  bool          active   = false;
+  int           chain    = 0;
+  float         thr      = 48.0f;   // the EFFECTIVE threshold, recomputed each frame
+  float         sensFrac = 0.35f;   // the fraction of the chain novelty peak (the slider)
+  int           mult     = 1;
+  uint32_t      lastSeq  = 0;
+  unsigned long lastReal = 0, prevReal = 0;
+  unsigned long ivMs     = 0;      // the beat period the clock runs at (smoothed)
+  unsigned long ivAlt    = 0;      // a candidate half/double period, awaiting agreement
+  unsigned long recent[24];        // the last 24 onset stamps: the period search needs them
+  uint8_t       recentN = 0, recentIdx = 0;
+  unsigned long pHist[3];          // the last 3 comb results: the period is their MEDIAN
+  uint8_t       pN = 0, pIdx = 0;
+  unsigned long clkNext  = 0;      // the NEXT beat the clock will fire (see listeningStep)
+  uint32_t      clkFires = 0;      // beats the CLOCK delivered (diagnostic)
+  bool          realPend = false;  unsigned long realAt = 0;
+  bool          subPend  = false;  unsigned long subAt  = 0;
+  unsigned long firePrev = 0, firePrevX = 0;   // interval logging
+  uint32_t      taken    = 0;                  // instrument: beats acted on
+  // PER-LISTENER INSTRUMENT (21 Oct). Observers only: nothing reads these to decide.
+  //   nReal real onsets this listener acted on | nSub half-way beats it took
+  //   nSwal Chase triggers its own debounce threw away (a DUPLICATE, attributed)
+  //   nAnti antifreeze pulses it acted on (Audio Detect OFF only)
+  uint32_t      nReal = 0, nSub = 0, nSwal = 0, nAnti = 0, nRec = 0;
+};
+BeatListener beatListen[NUM_PORTS + 1];        // [NUM_PORTS] = the 240V controller
+uint16_t g_chainOverflow = 0;                  // instrument: did the 4-chain cap bind?
+bool     beatFired240 = false;                 // the 240V controller acted this pass
+
+// ===========================================================================
+// THE BEAT INSTRUMENT (21 Oct 2026) - RAM ONLY, MEASUREMENT ONLY.
+//
+// WHY THIS EXISTS: /log.txt is deliberately DEAF while a show runs (a LittleFS
+// write is a flash erase that freezes both cores - the display stall), and the
+// heartbeat reports ONE listener while ten are listening, so there was no per-beat
+// record at all. Three observers fix that:
+//
+//   /onsets   one line per onset PER LISTENER, stamped as it happens (?since= &max=)
+//   /trace    band peak + novelty at 50 Hz, for the seconds around a beat
+//   /diag     pNthr pNtaken pNons pNsub pNswal pNanti pNlst, per listener
+//
+// IT CHANGES NO DECISION. Every line below writes into a ring, bumps a counter or
+// serves a request. No threshold, band, debounce, timer or motion value is read
+// differently because of it - which is what makes a before/after comparison on the
+// SAME TRACK meaningful. NO FLASH WRITE HAPPENS HERE and the show-guard in
+// logAppend is untouched.
+//
+// LOCK-FREE BY CONSTRUCTION: each ring has ONE writer, which fills its slot and THEN
+// advances the head; a reader copies [head-ring, head-1] and so never sees the slot
+// being written. The trace ring writer is the audio task on core 0 and its reader is
+// the render core, so that ordering - not a mux - is what makes it safe.
+//
+// PLACEMENT: defined here with the state they read and registered in setup() far
+// below, exactly like diagBeatFields - the /diag handler is 800 lines above the
+// listeners it reports on.
+// ===========================================================================
+#define ONS_RING  1024            // 24 B x 1024 = 24 KB: a slow drain must never overflow
+                                  // that is ~23 s of history and the sampler polls
+                                  // every 3 s, so even a failed poll is recoverable.
+#define TRC_RING  400             // 28 B x 400 = 11 KB = 8 s at 50 Hz.
+struct OnsRec {
+  uint32_t ms;                    // millis() when the listener acted on it
+  float    nov;                   // its chain novelty, ADC counts (what is compared)
+  float    thr;                   // THIS listener threshold, ADC counts
+  float    riseDb;                // FFT bass band rise, dB per window (the log rise=)
+  float    hpHz;                  // the ODF band in use: this listener lower edge
+  uint16_t mask;                  // bit i = listener i took this onset (0-9 strips, 10 = 240V)
+  uint8_t  kind;                  // 0 = real onset (sub beats are counted in /diag only)
+  // THE TRAILING EDGE AND THE PEAK (22 Oct): the user asked for the beat to be measured from the MID
+  // POINT of the beat rather than its leading edge, because instruments attack at different instants.
+  // Both edges are needed to test that, so the record now carries them.
+  uint32_t fallMs;                // when the novelty fell back to 40 per cent of the peak (0 = not yet)
+  float    peak;                  // the highest novelty this onset reached
+};
+OnsRec   onsRing[ONS_RING];
+volatile uint32_t onsHead = 0;    // TOTAL onsets ever recorded = the sampler cursor
+struct TrcRec {
+  uint32_t ms;
+  float    env;                   // chain 0 band peak this frame, ADC counts
+  float    nov;                   // chain 0 novelty this frame, ADC counts
+  float    slow;                  // g_bassSlow - the slow peak the Chase gate uses
+  float    floorDb;               // bandFloorBass - tracked quiet level, dB
+  float    lvl;                   // audioBassLvl - the 61-500 Hz level, 0..1
+  float    hpHz;                  // chain 0 lower edge (the ODF band)
+};
+TrcRec   trcRing[TRC_RING];
+volatile uint32_t trcHead = 0;    // the sampler cursor for /trace
+float    odfPeak0     = 0.0f;     // chain 0 peak for the frame just published
+volatile uint32_t g_odfFrames = 0;         // 10 ms frames published since boot
+volatile float    g_odfHz     = 0.0f;      // measured frames/s - MUST be ~100
+volatile uint32_t g_chaseSwallow = 0;      // Chase triggers the debounce threw away
+
+// Record one onset. Called from the render core only (listeningStep).\n// THE LISTENER IS PASSED AS VALUES, NOT AS A TYPE: the Arduino IDE hoists its own\n// generated function prototypes to the TOP of the file, above struct BeatListener, so\n// a signature mentioning BeatListener cannot compile (measured: "BeatListener does not\n// name a type" at this line). Values also make the observer read-only by construction.
+static inline void onsRecord(uint32_t stamp, uint16_t mask, int chain, float nov, float thr) {
+  uint32_t seq = onsHead;                  // fill, THEN advance: no reader ever sees a
+  OnsRec  &r   = onsRing[seq % ONS_RING];  // half-written slot
+  r.ms     = stamp;                        // the LEADING EDGE, not the crossing time
+  r.nov    = nov;
+  r.thr    = thr;
+  r.riseDb = bassRiseDb;
+  r.hpHz   = odfChain[chain].hpHz;
+  r.mask   = mask;
+  r.kind   = 0;
+  r.fallMs = 0;                           // not fallen yet: the frame loop fills this in
+  r.peak   = nov;                         // the peak so far
+  onsHead  = seq + 1;
+}
+
+// /onsets?since=<cursor>&max=<n> - the per-beat record, per listener, in RAM.
+void handleOnsets() {
+  // NO ReqMark HERE, DELIBERATELY. ReqMark calls reqPersist(), which WRITES NVS - a
+  // flash write, and an erase can freeze both cores (the display stall) - and it also
+  // overwrites the crash breadcrumb, so a polled instrument would destroy the record of
+  // what the user was actually doing. These two endpoints are read-only observers and
+  // are deliberately NOT "requests". REQ_ONSETS/REQ_TRACE stay in the enum so the
+  // endpoint names remain documented.
+  uint32_t head  = onsHead;                  // single writer: the render core
+  uint32_t since = server.hasArg("since") ? (uint32_t)strtoul(server.arg("since").c_str(), nullptr, 10) : 0;
+  int      maxN  = server.hasArg("max") ? constrain(server.arg("max").toInt(), 1, 150) : 60;   // SMALL on
+                                             // purpose: the reply is written from the RENDER loop, and
+                                             // a measured 100-line reply cost a 27 ms pass
+  uint32_t first = (head > ONS_RING) ? (head - ONS_RING) : 0;
+  uint32_t from  = (since > first) ? since : first;
+  // NO CLAMP ON `from` HERE. A leftover line did exactly that and it DEFEATED THE CURSOR:
+  // with since below head-ring it moved `from` forward to head-maxN, so every reply was
+  // just "the newest maxN entries" and the client cursor jumped to head - silently
+  // skipping the whole initial ring backlog (measured: 1,356 of 2,187 onsets lost in one
+  // run; another was 98% only because its rate happened to be low). The cap now applies
+  // to `n` below, so `next` is exactly what was sent.
+  // A SINGLE String REPLY, DELIBERATELY, AND SMALL. Two measured dead ends are recorded
+  // here so they are not tried again:
+  //   * 300 lines built with String::reserve() is ~25 KB on the RENDER core, and it caused
+  //     a TASK_WATCHDOG reset (bootReason 6, prevStage 7 = LED render);
+  //   * chunked streaming with 512 B sendContent() calls is 5-10x SLOWER on this
+  //     WebServer (measured: 3.5 KB took 2.4 s, and 400 lines never completed at all).
+  // So: one small String (<=150 lines, ~13 KB worst case), sent in a single write.
+  // NOTHING IS LOST IF THE REPLY IS CAPPED: `next` is the cursor to come back with, and
+  // the 1024-entry ring holds ~9 s of backlog even at the 10 onsets/s burst rate.
+  uint32_t n = head - from;
+  if (n > (uint32_t)maxN) n = (uint32_t)maxN;
+  uint32_t next = from + n;
+  String out;
+  out.reserve((unsigned)(n * 112 + 96));   // the line grew with fall= and mid=
+  char buf[144];
+  snprintf(buf, sizeof(buf), "# onsets since=%lu sent=%lu next=%lu head=%lu\n",
+           (unsigned long)from, (unsigned long)n, (unsigned long)next, (unsigned long)head);
+  out += buf;
+  for (uint32_t s = from; s < next; s++) {
+    const OnsRec &r = onsRing[s % ONS_RING];
+    snprintf(buf, sizeof(buf),
+             "ms=%lu fall=%lu mid=%ld mask=%03x nov=%.3f thr=%.3f rise=%.1f band=%.0f-250\n",
+             (unsigned long)r.ms,
+             // THE TRAILING EDGE AND THE MID POINT (22 Oct). fall is when the novelty fell back to 40 per
+             // cent of its peak; mid is the midpoint the user asked for. fall=0 means it had not fallen
+             // when the line was sent, and mid=-1 means the midpoint is not yet known.
+             (unsigned long)r.fallMs,
+             (long)((r.fallMs > r.ms) ? (long)(r.ms + (r.fallMs - r.ms) / 2) : -1L),
+             (unsigned)r.mask,
+             (double)r.nov, (double)r.thr, (double)r.riseDb, (double)r.hpHz);
+    out += buf;
+  }
+  server.send(200, "text/plain", out);
+}
+
+// /trace?since=<cursor>&max=<n> - band peak and novelty at 50 Hz.
+void handleTrace() {
+  // No ReqMark - see the note in handleOnsets: no NVS write, no breadcrumb pollution.
+  uint32_t head  = trcHead;
+  uint32_t since = server.hasArg("since") ? (uint32_t)strtoul(server.arg("since").c_str(), nullptr, 10) : 0;
+  int      maxN  = server.hasArg("max") ? constrain(server.arg("max").toInt(), 1, 150) : 60;   // see the note
+                                             // in handleOnsets: small replies, polled often
+  uint32_t first = (head > TRC_RING) ? (head - TRC_RING) : 0;
+  uint32_t from  = (since > first) ? since : first;
+  // No clamp on `from`: see the note in handleOnsets - the cap applies to `n` below.
+  // A SINGLE SMALL String, for the reasons recorded at /onsets. `next` is the cursor, so
+  // a capped reply loses nothing - the ring holds 400 x 40 ms = 16 s at 20 Hz.
+  uint32_t n = head - from;
+  if (n > (uint32_t)maxN) n = (uint32_t)maxN;
+  uint32_t next = from + n;
+  String out;
+  out.reserve((unsigned)(n * 96 + 80));
+  char buf[128];
+  snprintf(buf, sizeof(buf), "# trace since=%lu sent=%lu next=%lu head=%lu\n",
+           (unsigned long)from, (unsigned long)n, (unsigned long)next, (unsigned long)head);
+  out += buf;
+  for (uint32_t s = from; s < next; s++) {
+    const TrcRec &t = trcRing[s % TRC_RING];
+    snprintf(buf, sizeof(buf),
+             "ms=%lu env=%.1f nov=%.1f npk=%.1f peak=%.3f floor=%.1f lvl=%.3f band=%.0f-250\n",
+             (unsigned long)t.ms, (double)t.env, (double)t.nov, (double)odfChain[0].novPeak, (double)t.slow,
+             (double)t.floorDb, (double)t.lvl, (double)t.hpHz);
+    out += buf;
+  }
+  server.send(200, "text/plain", out);
+}
+
+// Find or allocate a chain for a band. Chain 0 IS the baseline band, so a request
+// that matches it SHARES it - the normal case, and why the usual count is one chain.
+// THE PARITY BANDS (22 Oct): two fixed extra chains, always live, whose only job is to say WHERE
+// BEAT 1 IS. The kick band is 40-250 Hz, which its own comment describes as "keeps the kick,
+// rejects snare/hat/vocal" - so the one signal that marks 2 and 4 was filtered out before the
+// detector ever saw it. That is precisely why the grid could sit on 1&3 or 2&4 with nothing to
+// tell them apart. These restore the missing evidence:
+//   chain 4  SNARE/CLAP  200-2000 Hz - in this music the backbeat is on 2 and 4
+//   chain 5  MID         1000-4000 Hz - chord and melody changes mark beat 1
+// Called after the listeners have taken their own chains, and idempotent.
+void odfAuxBands() {
+  if (ODF_CHAINS < 6) return;
+  odfChain[4].hpHz = 200.0f;  odfChain[4].lpHz = 2000.0f;
+  odfChain[5].hpHz = 1000.0f; odfChain[5].lpHz = 4000.0f;
+  for (int c = 4; c < ODF_CHAINS; c++) {
+    if (odfChain[c].used) continue;
+    odfChain[c].aLo = odfBandCoeff(odfChain[c].hpHz);
+    odfChain[c].aLp = 0.0f;                 // recomputed at the next frame boundary
+    odfChain[c].hp1 = odfChain[c].hp1Prev = odfChain[c].hp2 = odfChain[c].hp2Prev = 0;
+    odfChain[c].lp1 = odfChain[c].lp2 = odfChain[c].lp3 = odfChain[c].lp4 = 0;
+    odfChain[c].winMax = odfChain[c].prevWin = 0;
+    odfChain[c].used = true;
+    odfChainUse |= (1u << c);
+  }
+}
+
+int chainForBand(float hz) {
+  hz = constrain(hz, 20.0f, 100.0f);
+  if (fabsf(hz - odfChain[0].hpHz) < 0.5f) return 0;
+  for (int c = 1; c < ODF_CHAINS; c++)
+    if (odfChain[c].used && fabsf(hz - odfChain[c].hpHz) < 0.5f) return c;
+  for (int c = 1; c < ODF_CHAINS; c++) {
+    if (!odfChain[c].used) {
+      // Coefficient and state FIRST, `used` LAST: the audio core must never see a
+      // chain marked live before its coefficient is valid.
+      odfChain[c].hpHz = hz;
+      odfChain[c].aLo  = odfBandCoeff(hz);
+      odfChain[c].hp1 = odfChain[c].hp1Prev = odfChain[c].hp2 = odfChain[c].hp2Prev = 0;
+      odfChain[c].lp1 = odfChain[c].lp2 = odfChain[c].lp3 = odfChain[c].lp4 = 0;
+      odfChain[c].winMax = odfChain[c].prevWin = 0;
+      odfChain[c].used = true;
+      return c;
+    }
+  }
+  g_chainOverflow++;      // the cap bound - reported in the heartbeat if it ever does
+  return 0;               // fall back to the baseline band rather than fail
+}
+
+// (Re)configure the chain set from the bands actually in use. CHAIN 0 IS ALWAYS the
+// baseline band - the Frequency setting - which is what the 240V and any unchanged
+// pattern listens to, so the 15/10 response is never unavailable.
+void odfConfigureChains() {
+  odfChain[0].used = true;
+  odfChain[0].hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
+  odfChain[0].aLo  = odfBandCoeff(odfChain[0].hpHz);
+  odfChain[0].lpHz = ODF_LP_HZ;
+  odfAuxBands();                           // the two parity bands are always live (22 Oct)
+  for (int c = 1; c < ODF_CHAINS; c++) {
+    if (odfChain[c].used) continue;        // an in-use extra chain keeps its band
+    odfChain[c].hpHz = 0.0f;
+    odfChain[c].aLo  = 0.0f;
+  }
+  odfChainUse = 1;                         // chain 0 is always live
+  for (int c = 1; c < ODF_CHAINS; c++) if (odfChain[c].used) odfChainUse |= (1u << c);
+  odfAHi = 0.0f;                           // recomputed at the next frame boundary
+}
+
+// Give every listener its band, threshold and multiplier FROM ITS OWN PATTERN.
+void rebuildListening() {
+  // THE LISTENERS' CHAINS ARE CLEARED, BUT THE PARITY BANDS ARE NOT (22 Oct): chains 4 and 5 belong
+  // to the beat-1 discriminator, not to any listener, so they must survive this and stay live.
+  for (int c = 1; c < ODF_CHAINS && c < 4; c++) odfChain[c].used = false;
+  for (int c = 4; c < ODF_CHAINS; c++) odfChain[c].used = true;
+  odfConfigureChains();
+
+  for (int p = 0; p < NUM_PORTS; p++) {
+    BeatListener &L = beatListen[p];
+    LedPattern pat = (LedPattern)portCfg[p].pat;
+    // Only patterns that CONSUME ONSETS are listeners at all - decided by the table above, never
+    // here. The CHASE is a listener even with wrap OFF (its source is the level, but it takes
+    // onsets as the kick TRIGGER).
+    L.active = patternListensToBeats(portCfg[p].pat, portCfg[p].wrap);
+    if (!L.active) continue;
+    // THIS PATTERN'S OWN BAND. The three audio SOURCES are shared measurements, but the BAND of
+    // the Bass Beat source is a per-pattern setting (the Frequency row), so a listener asks for the
+    // chain matching its own band and shares it with any pattern using the same one.
+    // (This was briefly `L.chain = 0`, from misreading "the music output must remain constant".
+    // What must remain constant is the THREE SOURCES - see the table at the LedPattern enum - not
+    // the per-pattern band. The Frequency row is a real setting and must not be ignored.)
+    L.chain = chainForBand((float)portCfg[p].freqHz);
+    // THE THRESHOLD HAS A FLOOR (user, 19 Oct: "wrap on is still a mess of flashing lights in
+    // silence. it looks like its listening to noise rather than the bass beat"). At Bass
+    // Sensitivity maximum the formula gives ZERO, and a zero threshold fires on any novelty above
+    // zero - which in silence is the noise floor, so the metronome beat on nothing. Real band peaks
+    // measure 5-40 counts, so a floor of 5 still passes every musical beat while ignoring the room.
+    // THE THRESHOLD IS RELATIVE TO THE MUSIC NOW (see NOV_PEAK_DECAY). The slider is a real
+    // sensitivity: its right-hand end (sens 1) is the most sensitive, i.e. the smallest
+    // fraction of the music own novelty peak; its left-hand end is the strictest.
+    L.sensFrac = SENS_FRAC_MAX - (SENS_FRAC_MAX - SENS_FRAC_MIN) * constrain(portCfg[p].beatSens, 0.01f, 1.0f);
+    L.thr      = L.sensFrac * odfChain[L.chain].novPeak;   // recomputed each frame
+    L.mult  = (portCfg[p].mult > 1) ? 2 : 1;
+    L.lastSeq = odfChain[L.chain].seq;      // never act on a STALE frame
+  }
+
+  // The 240V controller: ALWAYS a listener, on the baseline band, with the global
+  // sensitivity - so it behaves exactly as it does today. Its own sensitivity and
+  // frequency arrive when we repeat this work on the 240V page.
+  BeatListener &R = beatListen[NUM_PORTS];
+  R.active = true;
+  R.chain  = 0;
+  R.sensFrac = SENS_FRAC_MAX - (SENS_FRAC_MAX - SENS_FRAC_MIN) * constrain(beatSens, 0.01f, 1.0f);
+  R.thr      = R.sensFrac * odfChain[0].novPeak;
+  R.mult   = (mult240V > 1) ? 2 : 1;
+  R.lastSeq = odfChain[0].seq;
+
+  // AND NOW PUBLISH WHAT THE LISTENERS ACTUALLY ASKED FOR.
+  //
+  // odfConfigureChains() at the TOP of this function runs BEFORE the listeners choose their chains,
+  // so the chain mask it computes still says "chain 0 only". The audio core SKIPS any chain that is
+  // not in odfChainUse - so a listener allocated chain 1 or higher read a chain that was never
+  // processed, its novelty stayed 0 for ever, and that port heard NOTHING.
+  //
+  // On the page every port shares chain 0, so this could not show up there. It showed up in the
+  // TIMELINE, where the cells' Frequency differs from the page's: "they play correctly in patterns,
+  // but do not respond to music at all in the timeline".
+  //
+  // The call is safe to repeat: it leaves an in-use chain's band alone and just recomputes the
+  // mask, so running it again here is exactly what was missing.
+  odfConfigureChains();
+}
+
+// THE BEAT INSTRUMENTS FOR /diag. Defined here, with the state it reads, and called from the /diag
+// handler above through a prototype - because a SHOW CANNOT BE LOGGED: logService() does not flush
+// while a show runs and /tail is a DELTA endpoint, so during a timeline the only live view is this.
+//   bOns/bActs/bFlips/bKicks  the counters since they were last reset by the log's beats line
+//   bNov/bThr                 chain 0's novelty (ADC counts) and its threshold
+//   p0thr                     port 0's own threshold - the per-PATTERN part
+static void diagBeatFields(JsonDocument &doc) {
+  doc["bOns"]    = (uint32_t)g_onsetReal;
+  doc["bActs"]   = (uint32_t)g_beatReal;
+  doc["bFlips"]  = (uint32_t)g_flipLED;
+  doc["bKicks"]  = (uint32_t)g_kickLED;
+  doc["bUse"]    = (uint32_t)odfChainUse;      // which chains are configured (1 = chain 0 only)
+  doc["bNov"]    = (double)odfNovelty;         // chain 0's last novelty, in ADC counts
+  doc["bThr"]    = (double)odfThr;             // chain 0's threshold
+  doc["p0pat"]   = portCfg[0].pat;
+  doc["p0sens"]  = (double)portCfg[0].beatSens;
+  doc["p0act"]   = beatListen[0].active ? 1 : 0;
+  doc["p0thr"]   = (double)beatListen[0].thr;
+  doc["p0taken"] = (uint32_t)beatListen[0].taken;
+  doc["p1thr"]   = (double)beatListen[1].thr;
+  // WHAT EACH PORT IS ACTUALLY RUNNING, plus what the current row's cells are CALLED. These two
+  // proved that a "Chase Green x2" item was playing as MOVING DOT: an unmapped item name resolves
+  // to no pattern at all and renderBranchFor() degrades it, so no port was ever a Chase and
+  // stepChase() never ran - bKicks stayed 0 while bOns climbed.
+  doc["p1pat"]   = portCfg[1].pat;
+  doc["p2pat"]   = portCfg[2].pat;
+  doc["p3pat"]   = portCfg[3].pat;
+  doc["c0id"]    = tlData[tlRow][1].id;
+  doc["c1id"]    = tlData[tlRow][2].id;
+  doc["c2id"]    = tlData[tlRow][3].id;
+  // FRAME HITCH FIGURES, in microseconds, worst case since the last read. Read these right after a
+  // timeline row change: fSeqUs names a row-change stall, fLedUs a transmit stall, and fLoopUs a
+  // stall that hit the whole pass - which is what a FLASH ERASE looks like (it freezes both cores).
+  doc["fLoopUs"] = g_maxLoopUs;
+  doc["fSeqUs"]  = g_maxSeqUs;
+  doc["fLedUs"]  = g_maxLedUs;
+  // ---- PER-LISTENER INSTRUMENT (21 Oct) ------------------------------------------
+  // Observers only. The point is ATTRIBUTION. NOTE g_beatExtra is NOT a duplicate
+  // count: it is the half-way beats the Beat Multiplier ASKS FOR (pNsub below). The
+  // only real duplicate is a Chase trigger its own debounce threw away - pNswal.
+  // pNlst is ms since that listener last real onset, so the beat period stays
+  // readable per listener even if a /onsets poll fails and the ring wraps.
+  {
+    char k[12];
+    unsigned long nowMs = millis();
+    for (int p = 0; p < NUM_PORTS; p++) {
+      BeatListener &L = beatListen[p];
+      snprintf(k, sizeof(k), "p%dthr", p);  doc[k] = (double)L.thr;
+      snprintf(k, sizeof(k), "p%dact", p);  doc[k] = (uint32_t)(L.active ? 1 : 0);
+      snprintf(k, sizeof(k), "p%dch",  p);  doc[k] = (int)L.chain;
+      snprintf(k, sizeof(k), "p%dons", p);  doc[k] = (uint32_t)L.nReal;
+      snprintf(k, sizeof(k), "p%dtak", p);  doc[k] = (uint32_t)L.taken;
+      snprintf(k, sizeof(k), "p%dsub", p);  doc[k] = (uint32_t)L.nSub;
+      snprintf(k, sizeof(k), "p%dswl", p);  doc[k] = (uint32_t)L.nSwal;
+      snprintf(k, sizeof(k), "p%drec", p);  doc[k] = (uint32_t)L.nRec;
+      snprintf(k, sizeof(k), "p%dant", p);  doc[k] = (uint32_t)L.nAnti;
+      snprintf(k, sizeof(k), "p%dlst", p);  doc[k] = (uint32_t)(L.lastReal ? (nowMs - L.lastReal) : 0);
+    }
+    doc["p240thr"] = (double)beatListen[NUM_PORTS].thr;
+    doc["p240ons"] = (uint32_t)beatListen[NUM_PORTS].nReal;
+    doc["p240tak"] = (uint32_t)beatListen[NUM_PORTS].taken;
+  }
+  // THE INSTRUMENT OWN HEALTH, so no measurement has to be trusted blindly.
+  doc["odfHz"]   = (double)g_odfHz;               // 10 ms frames/s - must be ~100
+  doc["novPk"]   = (double)odfChain[0].novPeak;   // the adaptive threshold driver: the
+                                                  // threshold is a fraction of this
+  doc["p0frac"]  = (double)beatListen[0].sensFrac;
+  doc["p0iv"]    = (uint32_t)beatListen[0].ivMs;      // the beat period the clock runs at
+  doc["p0clk"]   = (uint32_t)beatListen[0].clkFires;   // beats the CLOCK delivered
+  // ONE PER MUSIC BEAT, NOT ONE PER CLOCK BEAT (21 Oct). It matches p0clk only while music is
+  // present; in silence the clock keeps running by design (the dot must still cross the strip)
+  // but the flash is suppressed. A gap between io48 and p0clk is therefore the music gate
+  // working, not a fault - it was misread as one until it was measured against the level.
+  doc["io48"]    = (uint32_t)g_io48Beats;
+  // THE PIN ITSELF, so "IO48 is dark" can be diagnosed from data: led48 = 1 means the pin is
+  // being driven high right now (a flash is in progress), 0 means it is low.
+  doc["led48"]   = (uint32_t)(digitalRead(POWER_LED_PIN) ? 1 : 0);
+  doc["odfFr"]   = (uint32_t)g_odfFrames;
+  doc["odfLo"]   = (double)odfChain[0].hpHz;      // the ODF band in use ...
+  doc["odfHi"]   = (double)ODF_LP_HZ;             // ... its top edge is a code constant
+  doc["odfUse"]  = (uint32_t)odfChainUse;
+  doc["onsHead"] = (uint32_t)onsHead;             // the /onsets cursor
+  doc["trcHead"] = (uint32_t)trcHead;             // the /trace cursor
+  doc["chSwal"]  = (uint32_t)g_chaseSwallow;      // debounce rejections, all ports
+  doc["fHitch"]  = g_hitchCount;
+  g_maxLoopUs = 0; g_maxSeqUs = 0; g_maxLedUs = 0; g_hitchCount = 0;
+  // THE STALENESS PAIR. fStaleMs is the worst case in ms and fStaleP names the port. A large
+  // fStaleMs with a small fLoopUs means the dot STOPPED rather than the CPU stalling - and if it
+  // is the Moving Dot that stops, the erode/death/restart path is the place to look, not the CPU.
+  doc["fStaleMs"] = g_staleMaxMs;
+  doc["fStaleP"]  = (int32_t)g_stalePort;
+  doc["fStaleDk"] = (int32_t)g_staleDark;   // 1 = that port was DARK: not a CPU stall at all
+  doc["fStaleRw"] = (int32_t)g_staleRow;    // which row the worst stall happened in (1-based)
+  // WHY A KICK DID NOT LAND: armed but blocked by the level, versus never armed.
+  doc["kArmed"] = g_kickArmed;
+  doc["kZero"]  = g_kickZero;
+  doc["kMiss"]  = g_kickMiss;
+  // PORT SYNC SNAPSHOT for ports 0-3: position, direction, chase accumulator (hundredths of a
+  // pixel) and ms since that port last stepped. Two ports on the SAME entry should agree on all
+  // four; comparing sA0 with sA1 and sG0 with sG1 shows a drift in the tenths of a pixel.
+  doc["sP0"] = g_syncPos[0]; doc["sP1"] = g_syncPos[1]; doc["sP2"] = g_syncPos[2]; doc["sP3"] = g_syncPos[3];
+  doc["sD0"] = g_syncDir[0]; doc["sD1"] = g_syncDir[1]; doc["sD2"] = g_syncDir[2]; doc["sD3"] = g_syncDir[3];
+  doc["sA0"] = g_syncAcc[0]; doc["sA1"] = g_syncAcc[1]; doc["sA2"] = g_syncAcc[2]; doc["sA3"] = g_syncAcc[3];
+  doc["sG0"] = g_syncAge[0]; doc["sG1"] = g_syncAge[1]; doc["sG2"] = g_syncAge[2]; doc["sG3"] = g_syncAge[3];
+  // PAIR DIVERGENCE (port 0 vs port 1), worst since boot. A value of roughly the dot's SIZE means
+  // one port took a kick the other did not; small values are just the fractional phase.
+  doc["pairDiff"] = g_pairDiff;
+  doc["pairA"]    = g_pairA;
+  doc["pairB"]    = g_pairB;
+  doc["pairRow"]  = g_pairRow;
+  // THE PROOF PAIR. st0/st1 are the pixels each port has advanced: two ports fed identical
+  // parameters MUST agree. v0xx/v1xx are the parameters that were actually APPLIED to each port, so
+  // "the cells are identical" can be checked rather than assumed - the difference between two
+  // identical cells should be nothing at all, and if a parameter differs the cause is the DATA, not
+  // a code exception.
+  doc["st0"] = g_steps[0]; doc["st1"] = g_steps[1];
+  // FRAMES VISIBLE per port: st/fv is the real comparison. If the RATIOS match, the two ports are
+  // behaving identically and any difference in the raw step count is time spent DARK (an empty
+  // cell), which is data. If the ratios differ, the asymmetry is in the code.
+  doc["fv0"] = g_framesVis[0]; doc["fv1"] = g_framesVis[1];
+  doc["v0sp"] = (double)portCfg[0].speed;      doc["v1sp"] = (double)portCfg[1].speed;
+  doc["v0sz"] = portCfg[0].size;               doc["v1sz"] = portCfg[1].size;
+  doc["v0qt"] = portCfg[0].qty;                doc["v1qt"] = portCfg[1].qty;
+  doc["v0wr"] = portCfg[0].wrap ? 1 : 0;       doc["v1wr"] = portCfg[1].wrap ? 1 : 0;
+  doc["v0ef"] = portCfg[0].effect;             doc["v1ef"] = portCfg[1].effect;
+  doc["v0ds"] = portCfg[0].distance;           doc["v1ds"] = portCfg[1].distance;
+  doc["v0mo"] = (double)portCfg[0].momentum;   doc["v1mo"] = (double)portCfg[1].momentum;
+  doc["v0bs"] = (double)portCfg[0].beatSens;   doc["v1bs"] = (double)portCfg[1].beatSens;
+  doc["v0fq"] = portCfg[0].freqHz;             doc["v1fq"] = portCfg[1].freqHz;
+  // The APPLIED multiplier and the traverse length the metronome is actually using, so a
+  // multiplier that reaches the board but not the motion (the old fault) cannot hide again.
+  doc["v0mu"] = portCfg[0].mult;                doc["v1mu"] = portCfg[1].mult;
+  doc["travIv"] = (uint32_t)g_travIv;           // ms per crossing: two beats, or one at 2x
+  // THE IDLE PACE, so a wrong crossing time cannot be argued about: idleNow says whether the
+  // idle branch is running at all, idleMs is the crossing time the Speed slider asks for, and
+  // travN counts traverses started - far above 1/crossing means they are being re-started.
+  doc["idleNow"] = chaseIdleNow(millis()) ? 1 : 0;
+  doc["idlePace"] = g_idlePace ? 1 : 0;   // 1 = the period came from the Speed slider
+  doc["idleMs"]  = (uint32_t)chaseIdleMs();
+  doc["travN"]   = g_travStarts;
+  // ---- MOVING DOT TELEMETRY, EVERY PORT (user, 20 Oct) ---------------------------------------
+  // The Moving Dot fault is INTERMITTENT: "the moving dots did not stall - I don't understand why
+  // the fault was there before but not now". A hand-timed poll cannot catch it, so every port
+  // reports on demand the numbers that decide it:
+  //   pat   the pattern that port is REALLY running (a port running the Chase stops between kicks)
+  //   sp    the live speed - the step interval is sp x 1000 ms, so 1.0 means one pixel a second
+  //   sz/ef/ds/mo   the values the port is actually holding
+  //   lost/dot      the EROSION STATE. mdLost is never cleared by the timeline, and dot is the
+  //                 length actually DRAWN - dot=0 is an invisible dot, which looks exactly like a
+  //                 stopped one, and the watchdog below flags it.
+  //   dead  mdExpiredAt: 1 = it exploded and is waiting for its 3 s restart
+  //   cell  the id of the cell that owns the port ("-" = the page owns it)
+  //   gs    the pixels that port has ADVANCED - two readings apart answer "is it moving?"
+  //   fre   how many times the motion restart has re-pinned this port
+  for (int p = 0; p < NUM_PORTS; p++) {
+    const TlItem &cc = tlData[tlRow][p + 1];
+    char k[8];  snprintf(k, sizeof(k), "m%d", p + 1);
+    char b[200];
+    snprintf(b, sizeof(b),
+             "pat=%d sp=%.4f sz=%d ef=%d ds=%d mo=%.2f lost=%d dot=%d dead=%d fre=%lu cell=%s gs=%lu pos=%d dir=%d dark=%d age=%lu",
+             portCfg[p].pat, (double)portCfg[p].speed, portCfg[p].size, portCfg[p].effect,
+             portCfg[p].distance, (double)portCfg[p].momentum,
+             (int)mdLost[p], mdDotLen(p), (mdExpiredAt[p] != 0) ? 1 : 0,
+             (unsigned long)g_framesRestart[p], cc.used ? cc.id : "-",
+             (unsigned long)g_steps[p],
+             ledPosArr[p], ledDirArr[p], portCfg[p].dark ? 1 : 0,
+             (unsigned long)(millis() - g_lastMoveMs[p]));
+    doc[k] = b;
+  }
+  doc["selPat"] = activePatternLED;
+  doc["tlRowCell0"] = tlData[tlRow][11].used ? tlData[tlRow][11].id : "-";
+  // Deliberately NOT reset: see the note where they are declared. A transition stall is over in a
+  // second and a hand-timed poll cannot catch it, so they persist until the board is reset.
+}
+
+// The per-pattern ACTION - the only place a beat moves anything.
+static void actForListener(int i) {
+  if (i < NUM_PORTS) {
+    // MOVING DOT AND KNIGHT RIDER: a beat REVERSES the dot, as it always has. The Chase is not
+    // here at all - its beats go through actOnBeat, and its FOOTBALL is level-driven, not
+    // beat-driven. No pattern shares another's effect.
+    if (portCfg[i].pat == LP_MOVING_DOT || portCfg[i].pat == LP_KNIGHT_RIDER)
+      ledDirArr[i] = -ledDirArr[i];
+    // THE MOVING DOT EFFECT. The beat is the trigger: every one sheds debris, and every TENTH
+    // also costs the dot a whole pixel. Knight Rider has no effect yet.
+    if (portCfg[i].pat == LP_MOVING_DOT) mdShed(i);
+    else if (portCfg[i].pat == LP_CENTER_OUT)
+      ledExplArr[i] = 0;
+    g_flipLED++;
+  } else {
+    if (activePattern240V == "moving_dot" || activePattern240V == "knight_rider")
+      dotDirection = -dotDirection;
+    beatFired240 = true;
+    g_flip240++;
+  }
+}
+
+// ONE PLACE decides what a beat DOES, because two rules cut across the patterns: the Chase
+// is timed rather than flipped, and a minimum sensitivity means the music has no effect.
+static void actOnBeat(int i, unsigned long now, bool fromAntifreeze, bool isSub) {
+  // IO48 FOLLOWS THE BEAT THAT IS ACTED ON (user, 21 Oct): "make IO48 flash for each
+  // beat detected (and acted upon), so for chase this would be each time it reaches the
+  // end of the strip". The flash is therefore driven by the ACTION, and because the action
+  // is the MUSIC beat rather than any pattern timer, every pattern shows the same thing:
+  // one flash per beat that actually moves the lights. A SUB-beat and an antifreeze pulse
+  // do not count, because the music did not produce them.
+  // (the IO48 flash moved down to the ACTION: see the note in actForListener below)
+  if (i < NUM_PORTS && isChasePat(portCfg[i].pat)) {
+    // A REAL beat times the metronome. A SUB-beat (the half-way one) is NOT a beat for this
+    // purpose - it would reverse the traverse twice per beat - so it is ignored here.
+    //
+    // With wrap OFF there is NO beat action at all: the football is LEVEL-driven (the roll from
+    // Speed plus the bass kicks), so the antifreeze no longer nudges it either - the roll already
+    // keeps the display alive. The antifreeze still drives the wrap-ON metronome, where it stands
+    // in for a beat that never came.
+    // THE CLOCK DRIVES THE METRONOME NOW (see the note in listeningStep): the onset only
+    // triggers it while the clock has no period yet, so a silent start still moves.
+    bool clocked = (i < NUM_PORTS) && beatListen[i].ivMs >= 250 && beatListen[i].clkNext != 0;
+    if (portCfg[i].wrap && !isSub) {
+      if (!clocked) chaseBeat(i, now);
+    }
+    else if (portCfg[i].wrap && fromAntifreeze) chaseBeat(i, now);
+    // THE HYBRID, wrap OFF only: the hit is SHARED now - see g_chaseOnsetHit in the render loop.
+    // Nothing is armed here any more, so no per-port state can be left behind or wiped unevenly.
+    return;
+  }
+  if (!beatActionAllowed(i)) return;     // minimum sensitivity: the timer takes over
+  // IO48 is NOT driven here: it comes from the CLOCK beat only. Set here, it flashed for
+  // every pattern action - and the always-listening 240V listener acts on every ONSET, so
+  // the LED ran at four times the beat rate (measured: io48 630 against p0clk 158).
+  actForListener(i);
+}
+
+// THE LISTENING STEP, once per render pass. Each listener compares its OWN chain's
+// published novelty against its OWN threshold, with its own minimum gap, and then
+// acts on its own pattern after the display offset.
+// THE BEAT PERIOD BY COMB SEARCH. MEASURED (Fisher - Losing It, 125 BPM): the onset
+// stream carries THREE spacings at once - 0-199 ms (the kick firing on its own body),
+// 200-299 (the OFF-BEAT) and 400-619 (the beat) - and their strengths do not reliably
+// separate them (one run gave 132 for the beat against 69 for the off-beat, another gave
+// 69 against 72). No single-gap statistic survives that: the median swung between 252
+// and 572 ms. So the period is FOUND, not averaged: every plausible period in a musical
+// band is scored by how many of the recent onsets land on a grid of that period, and the
+// best-scoring one wins (the shortest, on a tie). Confining the search to 350-750 ms
+// (80-171 BPM) is what makes it robust, because ALL THREE artefacts fall outside it: the
+// off-beat at about half, the double-fire below 200 ms, and a two-beat lock at about
+// double. The true beat sits in the middle of the band and scores highest.
+static unsigned long beatPeriodComb(const unsigned long *r, uint8_t n) {
+  if (n < 5) return 0;      // 5, not 8: a new track locks in about 2 s
+  unsigned long oldest = r[0], newest = r[n - 1];
+  unsigned long bestP = 0;
+  uint16_t best = 0;
+  // TWO STAGES: a coarse 10 ms sweep to find the region, then a 2 ms sweep around the
+  // winner. MEASURED: a single 2 ms sweep of all 201 candidates, run once per listener, cost
+  // 17-33 ms per render pass (fLoopUs 33,428 us, fHitch 9) - a visible stall, and one that
+  // corrupted the very period it was computing (p0iv read 456 against a true 461.5). 41 + 11
+  // candidates cost about a tenth of that, and the answer is still exact to 2 ms.
+  for (int stage = 0; stage < 2; stage++) {
+    unsigned long from = (stage == 0) ? 350UL : (bestP > 10UL ? bestP - 10UL : 350UL);
+    unsigned long to   = (stage == 0) ? 750UL : (bestP + 10UL < 750UL ? bestP + 10UL : 750UL);
+    unsigned long step = (stage == 0) ? 10UL : 2UL;
+    for (unsigned long P = from; P <= to; P += step) {
+      uint16_t s = 0;
+      for (unsigned long g = newest; (g + P) > oldest; g -= P) {   // grid back from the newest
+        for (uint8_t i = 0; i < n; i++) {
+          unsigned long d = (r[i] > g) ? (r[i] - g) : (g - r[i]);
+          if (d <= (P / 10)) s++;
+        }
+        if ((newest - g) > 4000UL) break;                          // never look further back
+      }
+      if (s > best) { best = s; bestP = P; }
+    }
+    if (bestP == 0) return 0;
+  }
+  return (best >= 4) ? bestP : 0;
+}
+
+// IS THE METRONOME IDLE? (21 Oct) True when the detector has heard nothing for 1.5 s - the same
+// rule the clock already uses to drop to its gentle pace. While idle the dot crosses the strip at
+// the Speed slider's rate instead of following the beat. Placed here because it reads beatListen.
+// THE PACE IN FORCE, in ms, for ONE traverse (22 Oct). This is the ONE place it is decided, so the
+// clock's published length, the traverse's fixed end and the mid-traverse re-time cannot disagree:
+//   IDLE (no beat detected) -> the Speed slider's crossing time (0 when stopped)
+//   MUSIC                  -> ONE beat with the Beat Multiplier ON, TWO with it OFF
+static inline unsigned long chasePaceRaw() {
+  unsigned long idle = chaseIdleMs();
+  if (g_idlePace && idle > 0) return idle;
+  unsigned long per = beatListen[0].ivMs;
+  if (per >= 120 && per <= 1200) return (beatListen[0].mult > 1) ? per : (2UL * per);
+  return idle ? idle : (per ? per : 500);      // an odd period: the idle pace, or the period itself
+}
+
+// THE PACE GOVERNOR (22 Oct). The pace only controls the DISPLAY AREA - with the reversal driven by
+// the beat it can no longer affect the TIMING - so it is safe to take several beats to get it right.
+// That is what makes this work, and it is also what gives the tempo estimate and the beat classifier
+// time to settle before the dot commits to them.
+//   WARM-UP: for the first PACE_WARMUP_BEATS after music arrives the target stays at the SLIDER's
+//   pace, so the dot eases in at a speed it already knows rather than jumping to a tempo estimate
+//   that is still warming up.
+//   RAMP: after that the target becomes the beat-derived pace and the pace closes at most
+//   PACE_RAMP_PCT of the remaining gap per beat - about four beats to arrive, and never a lurch.
+//   LOSS: when the beat is lost the same ramp carries it back down to the slider's pace, so a quiet
+//   patch decelerates instead of snapping.
+// The number of steady beats before the clock is trusted to drive the crossing and to reverse the dot.
+#define SETTLED_BEATS     4
+#define PACE_WARMUP_BEATS 4
+#define PACE_RAMP_PCT    35
+static unsigned long g_paceNow    = 0;    // the pace actually in use
+static unsigned long g_paceTarget = 0;    // where it is heading this beat
+static uint32_t      g_paceClk    = 0;    // the clock beat the ramp last advanced on
+static uint32_t      g_paceLastClk = 0;   // when the ramp itself last stepped
+static uint32_t      g_musicBeats = 0;    // beats since music arrived - the warm-up counter
+static bool          g_paceWasIdle = true;
+
+// CLAMP THE BEAT PERIOD (22 Oct). L.ivMs drives L.clkNext += L.ivMs, so a bad value makes the clock fire
+// continuously, starve the display and leave the strip DARK - which is exactly what happened when the
+// period was assigned unchecked. This bound is applied AT every musical assignment, rather than trusted
+// to the tempo search, because the display's life depends on it. 120 ms is 500 BPM and 1200 ms is
+// 50 BPM, so nothing musical is lost.
+// SEE THE NOTE ABOVE THE CALL SITES: a period under MIN_BEAT_MS is the half-beat and is doubled.
+#define MIN_BEAT_MS 350
+static inline unsigned long fixHalfBeat(unsigned long ms) {
+  if (ms == 0) return 0;
+  while (ms < MIN_BEAT_MS && ms < 4000) ms *= 2;
+  return ms;
+}
+
+// SEE THE NOTE ABOVE fixHalfBeat, and the tracker below.
+#define FIT_N 4
+static unsigned long g_fitMs[FIT_N] = {0, 0, 0, 0};   // the window: the last accepted beat times
+static uint8_t       g_fitI = 0;                      // the write cursor
+static uint8_t       g_fitN = 0;                      // how many are in the window
+static unsigned long g_fitPer = 0;                    // the fitted period: their mean interval
+static uint32_t      g_fitAccept = 0, g_fitReject = 0;
+// THE BEAT WIDTH (23 Oct), measured from the ENVELOPE. A real beat has width; a transient is narrow,
+// which is how a x2/x4/x8 lock on transients is told apart from a lock on the beat.
+static float         g_widPeak = 0.0f;      // the envelope peak of the onset being measured
+static unsigned long g_widStart = 0;        // its leading edge
+static unsigned long g_widLast = 0;         // the width of the most recent complete beat, ms
+static unsigned long g_widAvg = 0;          // the running mean width, used to place the mid point
+// BEAT 1 BY WIDTH. Beat 1 is the heaviest beat, so the width votes for it. Only starts once the beat is
+// locked, as instructed. The bar position comes from the CLOCK's index, so it holds through quiet patches.
+static unsigned long g_beatIdx = 0;          // accepted beats since the lock, gives each beat a bar position
+static float g_barWid[4] = {0,0,0,0};        // summed width per bar position
+static unsigned long g_barN[4] = {0,0,0,0};  // how many beats contributed to each position
+static long  g_beat1 = -1;                   // 0..3 once known, -1 while still deciding
+static float g_b1conf = 0.0f;                // how clearly the winner beats the runner-up
+static uint32_t      g_widN = 0;
+static float         g_conf = 0.0f;         // the current fit confidence, 0..1
+
+// Called on a detected beat candidate. Accepts it only if it lands inside the window predicted from the
+// current fit; then refits the tempo over the window - "listen to one new beat and drop the last".
+// THE HARD BPM GATE (23 Oct). The user: "the BPM should always fall within a known range of disco music,
+// namely 95-135". A period outside 444..632 ms is not a disco beat and is refused outright, whatever the
+// tracker currently believes - which is what lets it correct a wrong lock instead of sealing it in.
+#define BPM_MIN 95.0f
+#define BPM_MAX 135.0f
+static inline bool periodInDiscoRange(unsigned long ms) {
+  if (ms < 444 || ms > 632) return false;
+  float bpm = 60000.0f / (float)ms;
+  return (bpm >= BPM_MIN && bpm <= BPM_MAX);
+}
+
+// THE WIDTH CONFIDENCE: a narrow beat is a transient, not a beat. Scaled so 120 ms or more scores 1.0.
+static inline float widthConfidence(unsigned long widthMs) {
+  if (widthMs == 0) return 0.35f;             // not measured yet: neither trusted nor dismissed
+  float w = (float)widthMs / 120.0f;
+  if (w > 1.0f) w = 1.0f;
+  return 0.2f + 0.8f * w;
+}
+
+// THE BPM PRIOR from the bell curve - a NUDGE ONLY, never a filter, because the user's own tracks sit at
+// 133.6 BPM, outside the 115-125 band. It can move the score by at most 15 per cent.
+static inline float bpmPrior(unsigned long ms) {
+  float bpm = 60000.0f / (float)ms;
+  float d = (bpm - 120.0f) / 6.0f;
+  float v = expf(-0.5f * d * d);
+  return 0.85f + 0.15f * v;
+}
+
+static void fitBeatStep(unsigned long stamp, unsigned long per) {
+  if (per < 120 || per > 1200) return;
+  unsigned long win = per / 4;                        // the window: a quarter of a beat either side
+  if (g_fitPer > 0 && g_fitN > 0) {
+    unsigned long last = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
+    unsigned long pred = last + g_fitPer;             // WHERE THE NEXT BEAT IS EXPECTED
+    unsigned long d = (stamp > pred) ? (stamp - pred) : (pred - stamp);
+    if (d > win) { g_fitReject++; return; }           // nothing should be there: ignored outright
+  }
+  g_fitMs[g_fitI] = stamp;
+  g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
+  if (g_fitN < FIT_N) g_fitN++;
+  g_fitAccept++;
+  if (g_fitN >= 2) {
+    unsigned long sum = 0;
+    for (uint8_t k = 1; k < g_fitN; k++) {
+      unsigned long a = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1 - k) % FIT_N)];
+      unsigned long b = g_fitMs[(uint8_t)((g_fitI + FIT_N - k) % FIT_N)];
+      sum += (a - b);
+    }
+    g_fitPer = sum / (unsigned long)(g_fitN - 1);
+    // THE HARD GATE: a fitted period outside the disco range is not a beat and is not used at all.
+    if (!periodInDiscoRange(g_fitPer)) { g_fitReject++; g_fitPer = 0; g_fitN = 0; g_fitI = 0; return; }
+    // THE CONFIDENCE: the measurement first, the prior only as a nudge.
+    // A HIGH REJECTION RATE IS PENALISED: a correct lock should reject about half the onsets (beats
+    // against off-beats), so much more than that means it is taking only every other beat - which is the
+    // half-speed fault exactly, and it shows up here without needing to know which beat is beat 1.
+    {
+      unsigned long tot = g_fitAccept + g_fitReject;
+      float rej = (tot > 0) ? ((float)g_fitReject / (float)tot) : 0.5f;
+      float rejScore = 1.0f;
+      if (rej > 0.65f)      rejScore = 0.35f;
+      else if (rej > 0.55f) rejScore = 0.75f;
+      float spread = 1.0f;
+      if (g_fitN >= 3) {
+        float mn = 1e9f, mx = 0.0f;
+        for (uint8_t k = 1; k < g_fitN; k++) {
+          float iv = (float)(g_fitMs[(uint8_t)((g_fitI + FIT_N - 1 - k) % FIT_N)] -
+                             g_fitMs[(uint8_t)((g_fitI + FIT_N - k) % FIT_N)]);
+          if (iv < mn) mn = iv;
+          if (iv > mx) mx = iv;
+        }
+        if (mx > 0.0f) spread = 1.0f - ((mx - mn) / mx);
+        if (spread < 0.3f) spread = 0.3f;
+      }
+      g_conf = widthConfidence(g_widLast) * rejScore * spread * bpmPrior(g_fitPer);
+    }
+  }
+}
+
+// ==== BASS BEAT PROTECTED REGION - END ====

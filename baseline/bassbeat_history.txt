@@ -1,0 +1,3 @@
+# BASS BEAT PROTECTED REGION - append only. One line per authorised change.
+# date                hash                                                              reason
+2026-10-23 11:56:38  1BD4CB20C595AC1B0901B112A75E5BF1CB11490336D4DB269BF8087258B90AF6  INITIAL FREEZE. Beat declared FINISHED by the user (baseline-hitthatperfectbeat-2026-10-23). Frozen BEFORE the beat-1/bar-detection removal begins, so any accidental damage to the beat is detectable.

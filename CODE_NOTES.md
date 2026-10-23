@@ -9,6 +9,60 @@ to justify belongs here, with a matching note in the code saying where to look.
 
 ---
 
+## RULE 10 — THE BASS BEAT GUARD (23 Oct 2026)
+
+**The beat is finished and is now protected in code.** Rule 10 of `Rules.docx`:
+
+> "UNDER NO CIRCUMSTANCES ARE YOU ALLOWED TO ALTER, CHANGE, DELETE, ADD OR DO ANYTHING TO THE AUDIO
+> SETTINGS. THIS WAS A HARD WON VICTORY OF CODING AND MUST NOT BE TOUCHED IN ANY WAY."
+
+### What is protected, and what is not
+
+The **BASS BEAT signal** is the region of `WIFI_LightShow.ino` between the two sentinels:
+
+```
+// ==== BASS BEAT PROTECTED REGION - START - DO NOT EDIT BELOW THIS LINE (RULE 10) ====
+// ==== BASS BEAT PROTECTED REGION - END ====
+```
+
+It contains the onset detector (the time-domain ODF chains, `ODF_HP_HZ`/`ODF_LP_HZ`, the adaptive
+threshold) and the fitted clock (`fitBeatStep`). **That is the whole of what makes the light flash in
+time with the music.** It is frozen.
+
+**BASS LEVEL (`AUD_BASS_LEVEL`) and FULL (`AUD_FULL`) are NOT protected** and remain open, because
+they are not finished: the FFT band levels and the EQ live outside the sentinels.
+
+### The three signals, itemised
+
+| Signal | Source | Consumers | Status |
+|---|---|---|---|
+| **BASS BEAT** `AUD_BASS_BEAT` | Time-domain ODF chains + the fitted clock | Moving Dot, Knight Rider, Explosion, Chase Wrap ON | **FINISHED — frozen by Rule 10** |
+| **BASS LEVEL** `AUD_BASS_LEVEL` | FFT band 61–500 Hz (`audioBassLvl`) | Chase Wrap OFF (the football), VU meters | Open |
+| **FULL** `AUD_FULL` | Whole-spectrum FFT (`audioLevel`) | EQ (`advanceEqBars`) | Open |
+
+### How the guard works
+
+- `wls_beatguard.ps1` hashes the region and compares it with the frozen hash. On a mismatch it prints
+  the exact changed lines, quotes Rule 10, and exits 1.
+- `wls_build.ps1` runs the guard **first** and **REFUSES TO BUILD** if it fails. `-AllowBeatChange`
+  is the only way past, and it has to be typed deliberately.
+- `baseline/bassbeat_region.txt` holds the frozen text; `baseline/bassbeat_history.txt` is
+  **append-only** and records every authorised change with a reason. Both are in git.
+- Verified 23 Oct: a tamper (40.0 → 41.0 Hz) was caught, named line-by-line, and the build refused.
+
+**The guard is a tripwire, not a lock.** It lives beside the code it protects, so an agent that edits
+the sketch could also edit the guard. What it cannot do quietly is change git history: the append-only
+history file and the region text make any change a visible diff.
+
+### To change the beat — the only correct procedure
+
+1. Get the user's authorisation **in writing** (Rule 10 has no permission clause).
+2. Make the change.
+3. `wls_beatguard.ps1 -Freeze -Reason "what changed and who authorised it"` — this appends to the
+   history. **Never** edit the history or the hash by hand.
+
+---
+
 ## 1. Audio: two independent paths (do not confuse them)
 
 | Path | How | Used by |

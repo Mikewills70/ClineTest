@@ -13,6 +13,11 @@
 # RAM was the last known-good figure, and a different fqbn or option set will
 # not reproduce those numbers exactly.
 # ---------------------------------------------------------------------------
+param(
+  # THE ONLY WAY PAST THE BASS BEAT GUARD. Deliberately not a default, so it has to be typed.
+  [switch]$AllowBeatChange
+)
+
 $ErrorActionPreference = 'Continue'
 $here   = $PSScriptRoot
 $cli    = 'C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe'
@@ -35,6 +40,33 @@ $fqbn   = 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,FlashMode=
 # directory"). --libraries below points it at them.
 $libs   = 'D:\Dell 7720\Arduino\libraries'
 $log    = Join-Path $here 'wls_build.log'
+
+# ---- THE BASS BEAT GUARD (RULE 10) ----------------------------------------------------------------
+# The region of the sketch between the BASS BEAT sentinels IS the beat - the onset detector and the
+# fitted clock that make the light flash in time with the music. RULE 10 freezes it: "UNDER NO
+# CIRCUMSTANCES ARE YOU ALLOWED TO ALTER, CHANGE, DELETE, ADD OR DO ANYTHING TO THE AUDIO SETTINGS."
+# The guard runs FIRST and this build REFUSES TO CONTINUE if that region has changed, so a modified
+# beat cannot be flashed by accident. -AllowBeatChange is the only way past and has to be typed.
+$guard = Join-Path $here 'wls_beatguard.ps1'
+if (Test-Path $guard) {
+  & powershell -ExecutionPolicy Bypass -File $guard
+  if ($LASTEXITCODE -ne 0) {
+    if (-not $AllowBeatChange) {
+      Write-Host ''
+      Write-Host '###########################################################################' -ForegroundColor Red
+      Write-Host '#  BUILD REFUSED - the BASS BEAT region has changed (details above).     #' -ForegroundColor Red
+      Write-Host '#  Rule 10 forbids changing the audio settings. See Rules.docx.          #' -ForegroundColor Red
+      Write-Host '###########################################################################' -ForegroundColor Red
+      Write-Host 'If the USER has authorised this change in writing, record it and rebuild:' -ForegroundColor Yellow
+      Write-Host '  wls_beatguard.ps1 -Freeze -Reason "what changed and who authorised it"' -ForegroundColor Gray
+      Write-Host 'To build anyway WITHOUT recording it (not recommended):' -ForegroundColor Yellow
+      Write-Host '  wls_build.ps1 -AllowBeatChange' -ForegroundColor Gray
+      exit 1
+    }
+    Write-Host 'WARNING: building with a CHANGED BASS BEAT region (-AllowBeatChange was passed).' -ForegroundColor Yellow
+  }
+}
+
 
 "=== build started $(Get-Date -Format 'HH:mm:ss') fqbn=$fqbn ===" | Out-File $log -Encoding utf8
 & $cli compile --fqbn $fqbn --libraries $libs $sketch *>&1 | Out-File $log -Append -Encoding utf8
