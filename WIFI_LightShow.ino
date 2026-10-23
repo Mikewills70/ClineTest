@@ -442,7 +442,7 @@ enum LedPattern : int {
 //                                        fallback, but the DISTANCE and the strength come from
 //                                        the level.
 //   VU meters        -> AUD_BASS_LEVEL
-//   EQ               -> AUD_FULL         (not built yet)
+//   EQ               -> AUD_FULL         (the ten-band bars, via advanceEqBars)
 // ============================================================================================
 enum AudioSource : int { AUD_BASS_BEAT = 0, AUD_BASS_LEVEL, AUD_FULL };
 

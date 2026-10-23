@@ -63,11 +63,46 @@ history file and the region text make any change a visible diff.
 
 ---
 
+## THE AUDIO CLEAN-UP EXERCISE (23 Oct 2026) — what was removed and what was kept
+
+The user's brief: *"Line by line go through the audio signal code and remove any legacy that has no
+function."* Beat 1 was dropped by decision (*"There is no requirement for any code that detects bars.
+That can all be removed now"*). A one-off Rule 10 exception covered exactly these removals.
+
+**Removed:** the bar-phase model and its activation, the width vote, the parity phase counters, the
+unreachable 4/4 downbeat learner (`metronomeMode` was a constant `true`), the beat-1 instrumentation ring
+and its `/beats`, `/pairs`, `/tap` endpoints, the channel-10 beat-1 indicator, and the direction-change
+computation inside `checkAudioBeat()` (its return value was discarded — the reversal already lives in the
+pattern code, in `actForListener()`).
+
+**Kept deliberately:**
+- **`/onsets` and its ring** — the beat's OWN record: leading edge, trailing edge, midpoint, mask per
+  onset. This is the instrument the parked beat fault needs. Do not remove it.
+- **`/trace`** (50 Hz level/novelty ring) and **`/now`** (plain clock reference).
+- **The `snNov` / `mdNov` readouts** in `/trav` — the snare and mid bands are useful instruments.
+- **`wls_tap.ps1` / `wls_tap_send.ps1`** — laptop-side only, no flash cost. Delete them with the parked
+  fault, not before it.
+
+**Two findings worth keeping:**
+
+1. **The direction-change requirement was already met.** `checkAudioBeat()` has ONE call site and its
+   return value is deliberately discarded; the dot reversal is already pattern-side in `actForListener()`,
+   which switches on `portCfg[i].pat`. The planned "move" was really a deletion of dead code.
+2. **The 4/4 downbeat learner was unreachable.** `const bool metronomeMode = true` made its condition
+   always true, so neither its infill branch nor its learning branch could ever execute.
+
+**Result: 1,313,387 → 1,307,219 bytes (−6,168).** The BASS BEAT guard reported INTACT after every phase.
+
+**See `AI_LEARNINGS.md`** for the mistakes made during this exercise and the rules that prevent them.
+**See `OPEN_FAULT_beat_drift.md`** for the beat fault that is parked and un-diagnosed.
+
+---
+
 ## 1. Audio: two independent paths (do not confuse them)
 
 | Path | How | Used by |
 |---|---|---|
-| **ODF chains** (4) | Time domain: 4-pole band-pass → rectify → frame differencing, per chain | The **beat** response (Moving Dot, the antifreeze) |
+| **ODF chains** (6) | Time domain: 4-pole band-pass → rectify → frame differencing, per chain. Chains 0-3 are the beat listeners; 4 (snare 200-2000 Hz) and 5 (mid 1000-4000 Hz) exist for the beat-1 work and are inside the protected region | The **beat** response (Moving Dot, the antifreeze) |
 | **FFT bands** | Per FFT window: sum the bins in a band, subtract the tracked floor, normalise over 24 dB | `audioBass` / `audioMid` / `audioTreble` / `audioLevel` — the **VU meters**, and the Chase's movement |
 
 Computing a new band level belongs on the **FFT** path (bin sums), never by adding filters to
