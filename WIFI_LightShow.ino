@@ -4158,9 +4158,44 @@ static uint8_t       g_fitI = 0;                      // the write cursor
 static uint8_t       g_fitN = 0;                      // how many are in the window
 static unsigned long g_fitPer = 0;                    // the fitted period: their mean interval
 static uint32_t      g_fitAccept = 0, g_fitReject = 0;
+// THE BEAT WIDTH (23 Oct), measured from the ENVELOPE. A real beat has width; a transient is narrow,
+// which is how a x2/x4/x8 lock on transients is told apart from a lock on the beat.
+static float         g_widPeak = 0.0f;      // the envelope peak of the onset being measured
+static unsigned long g_widStart = 0;        // its leading edge
+static unsigned long g_widLast = 0;         // the width of the most recent complete beat, ms
+static uint32_t      g_widN = 0;
+static float         g_conf = 0.0f;         // the current fit confidence, 0..1
 
 // Called on a detected beat candidate. Accepts it only if it lands inside the window predicted from the
 // current fit; then refits the tempo over the window - "listen to one new beat and drop the last".
+// THE HARD BPM GATE (23 Oct). The user: "the BPM should always fall within a known range of disco music,
+// namely 95-135". A period outside 444..632 ms is not a disco beat and is refused outright, whatever the
+// tracker currently believes - which is what lets it correct a wrong lock instead of sealing it in.
+#define BPM_MIN 95.0f
+#define BPM_MAX 135.0f
+static inline bool periodInDiscoRange(unsigned long ms) {
+  if (ms < 444 || ms > 632) return false;
+  float bpm = 60000.0f / (float)ms;
+  return (bpm >= BPM_MIN && bpm <= BPM_MAX);
+}
+
+// THE WIDTH CONFIDENCE: a narrow beat is a transient, not a beat. Scaled so 120 ms or more scores 1.0.
+static inline float widthConfidence(unsigned long widthMs) {
+  if (widthMs == 0) return 0.35f;             // not measured yet: neither trusted nor dismissed
+  float w = (float)widthMs / 120.0f;
+  if (w > 1.0f) w = 1.0f;
+  return 0.2f + 0.8f * w;
+}
+
+// THE BPM PRIOR from the bell curve - a NUDGE ONLY, never a filter, because the user's own tracks sit at
+// 133.6 BPM, outside the 115-125 band. It can move the score by at most 15 per cent.
+static inline float bpmPrior(unsigned long ms) {
+  float bpm = 60000.0f / (float)ms;
+  float d = (bpm - 120.0f) / 6.0f;
+  float v = expf(-0.5f * d * d);
+  return 0.85f + 0.15f * v;
+}
+
 static void fitBeatStep(unsigned long stamp, unsigned long per) {
   if (per < 120 || per > 1200) return;
   unsigned long win = per / 4;                        // the window: a quarter of a beat either side
@@ -4182,6 +4217,32 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
       sum += (a - b);
     }
     g_fitPer = sum / (unsigned long)(g_fitN - 1);
+    // THE HARD GATE: a fitted period outside the disco range is not a beat and is not used at all.
+    if (!periodInDiscoRange(g_fitPer)) { g_fitReject++; g_fitPer = 0; g_fitN = 0; g_fitI = 0; return; }
+    // THE CONFIDENCE: the measurement first, the prior only as a nudge.
+    // A HIGH REJECTION RATE IS PENALISED: a correct lock should reject about half the onsets (beats
+    // against off-beats), so much more than that means it is taking only every other beat - which is the
+    // half-speed fault exactly, and it shows up here without needing to know which beat is beat 1.
+    {
+      unsigned long tot = g_fitAccept + g_fitReject;
+      float rej = (tot > 0) ? ((float)g_fitReject / (float)tot) : 0.5f;
+      float rejScore = 1.0f;
+      if (rej > 0.65f)      rejScore = 0.35f;
+      else if (rej > 0.55f) rejScore = 0.75f;
+      float spread = 1.0f;
+      if (g_fitN >= 3) {
+        float mn = 1e9f, mx = 0.0f;
+        for (uint8_t k = 1; k < g_fitN; k++) {
+          float iv = (float)(g_fitMs[(uint8_t)((g_fitI + FIT_N - 1 - k) % FIT_N)] -
+                             g_fitMs[(uint8_t)((g_fitI + FIT_N - k) % FIT_N)]);
+          if (iv < mn) mn = iv;
+          if (iv > mx) mx = iv;
+        }
+        if (mx > 0.0f) spread = 1.0f - ((mx - mn) / mx);
+        if (spread < 0.3f) spread = 0.3f;
+      }
+      g_conf = widthConfidence(g_widLast) * rejScore * spread * bpmPrior(g_fitPer);
+    }
   }
 }
 
@@ -4777,6 +4838,26 @@ if (onsNew) onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr);   // INSTRUM
 // display keeps working while the refactor is proved in stages. The decision moves
 // out to the pattern in the next step.
 static void odfEvaluate() {
+  // THE BEAT WIDTH, FROM THE ENVELOPE (23 Oct). The novelty is a change detector and spikes for ~28 ms,
+  // which is not a beat - that is what I got wrong before. The ENVELOPE is the level, and its width is
+  // what tells a beat from a transient. The most recent onset is watched until the envelope falls to
+  // half its peak; that instant closes the width.
+  {
+    static uint32_t widSeq = 0;
+    if (onsHead > widSeq) {
+      widSeq = onsHead;
+      g_widStart = millis();
+      g_widPeak = odfPeak0;
+    } else {
+      float e = odfPeak0;
+      if (e > g_widPeak) g_widPeak = e;
+      if (g_widPeak > 0.0f && e < g_widPeak * 0.5f) {
+        unsigned long w = millis() - g_widStart;
+        if (w >= 10 && w <= 2000) { g_widLast = w; if (g_widN < 4000) g_widN++; }
+        g_widPeak = -1.0f;                      // -1 means "already closed for this onset"
+      }
+    }
+  }
   // THE TRAILING EDGE (22 Oct). The most recent onset is watched until its novelty falls back to 40 per
   // cent of its peak; that instant is its trailing edge. (leading + trailing) / 2 is then the MID POINT,
   // which the user believes is steadier than the leading edge because instruments attack at different
@@ -6734,6 +6815,13 @@ void handleTrav() {
   // is healthy - it is spurious beats and off-beats being kept out. A fitPer that sits still means the
   // tempo is locked.
   out += ",\"fitPer\":";  out += String((unsigned long)g_fitPer);
+  // THE WIDTH AND THE CONFIDENCE (23 Oct). wid is the last beat width in ms - a real beat is wide, a
+  // transient narrow. conf is the fit confidence: the width, the rejection rate against the expected
+  // ~50 per cent, the interval spread, and the BPM bell as a nudge. bpm is what the fit implies.
+  out += ",\"wid\":";      out += String((unsigned long)g_widLast);
+  out += ",\"widN\":";     out += String((unsigned long)g_widN);
+  out += ",\"conf\":";     out += String((double)g_conf, 3);
+  out += ",\"fitBpm\":";   out += String((long)(g_fitPer ? (60000L / (long)g_fitPer) : 0));
   out += ",\"fitAcc\":";  out += String((unsigned long)g_fitAccept);
   out += ",\"fitRej\":";  out += String((unsigned long)g_fitReject);
   // THE BEAT-1 SCORE FROM THE USER TAPS (22 Oct). tapCount taps landed on a beat; tapAgree of those
