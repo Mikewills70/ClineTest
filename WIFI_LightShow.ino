@@ -304,21 +304,11 @@ float          bassOverThr = 9.0f;     // raise for kick-only, lower to catch cl
 float          bassBandLo  = 0.0f;     // the band actually in use (logged)
 float          bassBandHi  = 0.0f;
 
-// ---- 4/4 downbeat tracking --------------------------------------------------
-// In 4/4 the bar's first beat ("the 1") is normally the loudest and is marked by
-// the other instruments too, so tally the level of the beats landing on each of
-// the four grid slots: the slot with the highest average IS the downbeat. The
-// direction then changes on the "1" only. An infill is a cluster of hits much
-// faster than the learnt tempo - those change direction on every hit (they sound
-// wrong otherwise) and are deliberately kept out of the statistics.
-int           barPos = 0;                        // which grid slot is next
-int           downbeatPos = -1;                  // the learnt "1" (-1 = none)
-int           lockedDownbeat = -1;               // once chosen, never changes
+// ---- DIRECTION TOGGLE ------------------------------------------------------
+// (The 4/4 downbeat tracker that lived here was DEAD CODE. metronomeMode was a constant `true`, so its
+// condition was always satisfied and its bar-energy learning could never run. Removed 23 Oct 2026 along
+// with barPos, downbeatPos, lockedDownbeat, offTempoRun, barEnergySum, barEnergyCnt and infillMode.)
 int           beatToggle = 0;                    // stable every-other-beat fire
-int           offTempoRun = 0;                   // consecutive off-tempo beats
-float         barEnergySum[4] = {0, 0, 0, 0};    // average level per slot
-int           barEnergyCnt[4] = {0, 0, 0, 0};
-bool          infillMode = false;
 unsigned long firedCount = 0;                    // direction changes, per log line
 static float bandFloorAll = 0, bandFloorBass = 0, bandFloorMid = 0, bandFloorTreble = 0;
 static float bandFloorBassLvl = 0;   // tracked floor for the 61-500 Hz BASS LEVEL band
@@ -5399,102 +5389,16 @@ bool checkAudioBeat() {
       nextSubBeatTargetTime = now + (establishedInterval / multiplier);
     }
 
-    // ---- 4/4 bar: change direction on "the 1", or on every hit in an infill --
-    // Infills are clusters of hits faster than the learnt tempo; they must not
-    // disturb the statistics, because those statistics are how "the 1" is learnt.
-    // An infill is a RUN of off-tempo hits, not a single one. Real infills occur
-    // every 4, 8, 12 or 16 bars, so a single short or long interval is far more
-    // likely to be ordinary timing jitter - treating that as an infill made the
-    // display fire on almost every bar. Require three consecutive off-tempo hits.
-    bool onTempo = (establishedInterval > 200) &&
-                   (interval > (establishedInterval * 75UL) / 100UL) &&
-                   (interval < (establishedInterval * 125UL) / 100UL);
-    if (onTempo) {
-      offTempoRun = 0;
-    } else if (offTempoRun < 10) {
-      offTempoRun++;
-    }
-    bool infillConfirmed = (offTempoRun >= 3);
+    // ---- DIRECTION: a pure every-second-beat toggle -------------------------
+    // (The bar-energy downbeat learner that lived here was DEAD CODE - metronomeMode was a constant
+    // true, so this condition was always satisfied and neither the infill branch nor the learning
+    // branch could ever execute. Removed 23 Oct 2026.)
+    // THIS IS EFFECT BEHAVIOUR, NOT AUDIO. It decides when the dot reverses, so it belongs in the
+    // PATTERN code (Moving Dot, Chase) - it is only still here because moving it is a separate,
+    // behaviour-sensitive step. The arithmetic is unchanged: a pure toggle cannot swap phase.
     bool changeDir;
-    // ---- METRONOME MODE (as requested) ---------------------------------------
-    // Change direction on every SECOND clock beat and nothing else. The
-    // downbeat-learning path below is the source of the swapping: whenever its
-    // phase estimate shifted it moved the whole pairing from 1-and-3 to 2-and-4,
-    // which is exactly what "losing time and off-beat" looks like. A pure toggle
-    // cannot swap - it alternates on evenly spaced clock beats, so it settles on
-    // 1-and-3 OR 2-and-4 and holds. Infills are excluded entirely.
-    // Set metronomeMode false to bring the bar-energy downbeat learning back.
-    const bool metronomeMode = true;
-    if (metronomeMode || establishedInterval <= 200) {
-      beatToggle = (beatToggle + 1) & 1;
-      changeDir  = (beatToggle == 1);
-      infillMode = false;
-      barPos = (barPos + 1) % 4;       // kept so the log still reads
-    } else if (!infillConfirmed) {
-      infillMode = false;
-      if (barPos < 0 || barPos > 3) barPos = 0;
-      barEnergySum[barPos] += (float)envP2P;
-      barEnergyCnt[barPos]++;
-      // The downbeat is learnt as the grid slot with the highest average level.
-      bool  ready = true;
-      int   best = 0;
-      float bestAvg = -1.0f;
-      for (int i = 0; i < 4; i++) {
-        if (barEnergyCnt[i] < 4) { ready = false; break; }   // need a few bars
-        float a = barEnergySum[i] / (float)barEnergyCnt[i];
-        if (a > bestAvg) { bestAvg = a; best = i; }
-      }
-      if (ready) {
-        // Only accept a downbeat when the winner CLEARLY beats the runner-up
-        // (>=12%). Here the four slot averages sit within ~5% of each other, so
-        // the "winner" kept swapping slots - and every swap shifted which beats
-        // fired, which is exactly the visible drift-then-correct. Once chosen it
-        // is LOCKED, so the pairing never jumps mid-track.
-        float best2 = -1.0f;
-        for (int i = 0; i < 4; i++) {
-          if (i == best) continue;
-          float a = barEnergySum[i] / (float)barEnergyCnt[i];
-          if (a > best2) best2 = a;
-        }
-        bool slotsReady = true;
-        for (int i = 0; i < 4; i++) if (barEnergyCnt[i] < 8) slotsReady = false;
-        if (lockedDownbeat < 0 && slotsReady && bestAvg > best2 * 1.20f) lockedDownbeat = best;
-        downbeatPos = lockedDownbeat;
-      }
-      // How many beats elapsed since the previous one? Normally 1; if a beat was
-      // MISSED the interval is ~2x the tempo. Advancing the bar by that count
-      // stops the 1-and-3 pairing slipping whenever a beat is not detected -
-      // which is exactly the "in and out of phase, obviously late" behaviour.
-      // The expected interval is used ONLY to work out how much time passed; the
-      // direction change itself always fires on the detected beat, immediately.
-      int steps = 1;
-      if (establishedInterval > 200 && interval > (establishedInterval * 3UL) / 2UL) {
-        steps = (int)((interval + establishedInterval / 2) / establishedInterval);
-        if (steps < 1) steps = 1;
-        if (steps > 4) steps = 4;
-      }
-
-      // Fire on the "1" and the beat two later when the downbeat is known and
-      // locked; otherwise on every second on-tempo beat. Adding `steps` preserves
-      // the parity when a beat is missed, so the pairing never slips.
-      if (lockedDownbeat < 0) {
-        beatToggle = (beatToggle + steps) & 1;
-        changeDir = (beatToggle == 1);
-      } else {
-        int off = (barPos - lockedDownbeat + 4) % 4;
-        changeDir = (off == 0) || (off == 2);
-      }
-      barPos = (barPos + steps) % 4;
-    } else {
-      // Infills are IGNORED for the direction change for now. A steady 1-and-3
-      // (or 2-and-4) is what is wanted while the timing is being verified, and
-      // firing on fills made the reversals far too frequent to judge. The phase
-      // still advances so a fill cannot leave the pairing behind.
-      infillMode = true;
-      changeDir  = false;
-      barPos = (barPos + 1) % 4;
-      beatToggle ^= 1;
-    }
+    beatToggle = (beatToggle + 1) & 1;
+    changeDir  = (beatToggle == 1);
     if (changeDir) { firedCount++; return true; }
     return false;
   }
@@ -7940,16 +7844,9 @@ void loop() {
               (long)((long)clockNextBeat - (long)millis()),
               clockHits, clockMisses, beatOffsetMs, acTempoMs, (double)acScore);
     clockHits = 0; clockMisses = 0;
-    // 4/4 bar telemetry: the four slot averages show which slot is being learnt
-    // as "the 1"; "fired" counts direction changes since the previous line, so
-    // roughly one per bar means the downbeat lock is working.
-    logAppend("bar pos=%d down=%d avg=%.0f/%.0f/%.0f/%.0f infill=%d fired=%lu",
-              barPos, downbeatPos,
-              (double)(barEnergyCnt[0] ? barEnergySum[0] / barEnergyCnt[0] : 0.0f),
-              (double)(barEnergyCnt[1] ? barEnergySum[1] / barEnergyCnt[1] : 0.0f),
-              (double)(barEnergyCnt[2] ? barEnergySum[2] / barEnergyCnt[2] : 0.0f),
-              (double)(barEnergyCnt[3] ? barEnergySum[3] / barEnergyCnt[3] : 0.0f),
-              infillMode ? 1 : 0, firedCount);
+    // DIRECTION-CHANGE COUNT. Kept as the instrument for moving this behaviour into the pattern code
+    // (Phase C): the count before and after the move must match. One change every two beats.
+    logAppend("dir changes=%lu", firedCount);
     firedCount = 0;
 
     logAppend("fires %lu %lu %lu %lu %lu %lu %lu %lu",
