@@ -1236,15 +1236,10 @@ static int32_t  g_tDone = -1;
 static unsigned long g_travPaceLast = 0;   // the pace the last crossing was given (22 Oct)
 // THE SWING: how much of the strip each crossing covers, per-mille (22 Oct). It is the full 1000
 // in steady music and SHRINKS through a disturbance - which is the correction, not a fault.
-// THE PARITY-BAND ONSETS (22 Oct). Chains 4 (snare 200-2000 Hz) and 5 (mid 1000-4000 Hz) exist only
-// to answer "which phase is beat 1". The AUDIO core stamps their onsets; the RENDER core compares
-// each stamp to the kick grid, because the grid lives there. In this music the snare/clap is on
-// 2 and 4, so the phase the snare AVOIDS is beat 1 and 3 - a direct measurement, not an inference.
-volatile uint32_t g_parAt[2]   = {0, 0};   // the last onset stamp of each parity band
-volatile uint32_t g_parSeq[2]  = {0, 0};   // how many onsets it has produced
-static   uint32_t g_parSeen[2] = {0, 0};   // the last sequence the render core has counted
-static   uint32_t g_snOnGrid = 0, g_snOffGrid = 0;   // snare onsets on / off the kick grid
-static   uint32_t g_mdOnGrid = 0, g_mdOffGrid = 0;   // mid onsets on / off the kick grid
+// (THE PARITY-BAND ONSETS lived here: chains 4 and 5 stamped their onsets so the render core could
+// compare each to the kick grid and work out which phase was beat 1. Removed 23 Oct 2026 with the rest
+// of the beat-1 detection - the user has dropped it. The CHAINS themselves are inside the BASS BEAT
+// protected region and are untouched; only their beat-1 consumers are gone.)
 // THE BAR-PHASE MODEL (22 Oct). The professional answer to "which beat is beat 1".
 // Krebs/Boeck/Widmer (ISMIR 2015, "An Efficient State Space Model for Joint Tempo and Meter
 // Tracking") show the trick: the TEMPO is already known (our comb), so the only unknown is the
@@ -4248,29 +4243,9 @@ static inline bool chaseIdleNow(unsigned long now) {
   return (beatListen[0].lastReal == 0 || (now - beatListen[0].lastReal) > 1500UL);
 }
 
-// WHERE THE PARITY BANDS LAND (22 Oct). Each snare/mid onset is compared to the KICK GRID: near a
-// grid beat is ON it, about half a beat away is OFF it. Whichever phase the snare avoids is beat 1
-// and 3 - so this single count answers 1&3 versus 2&4 with no inference from strength.
-static void parityPhaseCount() {
-  for (int b = 0; b < 2; b++) {
-    uint32_t seq = g_parSeq[b];
-    if (seq == g_parSeen[b]) continue;
-    g_parSeen[b] = seq;
-    unsigned long per = beatListen[0].ivMs;
-    if (!(per >= 200 && per <= 1200) || beatListen[0].clkNext == 0) continue;
-    long d = (long)g_parAt[b] - (long)beatListen[0].clkNext;
-    d %= (long)per;
-    if (d < 0) d += (long)per;                       // the phase of this onset within the beat
-    bool onGrid = (d < (long)per / 4) || (d > (long)(per * 3) / 4);
-    if (b == 0) { if (onGrid) g_snOnGrid++; else g_snOffGrid++; }
-    else        { if (onGrid) g_mdOnGrid++; else g_mdOffGrid++; }
-  }
-}
-
 static void listeningStep() {
   unsigned long now = millis();
   beatFired240 = false;
-  parityPhaseCount();                     // INSTRUMENT: where the parity bands landed (22 Oct)
   bool anyReal = false;        // did ANY listener take a real beat this pass?
   // INSTRUMENT: accumulate the onset ONCE per pass and record it once, with a mask of the
   // listeners that took it. All listeners on a chain share the novelty and the threshold,
@@ -4840,20 +4815,6 @@ static void odfEvaluate() {
   odfThr = (SENS_FRAC_MAX - (SENS_FRAC_MAX - SENS_FRAC_MIN) * constrain(beatSens, 0.01f, 1.0f))
            * odfChain[0].novPeak;
 
-  // THE PARITY-BAND ONSETS (22 Oct): a plain novelty peak on chains 4 and 5, stamped with the frame
-  // time and counted. 200 ms of refractory keeps one hit from counting several times. MEASUREMENT
-  // ONLY - the render core decides what it means.
-  for (int c = 4; c < ODF_CHAINS; c++) {
-    if (!(odfChainUse & (1u << c))) continue;
-    OdfChain &pch = odfChain[c];
-    float thr = pch.novPeak * 0.35f;
-    if (thr < ODF_THR_FLOOR) thr = ODF_THR_FLOOR;
-    uint32_t ms = (uint32_t)millis();
-    if (pch.novelty >= thr && (ms - g_parAt[c - 4]) >= 200UL) {
-      g_parAt[c - 4]  = ms;
-      g_parSeq[c - 4]++;
-    }
-  }
 
   // NOTHING IS DECIDED HERE ANY MORE. This function MEASURES and PUBLISHES; the
   // PATTERN decides, in listeningStep() on the render core. That is the whole point
@@ -6560,17 +6521,11 @@ void handleTrav() {
     out += ",\"swingN\":";   out += String((unsigned long)g_swN);
   }
   out += ",\"paceLast\":";  out += String((unsigned long)g_travPaceLast);
-  // THE PARITY ANSWER (see the note on g_parAt): which phase the snare and mid bands land on
-  // relative to the kick grid. If the SNARE is mostly OFF the grid, the grid is on 1&3 (right).
-  // If it is mostly ON the grid, the grid is on 2&4 and should be moved by half a beat.
-  out += ",\"snOn\":";  out += String((unsigned long)g_snOnGrid);
-  out += ",\"snOff\":"; out += String((unsigned long)g_snOffGrid);
-  out += ",\"mdOn\":";  out += String((unsigned long)g_mdOnGrid);
-  out += ",\"mdOff\":"; out += String((unsigned long)g_mdOffGrid);
+  // (The snare/mid parity counts and the half-beat activation comparison were published here. Both are
+  // gone with the beat-1 detection. snNov and mdNov below are kept - the two bands are useful
+  // instruments for the parked beat fault.)
   out += ",\"snNov\":"; out += String((double)odfChain[4].novelty, 1);
   out += ",\"mdNov\":"; out += String((double)odfChain[5].novelty, 1);
-  // THE HALF-BEAT TEST: dbBeat is the mean activation on the clock's beats, dbMid on the midpoints.
-  // dbMid above dbBeat means the grid is on the OFF-beat - the comparison the whole session needed.
   // THE DOT RIGHT NOW, so the motion can be SEEN from here rather than inferred from the beat
   // samples - which is what the "barely moves" report needed.
   out += ",\"dotPos\":";   out += String((long)ledPosArr[0]);
