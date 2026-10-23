@@ -4101,6 +4101,22 @@ static inline bool periodInDiscoRange(unsigned long ms) {
   return (bpm >= BPM_MIN && bpm <= BPM_MAX);
 }
 
+// THE INTERVAL GATE for the fit, and it is NOT the same thing as the period gate above.
+// WHY IT EXISTS SEPARATELY (23 Oct 2026). The fit judges each onset by the RAW interval from the last
+// accepted onset, and that gate must refuse the OFF-BEAT (about half a beat, ~223 ms) and a DOUBLED
+// interval (a missed beat, ~892 ms) - but it must NOT refuse a real beat that carries ordinary jitter.
+// MEASURED on the user's 134.2 BPM track: the real beat intervals run 425-474 ms, so a 444 ms floor
+// threw away roughly half of them, and after the first accept the next onset was 447 ms later (refused),
+// the one after 894 ms later (refused), and the gap only grew - so the fit could never accumulate.
+// Measured result of that mistake: fitAcc 1 against fitRej 181, the fit never locked, and the clock fell
+// back to the legacy path where a single missed detection does throw the timing off.
+// 320 ms is well above the half-beat (223) and well below the beat (425); 700 ms is well below the
+// doubled interval (875). The FINAL period is still checked by periodInDiscoRange above, so this wider
+// band cannot let an out-of-range tempo through - it only decides which onsets the fit may look at.
+static inline bool beatIntervalPlausible(unsigned long ms) {
+  return (ms >= 320 && ms <= 700);
+}
+
 // THE WIDTH CONFIDENCE: a narrow beat is a transient, not a beat. Scaled so 120 ms or more scores 1.0.
 static inline float widthConfidence(unsigned long widthMs) {
   if (widthMs == 0) return 0.35f;             // not measured yet: neither trusted nor dismissed
@@ -4145,7 +4161,7 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
     unsigned long lastA = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
     if (stamp <= lastA) return;                              // out of order or duplicate: learn nothing
     unsigned long iv = stamp - lastA;
-    if (!periodInDiscoRange(iv)) { g_fitReject++; return; }   // not a beat interval: refused outright
+    if (!beatIntervalPlausible(iv)) { g_fitReject++; return; }   // not a beat interval: refused outright
   }
   g_fitMs[g_fitI] = stamp;
   g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
