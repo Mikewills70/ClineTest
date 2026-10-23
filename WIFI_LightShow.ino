@@ -4151,6 +4151,40 @@ static inline unsigned long fixHalfBeat(unsigned long ms) {
   return ms;
 }
 
+// SEE THE NOTE ABOVE fixHalfBeat, and the tracker below.
+#define FIT_N 4
+static unsigned long g_fitMs[FIT_N] = {0, 0, 0, 0};   // the window: the last accepted beat times
+static uint8_t       g_fitI = 0;                      // the write cursor
+static uint8_t       g_fitN = 0;                      // how many are in the window
+static unsigned long g_fitPer = 0;                    // the fitted period: their mean interval
+static uint32_t      g_fitAccept = 0, g_fitReject = 0;
+
+// Called on a detected beat candidate. Accepts it only if it lands inside the window predicted from the
+// current fit; then refits the tempo over the window - "listen to one new beat and drop the last".
+static void fitBeatStep(unsigned long stamp, unsigned long per) {
+  if (per < 120 || per > 1200) return;
+  unsigned long win = per / 4;                        // the window: a quarter of a beat either side
+  if (g_fitPer > 0 && g_fitN > 0) {
+    unsigned long last = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
+    unsigned long pred = last + g_fitPer;             // WHERE THE NEXT BEAT IS EXPECTED
+    unsigned long d = (stamp > pred) ? (stamp - pred) : (pred - stamp);
+    if (d > win) { g_fitReject++; return; }           // nothing should be there: ignored outright
+  }
+  g_fitMs[g_fitI] = stamp;
+  g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
+  if (g_fitN < FIT_N) g_fitN++;
+  g_fitAccept++;
+  if (g_fitN >= 2) {
+    unsigned long sum = 0;
+    for (uint8_t k = 1; k < g_fitN; k++) {
+      unsigned long a = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1 - k) % FIT_N)];
+      unsigned long b = g_fitMs[(uint8_t)((g_fitI + FIT_N - k) % FIT_N)];
+      sum += (a - b);
+    }
+    g_fitPer = sum / (unsigned long)(g_fitN - 1);
+  }
+}
+
 static inline unsigned long clampBeatPeriod(unsigned long ms) {
   if (ms < 120)  return 120;
   if (ms > 1200) return 1200;
@@ -4416,6 +4450,11 @@ static void listeningStep() {
               // move the beat, while a real tempo change is still followed within a few bars.
               {
                 unsigned long base = clampBeatPeriod(fixHalfBeat(mid));   // SEE THE NOTE ON fixHalfBeat
+              // THE FITTED PERIOD WINS ONCE THE TRACKER HAS A LOCK (23 Oct). The window fit is built from
+              // where beats ACTUALLY landed, so it is steadier than any periodicity estimate - and the
+              // clock firing it is what makes the metronome smooth. Until there is a lock, the search
+              // above carries the clock as before.
+              if (g_fitPer > 0 && g_fitN >= 2) base = clampBeatPeriod(g_fitPer);
                 if (g_perAvg <= 0) g_perAvg = (long)base;
                 else                g_perAvg += ((long)base - g_perAvg) / 8;
                 L.ivMs = clampBeatPeriod((unsigned long)g_perAvg);
@@ -4724,7 +4763,11 @@ static void listeningStep() {
     }
   }
 
-  if (onsNew) onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr);   // INSTRUMENT: the line
+  // THE WINDOW-FITTING TRACKER (see the note on fitBeatStep): every detected onset is offered to it, and it
+// decides whether that is where a beat should be. The clock then runs on the fitted period, so the beats
+// it fires are PREDICTED beats - smooth, and unaffected by detection jitter.
+if (onsNew) fitBeatStep(onsStamp, beatListen[0].ivMs);
+if (onsNew) onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr);   // INSTRUMENT: the line
   if (anyReal) g_onsetReal++;
 }
 
@@ -6686,6 +6729,13 @@ void handleTrav() {
   // already sitting on the music.
   out += ",\"tmFixed\":";  out += String((unsigned long)g_tmFixed);
   out += ",\"beat1\":";    out += String((unsigned long)g_beat1Flashes);
+  // THE WINDOW FIT (23 Oct): fitPer is the fitted period in ms, fitAcc the beats accepted because
+  // they landed inside the predicted window, fitRej those REFUSED because they did not. A high fitRej
+  // is healthy - it is spurious beats and off-beats being kept out. A fitPer that sits still means the
+  // tempo is locked.
+  out += ",\"fitPer\":";  out += String((unsigned long)g_fitPer);
+  out += ",\"fitAcc\":";  out += String((unsigned long)g_fitAccept);
+  out += ",\"fitRej\":";  out += String((unsigned long)g_fitReject);
   // THE BEAT-1 SCORE FROM THE USER TAPS (22 Oct). tapCount taps landed on a beat; tapAgree of those
   // the model ALSO called beat 1. tapAgree near tapCount means the detector picks the same beat as the
   // user ear. tapStray counts presses that landed nowhere near a beat.
