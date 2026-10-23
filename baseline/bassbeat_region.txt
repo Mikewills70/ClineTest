@@ -812,6 +812,11 @@ static uint8_t       g_fitI = 0;                      // the write cursor
 static uint8_t       g_fitN = 0;                      // how many are in the window
 static unsigned long g_fitPer = 0;                    // the fitted period: their mean interval
 static uint32_t      g_fitAccept = 0, g_fitReject = 0;
+// DID THIS ONSET PASS AS A BEAT? (23 Oct 2026). The fit's window is the ONLY thing that tells a beat
+// from a transient - that is its job per the rules ("keep IO48 flashing only on the beats, not the
+// transients"). g_fitTook is set inside fitBeatStep and read at the call site, where it schedules the
+// IO48 flash at the actual beat's midpoint.
+static bool          g_fitTook = false;
 // THE BEAT WIDTH (23 Oct), measured from the ENVELOPE. A real beat has width; a transient is narrow,
 // which is how a x2/x4/x8 lock on transients is told apart from a lock on the beat.
 static float         g_widPeak = 0.0f;      // the envelope peak of the onset being measured
@@ -890,6 +895,7 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
   // only reads onset stamps and writes a period. The hard 444-632 ms gate bounds every accepted
   // interval, and the median cannot shrink away, so the collapse to ~140 ms cannot recur.
   (void)per;
+  g_fitTook = false;                       // this onset is a transient until it passes as a beat
   if (g_fitN > 0) {
     unsigned long lastA = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
     if (stamp <= lastA) return;                              // out of order or duplicate: learn nothing
@@ -900,6 +906,7 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
   g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
   if (g_fitN < FIT_N) g_fitN++;
   g_fitAccept++;
+  g_fitTook = true;                        // IT IS A BEAT - the call site flashes IO48 for it
   if (g_fitN >= 2) {
     // THE MEDIAN, not the mean: a mean is dragged by one bad beat, a median is not.
     unsigned long iv[FIT_N];

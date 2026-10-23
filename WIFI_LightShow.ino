@@ -268,6 +268,16 @@ float         acScore    = 0.0f; // its correlation strength (logged)
 // transients - completely independently of what the lights are doing. The lights
 // follow the clock below, which only lets a STRONG detection steer it.
 volatile bool rawBeatFlag = false;
+// IO48 FIRES ON THE ACTUAL BEAT, AND NOWHERE ELSE (23 Oct 2026 - user instruction, and the rules are
+// explicit: "THE ACTUAL BEAT MIDPOINT IS THE MASTER - IO48 FLASHES ON THE MIDPOINT OF THE BEAT").
+// g_flashAt is THE MIDPOINT OF A REAL BEAT that has just been detected AND accepted as a BEAT rather
+// than a transient. The flash is fired from that instant and from no other place in the code.
+// NO clock beat, NO prediction and NO correction can move it. The prediction's ONLY job is to decide
+// which onsets count as beats - which is what stops a transient flashing, and what makes a flash
+// between the beats IMPOSSIBLE by construction rather than merely unlikely.
+// A beat cannot be missed: if there is no onset there is no beat, which means an intro or a quiet
+// passage - a different thing entirely.
+volatile unsigned long g_flashAt = 0;   // millis() of the actual beat's midpoint (0 = nothing pending)
 volatile uint32_t g_io48Beats = 0;   // IO48 flashes since boot: one per MUSIC beat
 // NOT one per clock beat. The flash is gated on the detector actually hearing something (21 Oct,
 // "flashing like a clock to no music at all"), so io48 TRAILS p0clk whenever the room is quiet -
@@ -4099,6 +4109,11 @@ static uint8_t       g_fitI = 0;                      // the write cursor
 static uint8_t       g_fitN = 0;                      // how many are in the window
 static unsigned long g_fitPer = 0;                    // the fitted period: their mean interval
 static uint32_t      g_fitAccept = 0, g_fitReject = 0;
+// DID THIS ONSET PASS AS A BEAT? (23 Oct 2026). The fit's window is the ONLY thing that tells a beat
+// from a transient - that is its job per the rules ("keep IO48 flashing only on the beats, not the
+// transients"). g_fitTook is set inside fitBeatStep and read at the call site, where it schedules the
+// IO48 flash at the actual beat's midpoint.
+static bool          g_fitTook = false;
 // THE BEAT WIDTH (23 Oct), measured from the ENVELOPE. A real beat has width; a transient is narrow,
 // which is how a x2/x4/x8 lock on transients is told apart from a lock on the beat.
 static float         g_widPeak = 0.0f;      // the envelope peak of the onset being measured
@@ -4177,6 +4192,7 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
   // only reads onset stamps and writes a period. The hard 444-632 ms gate bounds every accepted
   // interval, and the median cannot shrink away, so the collapse to ~140 ms cannot recur.
   (void)per;
+  g_fitTook = false;                       // this onset is a transient until it passes as a beat
   if (g_fitN > 0) {
     unsigned long lastA = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
     if (stamp <= lastA) return;                              // out of order or duplicate: learn nothing
@@ -4187,6 +4203,7 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
   g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
   if (g_fitN < FIT_N) g_fitN++;
   g_fitAccept++;
+  g_fitTook = true;                        // IT IS A BEAT - the call site flashes IO48 for it
   if (g_fitN >= 2) {
     // THE MEDIAN, not the mean: a mean is dragged by one bad beat, a median is not.
     unsigned long iv[FIT_N];
@@ -4637,7 +4654,11 @@ static void listeningStep() {
           // before that 11/51/51/51). A beat is a property of the MUSIC, not of a port, so it is
           // fired ONCE here and applied to every Chase port in this same pass: they cannot
           // diverge, because there is only one number to follow.
-          if (musicNow) rawBeatFlag = true;   // the FLASH is music only; the traverse is not
+          // THE FLASH IS NOT SET HERE ANY MORE (23 Oct 2026 - user instruction). This was the fault:
+          // IO48 was fired from a CLOCK BEAT, which is a PREDICTION, and a prediction must never move the
+          // flash. The flash now comes from the ACTUAL beat's midpoint and from nowhere else (g_flashAt,
+          // set in listeningStep when a real onset is accepted as a beat). What remains here is the
+          // traverse and the metronome, which is a separate matter.
           // IS THE BEAT SETTLED YET? Computed BEFORE the crossing starts, so the crossing uses it.
           // This is the governor's warm-up seen from the other side: the same few beats in which the
           // tempo estimate and the beat classifier are still finding their feet.
@@ -4804,8 +4825,17 @@ if (onsHead > 0) {
   }
 }
 unsigned long fitIn = onsStamp + (widPrev / 2);
-if (onsNew) fitBeatStep(fitIn, beatListen[0].ivMs);
-if (onsNew) onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr, (uint32_t)fitIn);   // INSTRUMENT
+if (onsNew) {
+  fitBeatStep(fitIn, beatListen[0].ivMs);
+  // THE FLASH, FROM THE ACTUAL BEAT AND FROM NOWHERE ELSE (23 Oct 2026 - user instruction).
+  // This is the ONLY place IO48 is triggered now. When a real beat has been detected AND accepted as a
+  // BEAT rather than a transient, the flash is set to that beat's own MIDPOINT - its leading edge plus
+  // half its measured length. The prediction took no part in it and cannot move it, so a flash between
+  // the beats is impossible: there is no beat there to flash on. A transient never gets here, because
+  // g_fitTook is false for it.
+  if (g_fitTook) g_flashAt = fitIn;
+  onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr, (uint32_t)fitIn);   // INSTRUMENT
+}
   if (anyReal) g_onsetReal++;
 }
 
@@ -7599,8 +7629,13 @@ void loop() {
     // the strip; for the dot patterns, each reversal. It is a picture of the MUSIC beat as
     // the lights receive it - driven from actOnBeat and the clock tick, never by a pattern
     // timer, and never by a raw detection the lights did not act on.
-    if (rawBeatFlag) {
-      rawBeatFlag = false;
+    // IO48 FIRES FROM THE ACTUAL BEAT'S MIDPOINT, AND FROM NOWHERE ELSE (23 Oct 2026 - user instruction).
+    // g_flashAt IS that instant: the leading edge of a real beat plus half its measured length, set in
+    // listeningStep when the onset was accepted as a BEAT rather than a transient. No clock beat, no
+    // prediction and no correction can trigger or move this, which is why a flash between the beats is
+    // now impossible - there is no beat there to flash on.
+    if (g_flashAt != 0 && (long)(millis() - g_flashAt) >= 0) {
+      g_flashAt = 0;
       digitalWrite(POWER_LED_PIN, HIGH);
       // VISIBLE AT LAST (21 Oct). 100 ms was too short to see: user, "it still barely flashes at
       // all" - while the power-up and error blinks (500 ms, the same pin, the same diode) are
