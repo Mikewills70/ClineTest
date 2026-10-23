@@ -308,8 +308,8 @@ float          bassBandHi  = 0.0f;
 // (The 4/4 downbeat tracker that lived here was DEAD CODE. metronomeMode was a constant `true`, so its
 // condition was always satisfied and its bar-energy learning could never run. Removed 23 Oct 2026 along
 // with barPos, downbeatPos, lockedDownbeat, offTempoRun, barEnergySum, barEnergyCnt and infillMode.)
-int           beatToggle = 0;                    // stable every-other-beat fire
-unsigned long firedCount = 0;                    // direction changes, per log line
+// (beatToggle and firedCount lived here. They fed a direction-change decision that was THROWN AWAY -
+//  see the note in checkAudioBeat(). Removed 23 Oct 2026.)
 static float bandFloorAll = 0, bandFloorBass = 0, bandFloorMid = 0, bandFloorTreble = 0;
 static float bandFloorBassLvl = 0;   // tracked floor for the 61-500 Hz BASS LEVEL band
 
@@ -5321,18 +5321,12 @@ bool checkAudioBeat() {
       nextSubBeatTargetTime = now + (establishedInterval / multiplier);
     }
 
-    // ---- DIRECTION: a pure every-second-beat toggle -------------------------
-    // (The bar-energy downbeat learner that lived here was DEAD CODE - metronomeMode was a constant
-    // true, so this condition was always satisfied and neither the infill branch nor the learning
-    // branch could ever execute. Removed 23 Oct 2026.)
-    // THIS IS EFFECT BEHAVIOUR, NOT AUDIO. It decides when the dot reverses, so it belongs in the
-    // PATTERN code (Moving Dot, Chase) - it is only still here because moving it is a separate,
-    // behaviour-sensitive step. The arithmetic is unchanged: a pure toggle cannot swap phase.
-    bool changeDir;
-    beatToggle = (beatToggle + 1) & 1;
-    changeDir  = (beatToggle == 1);
-    if (changeDir) { firedCount++; return true; }
-    return false;
+    // ---- NO DIRECTION DECISION IS MADE HERE (removed 23 Oct 2026) -----------
+    // A pure every-second-beat toggle used to be computed here (changeDir / beatToggle / firedCount).
+    // It was DEAD: this function's return value is discarded at its only call site - the display follows
+    // real onsets plus antifreeze. THE DIRECTION CHANGE ALREADY LIVES IN THE PATTERN CODE, in
+    // actForListener(), which switches on portCfg[i].pat and reverses the dot for Moving Dot and
+    // Knight Rider. That is where effect behaviour belongs, and it is where it is.
   }
 
   return false;
@@ -7026,9 +7020,9 @@ void audioTask(void *param) {
       saveSettings();
     }
     if (audioEnabled) {
-      // The return value is deliberately UNUSED: it reports CLOCK beats, and the
-      // display follows real onsets (doBeat) plus antifreeze instead. The call is
-      // kept because it runs the tempo tracking and the diagnostics.
+      // The return value is always false and is deliberately UNUSED: the display follows real onsets
+      // (doBeat) plus antifreeze instead. The call is kept because it runs the tempo tracking, the fit
+      // and the diagnostics. It makes no direction decision - that belongs to the pattern code.
       checkAudioBeat();
       // Yield between analysis windows. This task previously spun with no delay at
       // all, saturating core 0 and contending for the bus the LCD DMA reads its
@@ -7673,10 +7667,6 @@ void loop() {
               (long)((long)clockNextBeat - (long)millis()),
               clockHits, clockMisses, beatOffsetMs, acTempoMs, (double)acScore);
     clockHits = 0; clockMisses = 0;
-    // DIRECTION-CHANGE COUNT. Kept as the instrument for moving this behaviour into the pattern code
-    // (Phase C): the count before and after the move must match. One change every two beats.
-    logAppend("dir changes=%lu", firedCount);
-    firedCount = 0;
 
     logAppend("fires %lu %lu %lu %lu %lu %lu %lu %lu",
               fireInt[0], fireInt[1], fireInt[2], fireInt[3],
