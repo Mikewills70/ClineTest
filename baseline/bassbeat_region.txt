@@ -208,6 +208,12 @@ struct OnsRec {
   // Both edges are needed to test that, so the record now carries them.
   uint32_t fallMs;                // when the novelty fell back to 40 per cent of the peak (0 = not yet)
   float    peak;                  // the highest novelty this onset reached
+  // THE OTHER MIDPOINT - INSTRUMENT ONLY (23 Oct 2026). The fit is handed onsStamp + g_widAvg/2, which
+  // mixes the LEADING EDGE with a width timed from the RECORD moment - a different origin. `mid=` in
+  // /onsets is the ring's own leading-to-trailing midpoint. This field records what the fit was actually
+  // given, so the two can be compared on a real track and d = fitIn - mid watched for jitter.
+  // PROOF ONLY: nothing reads this but the readout. No timing is affected.
+  uint32_t fitIn;                 // the stamp the fit was handed for this onset (0 = not offered)
 };
 OnsRec   onsRing[ONS_RING];
 volatile uint32_t onsHead = 0;    // TOTAL onsets ever recorded = the sampler cursor
@@ -228,10 +234,11 @@ volatile float    g_odfHz     = 0.0f;      // measured frames/s - MUST be ~100
 volatile uint32_t g_chaseSwallow = 0;      // Chase triggers the debounce threw away
 
 // Record one onset. Called from the render core only (listeningStep).\n// THE LISTENER IS PASSED AS VALUES, NOT AS A TYPE: the Arduino IDE hoists its own\n// generated function prototypes to the TOP of the file, above struct BeatListener, so\n// a signature mentioning BeatListener cannot compile (measured: "BeatListener does not\n// name a type" at this line). Values also make the observer read-only by construction.
-static inline void onsRecord(uint32_t stamp, uint16_t mask, int chain, float nov, float thr) {
+static inline void onsRecord(uint32_t stamp, uint16_t mask, int chain, float nov, float thr, uint32_t fitIn) {
   uint32_t seq = onsHead;                  // fill, THEN advance: no reader ever sees a
   OnsRec  &r   = onsRing[seq % ONS_RING];  // half-written slot
   r.ms     = stamp;                        // the LEADING EDGE, not the crossing time
+  r.fitIn  = fitIn;                        // INSTRUMENT: what the fit was actually handed
   r.nov    = nov;
   r.thr    = thr;
   r.riseDb = bassRiseDb;
@@ -277,21 +284,27 @@ void handleOnsets() {
   if (n > (uint32_t)maxN) n = (uint32_t)maxN;
   uint32_t next = from + n;
   String out;
-  out.reserve((unsigned)(n * 112 + 96));   // the line grew with fall= and mid=
-  char buf[144];
+  out.reserve((unsigned)(n * 160 + 96));   // the line grew again with fitIn= and d=
+  char buf[208];
   snprintf(buf, sizeof(buf), "# onsets since=%lu sent=%lu next=%lu head=%lu\n",
            (unsigned long)from, (unsigned long)n, (unsigned long)next, (unsigned long)head);
   out += buf;
   for (uint32_t s = from; s < next; s++) {
     const OnsRec &r = onsRing[s % ONS_RING];
     snprintf(buf, sizeof(buf),
-             "ms=%lu fall=%lu mid=%ld mask=%03x nov=%.3f thr=%.3f rise=%.1f band=%.0f-250\n",
+             "ms=%lu fall=%lu mid=%ld fitIn=%lu d=%ld mask=%03x nov=%.3f thr=%.3f rise=%.1f band=%.0f-250\n",
              (unsigned long)r.ms,
              // THE TRAILING EDGE AND THE MID POINT (22 Oct). fall is when the novelty fell back to 40 per
              // cent of its peak; mid is the midpoint the user asked for. fall=0 means it had not fallen
              // when the line was sent, and mid=-1 means the midpoint is not yet known.
              (unsigned long)r.fallMs,
              (long)((r.fallMs > r.ms) ? (long)(r.ms + (r.fallMs - r.ms) / 2) : -1L),
+             // INSTRUMENT (23 Oct): fitIn is what the fit was handed, and d = fitIn - mid is the
+             // divergence between the two midpoints. d jittering or drifting PROVES the wrong-origin
+             // fault. d = 0 until the trailing edge closes for that onset.
+             (unsigned long)r.fitIn,
+             (r.fitIn > 0 && r.fallMs > r.ms)
+               ? ((long)r.fitIn - (long)(r.ms + (r.fallMs - r.ms) / 2)) : 0L,
              (unsigned)r.mask,
              (double)r.nov, (double)r.thr, (double)r.riseDb, (double)r.hpHz);
     out += buf;
