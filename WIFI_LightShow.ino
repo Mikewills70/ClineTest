@@ -240,7 +240,11 @@ unsigned long clockHits     = 0;      // detected beats since the last log line
 // leading edge (which reads as early). The detection time itself is untouched, so
 // the clock, tempo and pairing maths stay accurate - only the display event is
 // offset. Tunable at runtime with /beatoffset?ms=N and persisted.
-unsigned long beatOffsetMs = 20;
+// ZERO, NOT 20 (23 Oct 2026). The rules say "THE ACTUAL BEAT MIDPOINT IS THE MASTER - IO48 FLASHES ON THE
+// MIDPOINT OF THE BEAT", but this offset was ADDED to the flash time: due = L.clkNext + beatOffsetMs.
+// 20 ms at a 446 ms beat is 4.5 per cent of a beat - a permanent lateness, not a drift, and it is not on
+// the midpoint. It also delays the pattern's traverse, so zeroing it puts both ON the beat.
+unsigned long beatOffsetMs = 0;
 // (fireAtMs/firePending are gone: the pending fire now lives in each BeatListener,
 // because a beat is per PATTERN - see listeningStep().)
 
@@ -1956,7 +1960,7 @@ void loadSettings() {
   //
   // A NEW KEY is used deliberately: the old 200 is persisted in NVS, so changing
   // the default alone would leave it in place. Clamped so it cannot drift back.
-  beatOffsetMs = (unsigned long)preferences.getInt("beatOff2", 20);
+  beatOffsetMs = 0;                   // forced: see the note at the declaration - the midpoint is the master
   if (beatOffsetMs > 80) beatOffsetMs = 80;
 
   invert240V = preferences.getBool("inv240", false);
@@ -4086,8 +4090,11 @@ static inline unsigned long fixHalfBeat(unsigned long ms) {
 }
 
 // SEE THE NOTE ABOVE fixHalfBeat, and the tracker below.
-#define FIT_N 4
-static unsigned long g_fitMs[FIT_N] = {0, 0, 0, 0};   // the window: the last accepted beat times
+// FOUR GAPS, FIVE BEATS (23 Oct 2026). The rules say "each 5th beat must be calculated from the previous
+// 4 gaps", and the diagram's T1, T2, T3, T4 are four gaps. Four beat TIMES give only THREE gaps, so the
+// window was one beat short of the specification. Five times give the four gaps it asks for.
+#define FIT_N 5
+static unsigned long g_fitMs[FIT_N] = {0, 0, 0, 0, 0};   // the window: the last accepted beat times
 static uint8_t       g_fitI = 0;                      // the write cursor
 static uint8_t       g_fitN = 0;                      // how many are in the window
 static unsigned long g_fitPer = 0;                    // the fitted period: their mean interval
@@ -4207,11 +4214,24 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
       long e2  = (long)stamp - (long)(prev + g_fitPer);   // ACTUAL midpoint vs PREDICTED beat
       long ae2 = (e2 < 0) ? -e2 : e2;
       if (ae2 <= (long)(g_fitPer / 3)) {
-        g_fitPer = clampBeatPeriod((unsigned long)((long)g_fitPer + e2 / 16));
+        // CLAMPED INTO THE RANGE, so this correction can never trip the range test below. It could
+        // before, and that is what broke the lock: see the note at the range test.
+        long np = (long)g_fitPer + e2 / 16;
+        if (np < 444) np = 444;
+        if (np > 632) np = 632;
+        g_fitPer = (unsigned long)np;
       }
     }
     // THE HARD GATE: a fitted period outside the disco range is not a beat and is not used at all.
-    if (!periodInDiscoRange(g_fitPer)) { g_fitReject++; g_fitPer = 0; g_fitN = 0; g_fitI = 0; return; }
+    // THE RANGE, ENFORCED BY CLAMPING - NOT BY RESETTING (23 Oct 2026).
+    // This used to ZERO the fit (g_fitPer = 0; g_fitN = 0; g_fitI = 0). Combined with the correction
+    // above, which could push the period out of range, the two FOUGHT: the fit reset itself repeatedly
+    // and never accumulated. MEASURED on the user's track: fitAcc frozen at 15 while fitRej climbed to
+    // 490, locked = 0, fitBpm = 0, conf = 0.000 - so the clock fell back to the LEGACY path, which has no
+    // protection against a missed detection. That is the drift. Clamping keeps the period legal AND
+    // keeps the lock, so the fit can finally do its job.
+    if (g_fitPer < 444) g_fitPer = 444;
+    if (g_fitPer > 632) g_fitPer = 632;
     // THE CONFIDENCE: the measurement first, the prior only as a nudge.
     // A HIGH REJECTION RATE IS PENALISED: a correct lock should reject about half the onsets (beats
     // against off-beats), so much more than that means it is taking only every other beat - which is the
