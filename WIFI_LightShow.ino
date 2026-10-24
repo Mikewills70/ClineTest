@@ -4821,7 +4821,11 @@ if (onsHead > 0) {
   const OnsRec &prev = onsRing[(onsHead - 1) % ONS_RING];
   if (prev.fallMs > prev.ms) {
     unsigned long wp = prev.fallMs - prev.ms;
-    if (wp <= 400) widPrev = wp;    // a beat's half-length cannot exceed 200 ms at this tempo
+    // BOUNDED TO 150 ms (23 Oct 2026). This half-length becomes the DELAY to the midpoint, and the
+    // detector's minimum gap between onsets (ODF_MIN_GAP) is 90 ms - so a 400 ms bound, i.e. a 200 ms
+    // delay, could push the flash past the NEXT onset. Real beat widths measure 15-89 ms, so 150 is
+    // generous, and the delay it produces (75 ms) stays inside the gap.
+    if (wp <= 150) widPrev = wp;
   }
 }
 unsigned long fitIn = onsStamp + (widPrev / 2);
@@ -4838,7 +4842,12 @@ if (onsNew) {
   // entire track. That is the opposite of "a beat can never be missed".
   // ONE ONSET, ONE BEAT, ONE FLASH - set to that beat's own MIDPOINT, its leading edge plus half its
   // measured length. The prediction takes no part in the flash and cannot move it.
-  g_flashAt = fitIn;
+  // A PENDING FLASH MUST NOT BE CLOBBERED (23 Oct 2026). This was losing beats: the flash is scheduled
+  // at the midpoint, which is AFTER the onset, and g_flashAt was simply overwritten by the next onset. With
+  // the delay allowed to reach 200 ms and the detector's minimum gap at 90 ms, a following onset could
+  // wipe a flash that had not fired yet - a MISSED BEAT, created here.
+  // So: only take the slot if nothing is waiting, or if what is waiting is already due.
+  if (g_flashAt == 0 || (long)(g_flashAt - millis()) <= 0) g_flashAt = fitIn;
   onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr, (uint32_t)fitIn);   // INSTRUMENT
 }
   if (anyReal) g_onsetReal++;
