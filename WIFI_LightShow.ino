@@ -4248,9 +4248,9 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
     // they did before, and it wiped the fit every few beats.
     {
       long np = (long)g_fitPer + X / 16;
-      if (np < 444) np = 444;
-      if (np > 632) np = 632;
-      g_fitPer = (unsigned long)np;
+      // ONLY APPLIED IF IT STAYS LEGAL. It must NOT clamp, or the range test below would never see the
+      // measured median when that median is out of range - which is the transient case it exists to catch.
+      if (np >= 444 && np <= 632) g_fitPer = (unsigned long)np;
     }
     // THE HARD GATE: a fitted period outside the disco range is not a beat and is not used at all.
     // THE RANGE, ENFORCED BY CLAMPING - NOT BY RESETTING (23 Oct 2026).
@@ -4260,8 +4260,15 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
     // 490, locked = 0, fitBpm = 0, conf = 0.000 - so the clock fell back to the LEGACY path, which has no
     // protection against a missed detection. That is the drift. Clamping keeps the period legal AND
     // keeps the lock, so the fit can finally do its job.
-    if (g_fitPer < 444) g_fitPer = 444;
-    if (g_fitPer > 632) g_fitPer = 632;
+    // THE BPM RANGE IS A LIMIT, NOT A CLAMP (23 Oct 2026). THE RULE: "between 95 and 135 BPM is accepted
+    // only". I had replaced that rejection with a CLAMP - and the clamp WAS the fault, because it turned
+    // a limit into an acceptance. A transient sits on the HALF BEAT, about 223 ms = 269 BPM, far outside
+    // the range. By the rule it must be refused; the clamp pulled it UP to 444 and the code then believed
+    // it. One transient taken and the whole window flips onto the transients: every other flash lands on
+    // the half beat - the visible sudden doubling - and every real beat then falls outside the window and
+    // is refused. Missing beats and invented beats, from one rewritten rule.
+    // A period outside the range is NOT A BEAT. The onset is refused and the period is NOT adopted.
+    if (g_fitPer < 444 || g_fitPer > 632) { g_fitReject++; g_fitPer = 0; g_fitN = 0; g_fitI = 0; return; }
     // THE CONFIDENCE: the measurement first, the prior only as a nudge.
     // A HIGH REJECTION RATE IS PENALISED: a correct lock should reject about half the onsets (beats
     // against off-beats), so much more than that means it is taking only every other beat - which is the
