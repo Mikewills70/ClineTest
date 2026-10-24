@@ -896,11 +896,25 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
   // interval, and the median cannot shrink away, so the collapse to ~140 ms cannot recur.
   (void)per;
   g_fitTook = false;                       // this onset is a transient until it passes as a beat
-  if (g_fitN > 0) {
+  // THE PREDICTION IS THE TEST (23 Oct 2026 - the user's design, Rule 10 overridden for this fault).
+  // "Beats will be on or close to the BPM. Transients will be outside of this."
+  // The PREDICTED beat comes from the FOUR GAPS already in the window. X is the actual midpoint measured
+  // against that prediction. An onset INSIDE the window IS the beat; an onset OUTSIDE it is a TRANSIENT
+  // and is ignored outright - no flash, no timing effect, nothing.
+  // THIS REPLACES a fixed 320-700 ms interval band that I had put here. That band was a BPM-derived
+  // timing calculation (the rules forbid BPM in the timing), and it was why beats were missed and
+  // transients got through: one fixed threshold doing two opposite jobs. The prediction does the job.
+  long X = 0;
+  if (g_fitN >= 2 && g_fitPer > 0) {
     unsigned long lastA = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
-    if (stamp <= lastA) return;                              // out of order or duplicate: learn nothing
-    unsigned long iv = stamp - lastA;
-    if (!beatIntervalPlausible(iv)) { g_fitReject++; return; }   // not a beat interval: refused outright
+    if (stamp <= lastA) return;                       // out of order or duplicate: nothing to learn
+    unsigned long pred = lastA + g_fitPer;            // WHERE THE NEXT BEAT IS EXPECTED
+    X = (long)stamp - (long)pred;                     // actual midpoint against the prediction
+    long aX = (X < 0) ? -X : X;
+    // A THIRD OF A BEAT: a beat is close to the prediction, a transient is not. The transients sit on
+    // the half beat (~223 ms) and are refused here, so IO48 cannot be lit on one and no off-beat flash
+    // can be added.
+    if (aX > (long)(g_fitPer / 3)) { g_fitReject++; return; }
   }
   g_fitMs[g_fitI] = stamp;
   g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
@@ -929,18 +943,17 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
     // intervals and that was the end of it, so a wrong period stayed wrong forever. That is the drift.
     // The rejection is the same as Clock 1's: an error beyond a third of a beat is not a beat, so the
     // period does not move. A real beat needs only a tiny correction and is followed.
+    // X, INTO THE PERIOD, SO THE NEXT PREDICTION IS CLOSER - AND THAT IS THE ONLY ADJUSTMENT MADE.
+    // X was measured at the top of this function: the actual midpoint against the predicted beat. A
+    // sixteenth of it goes into the period, so the next predicted beat lands nearer to where the beats
+    // actually are. It is far too small to see on one beat and it converges over a few beats.
+    // Clamped to the accepted range, so the adjustment and the range can never fight each other - which
+    // they did before, and it wiped the fit every few beats.
     {
-      unsigned long prev = g_fitMs[(uint8_t)((g_fitI + FIT_N - 2) % FIT_N)];
-      long e2  = (long)stamp - (long)(prev + g_fitPer);   // ACTUAL midpoint vs PREDICTED beat
-      long ae2 = (e2 < 0) ? -e2 : e2;
-      if (ae2 <= (long)(g_fitPer / 3)) {
-        // CLAMPED INTO THE RANGE, so this correction can never trip the range test below. It could
-        // before, and that is what broke the lock: see the note at the range test.
-        long np = (long)g_fitPer + e2 / 16;
-        if (np < 444) np = 444;
-        if (np > 632) np = 632;
-        g_fitPer = (unsigned long)np;
-      }
+      long np = (long)g_fitPer + X / 16;
+      if (np < 444) np = 444;
+      if (np > 632) np = 632;
+      g_fitPer = (unsigned long)np;
     }
     // THE HARD GATE: a fitted period outside the disco range is not a beat and is not used at all.
     // THE RANGE, ENFORCED BY CLAMPING - NOT BY RESETTING (23 Oct 2026).
