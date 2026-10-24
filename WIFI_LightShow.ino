@@ -269,6 +269,46 @@ float         acScore    = 0.0f; // its correlation strength (logged)
 // follow the clock below, which only lets a STRONG detection steer it.
 // g_flashAt IS the actual beat's midpoint: the flash is fired from it and from nowhere else.
 volatile unsigned long g_flashAt = 0;   // millis() of the actual beat's midpoint (0 = nothing pending)
+// THE FIGURE'S EDGES AGAINST THE SENSITIVITY LINE (23 Oct 2026). The four numbers the five points need:
+//   g_lvlLen  THE BEAT LENGTH  = trailing edge minus leading edge, both taken where the figure crosses
+//                               the sensitivity line.
+//   g_lvlMid  THE MIDPOINT     = leading edge + half that length. This is the point a beat is timed from.
+//   g_lvlSeq  a sequence count, bumped when the two edges of one figure are complete, so the fit below
+//             consumes each completed figure exactly once.
+// No peak is consulted in any of them.
+volatile uint32_t g_lvlLen = 0;
+volatile uint32_t g_lvlMid = 0;
+volatile uint32_t g_lvlSeq = 0;
+volatile uint32_t g_lvlReject = 0;   // candidates refused by point 4: length much less than the window
+volatile uint32_t g_lvlLead = 0;   // 1. the LEADING EDGE itself: the instant the figure rose through the line
+// POINT 4's WINDOW: THE FOUR LENGTHS. A candidate is a beat if its length is similar to the four lengths
+// already in the window; anything much less is a TRANSIENT and is ignored. Note this is a window of
+// LENGTHS - a beat's figure is LONG across the sensitivity line, a transient's is SHORT - and it is not
+// the same window as the four beat-to-beat GAPS the period is taken from. Two different questions.
+uint32_t g_lenMs[4] = {0, 0, 0, 0};
+uint8_t  g_lenI = 0, g_lenN = 0;
+// POINT 4's TEST. **IT MUST BE A MACRO, NOT A FUNCTION.** The comment at the per-pattern records below
+// says why: the Arduino builder inserts every generated prototype immediately before the sketch's FIRST
+// FUNCTION DEFINITION. A function defined up here becomes that first definition, which moves the insertion
+// point ABOVE the type declarations - every prototype then lands before the types it uses and the whole
+// sketch fails with a cascade of "does not name a type". That is exactly what happened when this was first
+// written as `static inline bool`: 30+ errors, from one correctly-placed function.
+// "MUCH LESS" IS MEASURED AS LESS THAN HALF the window's middle length. The rules say "anything much
+// less"; they name no multiplier, and this is the one number in this change that I had to choose. It is
+// kept here, alone, so it can be changed without touching anything else.
+#define LENGTH_IS_A_BEAT(lv) ({                                                                    \
+    bool _isBeat = true;                                                                           \
+    if ((lv) == 0) { _isBeat = false; }                                                            \
+    else if (g_lenN >= 2) {                                                                        \
+      uint32_t _s[4];                                                                              \
+      for (uint8_t _k = 0; _k < g_lenN; _k++) _s[_k] = g_lenMs[_k];                                 \
+      for (uint8_t _a = 0; _a < g_lenN; _a++)                                                       \
+        for (uint8_t _b = _a + 1; _b < g_lenN; _b++)                                                \
+          if (_s[_b] < _s[_a]) { uint32_t _t = _s[_a]; _s[_a] = _s[_b]; _s[_b] = _t; }               \
+      uint32_t _ref = _s[g_lenN / 2];                                                              \
+      if (_ref != 0 && ((uint64_t)(lv) * 2u) < (uint64_t)_ref) { _isBeat = false; }                 \
+    }                                                                                              \
+    _isBeat; })
 volatile uint32_t g_io48Beats = 0;   // IO48 flashes since boot: one per MUSIC beat
 // NOT one per clock beat. The flash is gated on the detector actually hearing something (21 Oct,
 // "flashing like a clock to no music at all"), so io48 TRAILS p0clk whenever the room is quiet -
@@ -4819,7 +4859,10 @@ if (onsHead > 0) {
 }
 unsigned long fitIn = onsStamp + (widPrev / 2);
 if (onsNew) {
-  fitBeatStep(fitIn, beatListen[0].ivMs);
+  // (THE FIT IS NO LONGER DRIVEN FROM HERE - 23 Oct 2026.) It was handed onsStamp plus half the ring's
+  // recorded width, i.e. a one-beat-lagged guess at this beat's midpoint. A figure's midpoint is now
+  // measured directly, from its own two crossings of the sensitivity line, by the time the figure closes;
+  // see the completed-figure block below. Nothing on this onset path times anything any more.
   // THE FLASH: EVERY REAL ONSET IS A BEAT, AT ITS OWN MIDPOINT (23 Oct 2026 - user instruction, corrected).
   // This is the ONLY place IO48 is triggered. There is deliberately NO second filter here.
   // A beat cannot be missed: if the detector fired, it is a beat. What keeps transients out is the BEAT
@@ -4836,9 +4879,41 @@ if (onsNew) {
   // the delay allowed to reach 200 ms and the detector's minimum gap at 90 ms, a following onset could
   // wipe a flash that had not fired yet - a MISSED BEAT, created here.
   // So: only take the slot if nothing is waiting, or if what is waiting is already due.
-  if (g_flashAt == 0 || (long)(g_flashAt - millis()) <= 0) g_flashAt = fitIn;
+  // (THE FLASH IS NO LONGER SET FROM HERE - 23 Oct 2026.) An onset is only a CANDIDATE. It becomes a beat
+  // by point 4, the length test, which needs the figure to have CLOSED - and its flash point is the
+  // midpoint of that length. See the completed-figure block below, which is now the only place g_flashAt
+  // is written.
   onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr, (uint32_t)fitIn);   // INSTRUMENT
 }
+  // THE FIGURE JUST COMPLETED, JUDGED BY ITS LENGTH (23 Oct 2026 - the user's five points, literally).
+  //   THIS IS THE PATH A BEAT TAKES, AND THE ONLY PLACE g_flashAt IS WRITTEN.
+  //   It cannot miss a beat: the figure crosses the sensitivity line at every beat by definition, so a
+  //   beat always produces a completed figure here. That is the whole reason the onset test - which
+  //   chased a running threshold and so could fall below its own bar on a beat whose rise was smaller
+  //   than its neighbour's - is no longer what decides anything.
+  //   The two edges and the length were measured in odfEvaluate, where the figure's level and the line
+  //   are both to hand. This block only has to decide WHAT the completed figure IS.
+  {
+    static uint32_t lvlSeen = 0;
+    if (g_lvlSeq != lvlSeen) {
+      lvlSeen = g_lvlSeq;
+      uint32_t len = g_lvlLen;
+      uint32_t mid = g_lvlMid;
+      if (LENGTH_IS_A_BEAT(len)) {
+        // 4. A BEAT: its length is similar to the four lengths already in the window. Record the length
+        //    in the window, time the beat on 3. the MIDPOINT of that length, and schedule the flash there.
+        g_lenMs[g_lenI] = len;
+        g_lenI = (uint8_t)((g_lenI + 1) % 4);
+        if (g_lenN < 4) g_lenN++;
+        fitBeatStep(mid, beatListen[0].ivMs);
+        if (g_flashAt == 0 || (long)(g_flashAt - millis()) <= 0) g_flashAt = mid;
+      } else {
+        // 4. A TRANSIENT: its length is much less than the four in the window. IGNORED OUTRIGHT - no
+        //    flash, no timing effect, nothing. It is not put in the window either, so it cannot pull it.
+        g_lvlReject++;
+      }
+    }
+  }
   if (anyReal) g_onsetReal++;
 }
 
@@ -4848,44 +4923,44 @@ if (onsNew) {
 // display keeps working while the refactor is proved in stages. The decision moves
 // out to the pattern in the next step.
 static void odfEvaluate() {
-  // THE BEAT WIDTH, FROM THE ENVELOPE (23 Oct). The novelty is a change detector and spikes for ~28 ms,
-  // which is not a beat - that is what I got wrong before. The ENVELOPE is the level, and its width is
-  // what tells a beat from a transient. The most recent onset is watched until the envelope falls to
-  // half its peak; that instant closes the width.
+  // (THE PEAK-RELATIVE WIDTH MEASURE LIVED HERE AND IS GONE - 23 Oct 2026, point 5.) It watched the
+  // ENVELOPE until it fell to HALF ITS OWN PEAK and called that distance the beat width. That is a
+  // peak-relative measure: it consulted the peak, and the rule is that the peaks are not consulted. The
+  // width now comes from the two sensitivity-line crossings below, which is the same two points the
+  // length is defined by, so there is one measurement instead of two that disagreed.
+  // THE FIGURE'S EDGES, MEASURED AGAINST THE SENSITIVITY LINE (23 Oct 2026 - the user's five points,
+  // applied literally with nothing added and no peak consulted):
+  //   1. THE LEADING EDGE is where the figure RISES through the sensitivity line.
+  //   2. THE TRAILING EDGE is where it FALLS BACK through the sensitivity line.
+  //   3. THE BEAT LENGTH is the distance between those two crossings, and the MIDPOINT of that length is
+  //      the point the beat is timed from.
+  //   5. NO PEAK is consulted - this replaces a trailing edge taken at 40 per cent of a novelty peak,
+  //      which is a peak-relative measure and had nothing to do with the line.
+  // Chain 0 is the kick/bass band the beat is built on. odfPeak0 is that band's LEVEL for this frame and
+  // odfThr is the sensitivity line, so both edges are simple level crossings of one fixed line.
   {
-    static uint32_t widSeq = 0;
-    if (onsHead > widSeq) {
-      widSeq = onsHead;
-      g_widStart = millis();
-      g_widPeak = odfPeak0;
-    } else {
-      float e = odfPeak0;
-      if (e > g_widPeak) g_widPeak = e;
-      if (g_widPeak > 0.0f && e < g_widPeak * 0.5f) {
-        unsigned long w = millis() - g_widStart;
-        if (w >= 10 && w <= 2000) {
-          g_widLast = w;
-          if (g_widN < 4000) g_widN++;
-          // a running mean as well, so the mid point does not swing on one odd beat
-          if (g_widAvg <= 0.0f) g_widAvg = (float)w;
-          else                  g_widAvg += ((float)w - g_widAvg) * 0.2f;
-        }
-        g_widPeak = -1.0f;                      // -1 means "already closed for this onset"
+    static bool     lvlAbove  = false;
+    static uint32_t lvlLeadMs = 0;
+    uint32_t nowMs = (uint32_t)millis();
+    bool above = (odfThr > 0.0f) && (odfPeak0 >= odfThr);
+    if (above && !lvlAbove) {
+      lvlAbove  = true;                          // 1. THE LEADING EDGE: the rise through the line
+      lvlLeadMs = nowMs;
+    } else if (!above && lvlAbove) {
+      lvlAbove = false;                          // 2. THE TRAILING EDGE: the fall back through the line
+      uint32_t len = nowMs - lvlLeadMs;          // 3. THE BEAT LENGTH between the two crossings
+      if (len >= 10 && len <= 1000) {
+        g_lvlLen = len;
+        g_lvlLead = lvlLeadMs;
+        g_lvlMid = lvlLeadMs + (len / 2);        // 3. THE MIDPOINT of that length
+        // The width statistics the readouts and the confidence use are now this same length, from the
+        // crossings, instead of the confined-to-the-peak measure that used to be taken separately.
+        g_widLast = len;
+        if (g_widN < 4000) g_widN++;
+        if (g_widAvg <= 0.0f) g_widAvg = (float)len;
+        else                  g_widAvg += ((float)len - g_widAvg) * 0.2f;
+        g_lvlSeq++;                              // publish it, edges complete
       }
-    }
-  }
-  // THE TRAILING EDGE (22 Oct). The most recent onset is watched until its novelty falls back to 40 per
-  // cent of its peak; that instant is its trailing edge. (leading + trailing) / 2 is then the MID POINT,
-  // which the user believes is steadier than the leading edge because instruments attack at different
-  // instants. Chain 0 is used because that is the kick/bass band the beat detection is built on.
-  {
-    static uint32_t trkSeq = 0;
-    if (onsHead > trkSeq) { trkSeq = onsHead; }            // a new onset: watch this one
-    if (trkSeq > 0) {
-      OnsRec &last = onsRing[(trkSeq - 1) % ONS_RING];
-      float nv0 = odfChain[0].novelty;
-      if (nv0 > last.peak) last.peak = nv0;
-      if (last.fallMs == 0 && last.peak > 0.0f && nv0 < last.peak * 0.40f) last.fallMs = millis();
     }
   }
   // (The MIDPOINT SAMPLE lived here. It existed only so the half-beat test could compare the
