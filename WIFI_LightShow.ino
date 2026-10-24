@@ -4827,13 +4827,18 @@ if (onsHead > 0) {
 unsigned long fitIn = onsStamp + (widPrev / 2);
 if (onsNew) {
   fitBeatStep(fitIn, beatListen[0].ivMs);
-  // THE FLASH, FROM THE ACTUAL BEAT AND FROM NOWHERE ELSE (23 Oct 2026 - user instruction).
-  // This is the ONLY place IO48 is triggered now. When a real beat has been detected AND accepted as a
-  // BEAT rather than a transient, the flash is set to that beat's own MIDPOINT - its leading edge plus
-  // half its measured length. The prediction took no part in it and cannot move it, so a flash between
-  // the beats is impossible: there is no beat there to flash on. A transient never gets here, because
-  // g_fitTook is false for it.
-  if (g_fitTook) g_flashAt = fitIn;
+  // THE FLASH: EVERY REAL ONSET IS A BEAT, AT ITS OWN MIDPOINT (23 Oct 2026 - user instruction, corrected).
+  // This is the ONLY place IO48 is triggered. There is deliberately NO second filter here.
+  // A beat cannot be missed: if the detector fired, it is a beat. What keeps transients out is the BEAT
+  // SENSITIVITY LEVEL - the detector's own threshold, and the line your diagram draws between the beats'
+  // peaks and the transients' peaks. By the time an onset exists, the transient question has already been
+  // answered; anything else is a second guess at it.
+  // GATING THIS ON THE FIT'S ACCEPTANCE WAS MY ERROR: the fit rejects almost everything (measured
+  // fitAcc 3 against fitRej 404), so gating on it would have left IO48 flashing about three times in an
+  // entire track. That is the opposite of "a beat can never be missed".
+  // ONE ONSET, ONE BEAT, ONE FLASH - set to that beat's own MIDPOINT, its leading edge plus half its
+  // measured length. The prediction takes no part in the flash and cannot move it.
+  g_flashAt = fitIn;
   onsRecord(onsStamp, onsMask, onsChain, onsNov, onsThr, (uint32_t)fitIn);   // INSTRUMENT
 }
   if (anyReal) g_onsetReal++;
