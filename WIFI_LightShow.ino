@@ -267,16 +267,7 @@ float         acScore    = 0.0f; // its correlation strength (logged)
 // can be judged directly by eye - does it catch every clap, is it picking up
 // transients - completely independently of what the lights are doing. The lights
 // follow the clock below, which only lets a STRONG detection steer it.
-volatile bool rawBeatFlag = false;
-// IO48 FIRES ON THE ACTUAL BEAT, AND NOWHERE ELSE (23 Oct 2026 - user instruction, and the rules are
-// explicit: "THE ACTUAL BEAT MIDPOINT IS THE MASTER - IO48 FLASHES ON THE MIDPOINT OF THE BEAT").
-// g_flashAt is THE MIDPOINT OF A REAL BEAT that has just been detected AND accepted as a BEAT rather
-// than a transient. The flash is fired from that instant and from no other place in the code.
-// NO clock beat, NO prediction and NO correction can move it. The prediction's ONLY job is to decide
-// which onsets count as beats - which is what stops a transient flashing, and what makes a flash
-// between the beats IMPOSSIBLE by construction rather than merely unlikely.
-// A beat cannot be missed: if there is no onset there is no beat, which means an intro or a quiet
-// passage - a different thing entirely.
+// g_flashAt IS the actual beat's midpoint: the flash is fired from it and from nowhere else.
 volatile unsigned long g_flashAt = 0;   // millis() of the actual beat's midpoint (0 = nothing pending)
 volatile uint32_t g_io48Beats = 0;   // IO48 flashes since boot: one per MUSIC beat
 // NOT one per clock beat. The flash is gated on the detector actually hearing something (21 Oct,
@@ -4109,11 +4100,6 @@ static uint8_t       g_fitI = 0;                      // the write cursor
 static uint8_t       g_fitN = 0;                      // how many are in the window
 static unsigned long g_fitPer = 0;                    // the fitted period: their mean interval
 static uint32_t      g_fitAccept = 0, g_fitReject = 0;
-// DID THIS ONSET PASS AS A BEAT? (23 Oct 2026). The fit's window is the ONLY thing that tells a beat
-// from a transient - that is its job per the rules ("keep IO48 flashing only on the beats, not the
-// transients"). g_fitTook is set inside fitBeatStep and read at the call site, where it schedules the
-// IO48 flash at the actual beat's midpoint.
-static bool          g_fitTook = false;
 // THE BEAT WIDTH (23 Oct), measured from the ENVELOPE. A real beat has width; a transient is narrow,
 // which is how a x2/x4/x8 lock on transients is told apart from a lock on the beat.
 static float         g_widPeak = 0.0f;      // the envelope peak of the onset being measured
@@ -4136,21 +4122,6 @@ static inline bool periodInDiscoRange(unsigned long ms) {
   return (bpm >= BPM_MIN && bpm <= BPM_MAX);
 }
 
-// THE INTERVAL GATE for the fit, and it is NOT the same thing as the period gate above.
-// WHY IT EXISTS SEPARATELY (23 Oct 2026). The fit judges each onset by the RAW interval from the last
-// accepted onset, and that gate must refuse the OFF-BEAT (about half a beat, ~223 ms) and a DOUBLED
-// interval (a missed beat, ~892 ms) - but it must NOT refuse a real beat that carries ordinary jitter.
-// MEASURED on the user's 134.2 BPM track: the real beat intervals run 425-474 ms, so a 444 ms floor
-// threw away roughly half of them, and after the first accept the next onset was 447 ms later (refused),
-// the one after 894 ms later (refused), and the gap only grew - so the fit could never accumulate.
-// Measured result of that mistake: fitAcc 1 against fitRej 181, the fit never locked, and the clock fell
-// back to the legacy path where a single missed detection does throw the timing off.
-// 320 ms is well above the half-beat (223) and well below the beat (425); 700 ms is well below the
-// doubled interval (875). The FINAL period is still checked by periodInDiscoRange above, so this wider
-// band cannot let an out-of-range tempo through - it only decides which onsets the fit may look at.
-static inline bool beatIntervalPlausible(unsigned long ms) {
-  return (ms >= 320 && ms <= 700);
-}
 
 // THE WIDTH CONFIDENCE: a narrow beat is a transient, not a beat. Scaled so 120 ms or more scores 1.0.
 static inline float widthConfidence(unsigned long widthMs) {
@@ -4192,7 +4163,6 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
   // only reads onset stamps and writes a period. The hard 444-632 ms gate bounds every accepted
   // interval, and the median cannot shrink away, so the collapse to ~140 ms cannot recur.
   (void)per;
-  g_fitTook = false;                       // this onset is a transient until it passes as a beat
   // THE PREDICTION IS THE TEST (23 Oct 2026 - the user's design, Rule 10 overridden for this fault).
   // "Beats will be on or close to the BPM. Transients will be outside of this."
   // The PREDICTED beat comes from the FOUR GAPS already in the window. X is the actual midpoint measured
@@ -4217,7 +4187,6 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
   g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
   if (g_fitN < FIT_N) g_fitN++;
   g_fitAccept++;
-  g_fitTook = true;                        // IT IS A BEAT - the call site flashes IO48 for it
   if (g_fitN >= 2) {
     // THE MEDIAN, not the mean: a mean is dragged by one bad beat, a median is not.
     unsigned long iv[FIT_N];
