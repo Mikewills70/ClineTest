@@ -3427,6 +3427,13 @@ struct OdfChain {
   volatile uint32_t seq     = 0;
   // THE ADAPTIVE THRESHOLD STATE: a slow peak of this chain novelty (see odfEvaluate).
   float             novPeak = 0.0f;
+  // THE SENSITIVITY LINE'S REFERENCE (24 Oct 2026). A slow peak of this chain's LEVEL - winMax - kept by
+  // the same rise-at-once/fall-slowly rule as novPeak above. The sensitivity line is drawn against THIS,
+  // so that the line and the figure measured against it are the same quantity. It was drawn against
+  // novPeak, a peak of the frame-to-frame CHANGE, while the figure is winMax, a LEVEL: different
+  // quantities of very different size, which is why the level sat permanently above the line, the figure
+  // never fell back through it, no length was ever completed and IO48 never flashed at all.
+  float             lvlPeak = 0.0f;
   float             lastNov = 0.0f;   // previous frame novelty, to spot the rise START
   uint32_t          riseAtMs = 0;     // when the current rise began, for the timestamp
 };
@@ -4990,6 +4997,11 @@ static void odfEvaluate() {
     float flux = ch.winMax - ch.prevWin;
     ch.prevWin = ch.winMax;
     if (c == 0) odfPeak0 = ch.winMax;   // INSTRUMENT: the frame band peak, BEFORE the reset
+    // THE LEVEL'S SLOW PEAK (24 Oct 2026), the same rule the novelty peak uses. This is the reference the
+    // sensitivity line is drawn against, so line and figure end up in the same units.
+    if (ch.winMax > ch.lvlPeak) ch.lvlPeak = ch.winMax;
+    else ch.lvlPeak += (ch.winMax - ch.lvlPeak) * NOV_PEAK_DECAY;
+    if (!(ch.lvlPeak >= 0.0f && ch.lvlPeak <= 1e9f)) ch.lvlPeak = 0.0f;   // NaN guard
     ch.winMax  = 0.0f;
     ch.novelty = (flux > 0.0f) ? flux : 0.0f;
     // ADAPTIVE THRESHOLD STATE: a slow peak of the novelty - rises at once, falls over
@@ -5029,8 +5041,15 @@ static void odfEvaluate() {
   //   beatSens 0.0 -> thr 60   (least sensitive)
   // The heartbeat thr= figure: the same adaptive rule chain 0 listeners use, so the log
   // stays comparable with /diag.
+  // THE SENSITIVITY LINE, NOW IN THE FIGURE'S OWN UNITS (24 Oct 2026). This multiplied
+  // odfChain[0].novPeak - a peak of the frame-to-frame CHANGE - while the figure whose two crossings are
+  // measured is odfPeak0, a LEVEL. The level is many times the size of the change, so it sat above the
+  // line permanently: the figure rose through the line once and never came back down, no length was ever
+  // completed and IO48 never flashed at all. The control itself is UNCHANGED - still a fraction, still
+  // higher = more sensitive - it is now a fraction of the LEVEL's peak, so the line and the figure are the
+  // same quantity and the figure genuinely falls back through the line between beats.
   odfThr = (SENS_FRAC_MAX - (SENS_FRAC_MAX - SENS_FRAC_MIN) * constrain(beatSens, 0.01f, 1.0f))
-           * odfChain[0].novPeak;
+           * odfChain[0].lvlPeak;
 
 
   // NOTHING IS DECIDED HERE ANY MORE. This function MEASURES and PUBLISHES; the

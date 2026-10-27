@@ -99,6 +99,13 @@ struct OdfChain {
   volatile uint32_t seq     = 0;
   // THE ADAPTIVE THRESHOLD STATE: a slow peak of this chain novelty (see odfEvaluate).
   float             novPeak = 0.0f;
+  // THE SENSITIVITY LINE'S REFERENCE (24 Oct 2026). A slow peak of this chain's LEVEL - winMax - kept by
+  // the same rise-at-once/fall-slowly rule as novPeak above. The sensitivity line is drawn against THIS,
+  // so that the line and the figure measured against it are the same quantity. It was drawn against
+  // novPeak, a peak of the frame-to-frame CHANGE, while the figure is winMax, a LEVEL: different
+  // quantities of very different size, which is why the level sat permanently above the line, the figure
+  // never fell back through it, no length was ever completed and IO48 never flashed at all.
+  float             lvlPeak = 0.0f;
   float             lastNov = 0.0f;   // previous frame novelty, to spot the rise START
   uint32_t          riseAtMs = 0;     // when the current rise began, for the timestamp
 };
