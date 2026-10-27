@@ -75,7 +75,7 @@
 //     beatSens 0.01 (strictest)      -> K 0.74
 #define LVL_RING_N   100          // frames in the window; 100 frames at the 10 ms frame = 1 second
 // ===================================================================================================
-// THE FIGURE: A SMOOTHED ENVELOPE OF THE BASS BEAT  (27 Oct 2026 - the discovery of the day)
+// THE FIGURE: THE SMOOTHED ENVELOPE OF THE BASS BEAT  (27 Oct 2026 - the discovery of the day)
 // ===================================================================================================
 // THE FAULT. The figure was winMax - the PEAK of the rectified band signal within each 10 ms frame. That
 // is not an envelope: it pulses at TWICE the band frequency, once every 4 to 12 ms across a 40-120 Hz
@@ -117,7 +117,7 @@
 //     beatSens 1.00 (most sensitive) -> K 0.050  -> line ~6.2
 // The sensitivity control keeps its meaning - higher is more sensitive, which is a LOWER line - it is
 // simply operating in the part of the range where the line is useful.
-#define LVL_LINE_K(bs) (0.25f - 0.20f * constrain((bs), 0.0f, 1.0f))
+#define LVL_LINE_K(bs) (0.55f - 0.20f * constrain((bs), 0.0f, 1.0f))
 // ===================================================================================================
 // THE MINIMUM RISE - "the beat coming out of the noise"  (27 Oct 2026, the user's design)
 // ===================================================================================================
@@ -163,7 +163,7 @@
 // never replaced and EVERY beat after it was refused too. Measured on the board: fitN stuck at 1, fitPer
 // 0, found 0, and every flash a cold-start leading-edge flash. The window could never advance. A long gap
 // is now a RESET, not a refusal.
-#define LVL_LOST_MS  1800
+#define LVL_LOST_MS  2500
 
 // BEAT SENSITIVITY - the absolute part of the threshold, and the control that
 // actually matters.
@@ -212,8 +212,8 @@ struct OdfChain {
   // Filter state: the same six one-poles as the baseline, per chain.
   float hp1 = 0, hp1Prev = 0, hp2 = 0, hp2Prev = 0;
   float lp1 = 0, lp2 = 0, lp3 = 0, lp4 = 0;
-  // ---- THE FIGURE: THE SMOOTHED ENVELOPE (27 Oct 2026) ------------------------------------------
-  // The ONLY thing a beat is measured from. Fast attack, slow release - see ENV_RELEASE above for why
+  // ---- THE FIGURE: THE SMOOTHED ENVELOPE OF THE BASS BEAT (27 Oct 2026) -------------------------
+  // The ONLY thing a beat is measured from. THE ENVELOPE: rectified signal, fast attack, slow release.
   // this replaces winMax, which was a peak of the waveform and pulsed every 4-12 ms.
   float env = 0.0f;
   // ---- THE TWO EDGES, MEASURED ON THE ENVELOPE, PER CHAIN (27 Oct 2026) -------------------------
@@ -243,7 +243,7 @@ float    odfAHi = 0.0f;                   // shared low-pass coefficient (250 Hz
 // THE SENSITIVITY LINE, and chain 0's envelope for the frame just published. The line is logged so it can
 // be read directly; the envelope is the figure the beat is measured from.
 float odfThr  = 0.0f;
-float odfEnv0 = 0.0f;
+float odfEnv0 = 0.0f; float g_envDecay = 0.9996f;   // PER SAMPLE, computed from audioFs in odfEvaluate
 
 // The high-pass coefficient for a band edge. THE SAME FORMULA as the baseline used
 // per sample; it is simply hoisted to the 10 ms frame, because audioFs (and therefore
@@ -529,7 +529,7 @@ int chainForBand(float hz) {
 // pattern listens to, so the 15/10 response is never unavailable.
 void odfConfigureChains() {
   odfChain[0].used = true;
-  odfChain[0].hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
+  odfChain[0].hpHz = 40.0f;   // THE BASS BAND BOTTOM IS A CODE CONSTANT (28 Oct 2026): a kick fundamental is 40-60 Hz. It was read from the pattern slider, so every flash reverted it to the stored 61 Hz and the bottom of the beat was being cut out.
   odfChain[0].aLo  = odfBandCoeff(odfChain[0].hpHz);
   odfChain[0].lpHz = BASS_LP_HZ;   // 120 Hz: bass only, so the line cannot ride up onto a vocal
   odfAuxBands();                           // the two parity bands are always live (22 Oct)
@@ -694,7 +694,7 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["len1"]      = (uint32_t)g_lenMs[1];
   doc["len2"]      = (uint32_t)g_lenMs[2];
   doc["len3"]      = (uint32_t)g_lenMs[3];
-  doc["lead"]      = (uint32_t)g_lvlLead;           // the last leading edge, which is what permits a flash
+  doc["lead"]      = (uint32_t)g_lvlLead; doc["noCross"] = (uint32_t)g_flashMissed; doc["ch10"] = (uint32_t)g_ch10Beats; doc["longSet"] = (uint32_t)g_longSet; doc["env0"] = (double)odfEnv0; doc["audioFs"] = (double)audioFs; doc["envDecay"] = (double)g_envDecay; doc["envMin"] = (double)odfLvlLo; doc["envMax"] = (double)odfLvlHi; doc["lenT0"] = (uint32_t)g_lenMs[(g_lenI + 0) % 4]; doc["lenT1"] = (uint32_t)g_lenMs[(g_lenI + 1) % 4]; doc["lenT2"] = (uint32_t)g_lenMs[(g_lenI + 2) % 4]; doc["lenT3"] = (uint32_t)g_lenMs[(g_lenI + 3) % 4]; doc["lenI"] = (uint8_t)g_lenI; doc["lenN"] = (uint8_t)g_lenN;   // THE FOUR BEAT LENGTHS IN BEAT ORDER, oldest first, so the sequence can be read instead of guessed. The ring wraps, which is why len0..len3 alone could not show whether the long beats alternate.           // the last leading edge, which is what permits a flash
 
                                                   // threshold is a fraction of this
 
@@ -953,7 +953,7 @@ static bool          g_paceWasIdle = true;
 // 50 BPM, so nothing musical is lost.
 // SEE THE NOTE ABOVE THE CALL SITES: a period under MIN_BEAT_MS is the half-beat and is doubled.
 #define MIN_BEAT_MS 350
-static inline unsigned long fixHalfBeat(unsigned long ms) {
+static inline unsigned long fixHalfBeat(unsigned long ms) { return ms;   // NEUTRALISED 28 Oct 2026: THE HALF-BEAT FLIP IS WHAT MADE THE CLOCK GO HALF A BEAT OUT AND BACK. The tempo is the measured midpoint interval (g_fitPer) and nothing else, so no correction of this kind has any business existing.
   if (ms == 0) return 0;
   while (ms < MIN_BEAT_MS && ms < 4000) ms *= 2;
   return ms;

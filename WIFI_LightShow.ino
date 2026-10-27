@@ -303,7 +303,7 @@ volatile float    odfLvlHi = 0.0f;
 volatile unsigned long g_predMid    = 0;   // the predicted midpoint the flash is scheduled at (0 = none)
 volatile uint8_t       g_beatFound  = 0;   // 1 = four valid intervals exist: the beat has been FOUND
 volatile uint8_t       g_longBeat   = 0;   // 1 = the last beat's BEAT LENGTH was the longer of the pair
-volatile uint32_t      g_lvlLeadSeq = 0;   // bumps at every LEADING edge so the render core can see one
+unsigned long ch10OffAt = 0; volatile uint32_t g_ch10Beats = 0; volatile uint32_t g_longSet = 0; volatile uint32_t g_flashMissed = 0; volatile uint32_t g_lvlLeadSeq = 0;   // g_flashMissed: PREDICTED BEATS WITH NO LEADING EDGE, the first kind of miss. g_lvlLeadSeq: bumps at every LEADING edge so the render core can see one
 volatile unsigned long g_fitLastMs  = 0;   // millis() of the last beat the fit ACCEPTED (the one-bar timeout)
 volatile uint32_t      g_leadFlash  = 0;   // leading edges flashed on while the beat is not yet found
 long                   g_fitX       = 0;   // the last X: measured midpoint minus predicted midpoint
@@ -342,8 +342,8 @@ uint8_t  g_lenI = 0, g_lenN = 0;
       for (uint8_t _a = 0; _a < g_lenN; _a++)                                                       \
         for (uint8_t _b = _a + 1; _b < g_lenN; _b++)                                                \
           if (_s[_b] < _s[_a]) { uint32_t _t = _s[_a]; _s[_a] = _s[_b]; _s[_b] = _t; }               \
-      uint32_t _ref = _s[0];                                                                       \
-      if (_ref != 0 && ((uint64_t)(lv) * 2u) < (uint64_t)_ref) { _isBeat = false; }                 \
+      uint32_t _ref = _s[g_lenN / 2];   /* THE MIDDLE of the window: similar means the middle. */\
+      if (_ref != 0 && (((uint64_t)(lv) * 2u) < (uint64_t)_ref || (uint64_t)(lv) > ((uint64_t)_ref * 3u))) { _isBeat = false; }   /* TWO-SIDED. Less than HALF the middle is a transient. More than THREE TIMES it is a merged figure or a sustained vocal. The upper bound is 3x and not 2x because legitimate Beat Lengths on this hardware span 69-197 ms, nearly 3x, so a 2x bound was refusing real beats - and a refused beat did not reset the one-bar clock, which is what produced relearns with no cause. */\
     }                                                                                              \
     _isBeat; })
 volatile uint32_t g_io48Beats = 0;   // IO48 flashes since boot: one per MUSIC beat
@@ -3440,7 +3440,7 @@ static void fastBeatCheck() {
 //     beatSens 0.01 (strictest)      -> K 0.74
 #define LVL_RING_N   100          // frames in the window; 100 frames at the 10 ms frame = 1 second
 // ===================================================================================================
-// THE FIGURE: A SMOOTHED ENVELOPE OF THE BASS BEAT  (27 Oct 2026 - the discovery of the day)
+// THE FIGURE: THE SMOOTHED ENVELOPE OF THE BASS BEAT  (27 Oct 2026 - the discovery of the day)
 // ===================================================================================================
 // THE FAULT. The figure was winMax - the PEAK of the rectified band signal within each 10 ms frame. That
 // is not an envelope: it pulses at TWICE the band frequency, once every 4 to 12 ms across a 40-120 Hz
@@ -3482,7 +3482,7 @@ static void fastBeatCheck() {
 //     beatSens 1.00 (most sensitive) -> K 0.050  -> line ~6.2
 // The sensitivity control keeps its meaning - higher is more sensitive, which is a LOWER line - it is
 // simply operating in the part of the range where the line is useful.
-#define LVL_LINE_K(bs) (0.25f - 0.20f * constrain((bs), 0.0f, 1.0f))
+#define LVL_LINE_K(bs) (0.55f - 0.20f * constrain((bs), 0.0f, 1.0f))
 // ===================================================================================================
 // THE MINIMUM RISE - "the beat coming out of the noise"  (27 Oct 2026, the user's design)
 // ===================================================================================================
@@ -3528,7 +3528,7 @@ static void fastBeatCheck() {
 // never replaced and EVERY beat after it was refused too. Measured on the board: fitN stuck at 1, fitPer
 // 0, found 0, and every flash a cold-start leading-edge flash. The window could never advance. A long gap
 // is now a RESET, not a refusal.
-#define LVL_LOST_MS  1800
+#define LVL_LOST_MS  2500
 
 // BEAT SENSITIVITY - the absolute part of the threshold, and the control that
 // actually matters.
@@ -3577,8 +3577,8 @@ struct OdfChain {
   // Filter state: the same six one-poles as the baseline, per chain.
   float hp1 = 0, hp1Prev = 0, hp2 = 0, hp2Prev = 0;
   float lp1 = 0, lp2 = 0, lp3 = 0, lp4 = 0;
-  // ---- THE FIGURE: THE SMOOTHED ENVELOPE (27 Oct 2026) ------------------------------------------
-  // The ONLY thing a beat is measured from. Fast attack, slow release - see ENV_RELEASE above for why
+  // ---- THE FIGURE: THE SMOOTHED ENVELOPE OF THE BASS BEAT (27 Oct 2026) -------------------------
+  // The ONLY thing a beat is measured from. THE ENVELOPE: rectified signal, fast attack, slow release.
   // this replaces winMax, which was a peak of the waveform and pulsed every 4-12 ms.
   float env = 0.0f;
   // ---- THE TWO EDGES, MEASURED ON THE ENVELOPE, PER CHAIN (27 Oct 2026) -------------------------
@@ -3608,7 +3608,7 @@ float    odfAHi = 0.0f;                   // shared low-pass coefficient (250 Hz
 // THE SENSITIVITY LINE, and chain 0's envelope for the frame just published. The line is logged so it can
 // be read directly; the envelope is the figure the beat is measured from.
 float odfThr  = 0.0f;
-float odfEnv0 = 0.0f;
+float odfEnv0 = 0.0f; float g_envDecay = 0.9996f;   // PER SAMPLE, computed from audioFs in odfEvaluate
 
 // The high-pass coefficient for a band edge. THE SAME FORMULA as the baseline used
 // per sample; it is simply hoisted to the 10 ms frame, because audioFs (and therefore
@@ -3894,7 +3894,7 @@ int chainForBand(float hz) {
 // pattern listens to, so the 15/10 response is never unavailable.
 void odfConfigureChains() {
   odfChain[0].used = true;
-  odfChain[0].hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
+  odfChain[0].hpHz = 40.0f;   // THE BASS BAND BOTTOM IS A CODE CONSTANT (28 Oct 2026): a kick fundamental is 40-60 Hz. It was read from the pattern slider, so every flash reverted it to the stored 61 Hz and the bottom of the beat was being cut out.
   odfChain[0].aLo  = odfBandCoeff(odfChain[0].hpHz);
   odfChain[0].lpHz = BASS_LP_HZ;   // 120 Hz: bass only, so the line cannot ride up onto a vocal
   odfAuxBands();                           // the two parity bands are always live (22 Oct)
@@ -4059,7 +4059,7 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["len1"]      = (uint32_t)g_lenMs[1];
   doc["len2"]      = (uint32_t)g_lenMs[2];
   doc["len3"]      = (uint32_t)g_lenMs[3];
-  doc["lead"]      = (uint32_t)g_lvlLead;           // the last leading edge, which is what permits a flash
+  doc["lead"]      = (uint32_t)g_lvlLead; doc["noCross"] = (uint32_t)g_flashMissed; doc["ch10"] = (uint32_t)g_ch10Beats; doc["longSet"] = (uint32_t)g_longSet; doc["env0"] = (double)odfEnv0; doc["audioFs"] = (double)audioFs; doc["envDecay"] = (double)g_envDecay; doc["envMin"] = (double)odfLvlLo; doc["envMax"] = (double)odfLvlHi; doc["lenT0"] = (uint32_t)g_lenMs[(g_lenI + 0) % 4]; doc["lenT1"] = (uint32_t)g_lenMs[(g_lenI + 1) % 4]; doc["lenT2"] = (uint32_t)g_lenMs[(g_lenI + 2) % 4]; doc["lenT3"] = (uint32_t)g_lenMs[(g_lenI + 3) % 4]; doc["lenI"] = (uint8_t)g_lenI; doc["lenN"] = (uint8_t)g_lenN;   // THE FOUR BEAT LENGTHS IN BEAT ORDER, oldest first, so the sequence can be read instead of guessed. The ring wraps, which is why len0..len3 alone could not show whether the long beats alternate.           // the last leading edge, which is what permits a flash
 
                                                   // threshold is a fraction of this
 
@@ -4318,7 +4318,7 @@ static bool          g_paceWasIdle = true;
 // 50 BPM, so nothing musical is lost.
 // SEE THE NOTE ABOVE THE CALL SITES: a period under MIN_BEAT_MS is the half-beat and is doubled.
 #define MIN_BEAT_MS 350
-static inline unsigned long fixHalfBeat(unsigned long ms) {
+static inline unsigned long fixHalfBeat(unsigned long ms) { return ms;   // NEUTRALISED 28 Oct 2026: THE HALF-BEAT FLIP IS WHAT MADE THE CLOCK GO HALF A BEAT OUT AND BACK. The tempo is the measured midpoint interval (g_fitPer) and nothing else, so no correction of this kind has any business existing.
   if (ms == 0) return 0;
   while (ms < MIN_BEAT_MS && ms < 4000) ms *= 2;
   return ms;
@@ -4709,7 +4709,7 @@ static void listeningStep() {
             else                             L.ivMs = clampBeatPeriod(fixHalfBeat(g_beatPeriodMs));
             g_idlePace = false;
           }
-          if (p >= 200) {
+          if (false) {   // THE COMB TEMPO SEARCH IS DEAD (28 Oct 2026): a second, third and fourth opinion on the tempo, computed from a comb filter rather than from the measured midpoint intervals. It was the source the clock fell back to whenever the fit was not locked - which is exactly when it went half a beat out.
             // A MEDIAN OVER THE LAST 3 COMB RESULTS. The comb occasionally returns a wrong
             // value for a single window (measured outliers of 350, 370 and 660 ms against a
             // true 480-490), and adopting one of those would speed the clock up or slow it
@@ -5136,7 +5136,7 @@ if (onsNew) {
       lvlSeen = g_lvlSeq;
       uint32_t len = g_lvlLen;
       uint32_t mid = g_lvlMid;
-      if (LENGTH_IS_A_BEAT(len)) {
+      if (LENGTH_IS_A_BEAT(len)) { g_fitLastMs = millis();   // A FIGURE THAT IS A BEAT resets the one-bar timeout - even if the fit window then rejects it, the beat was there. A LONG figure (a low bass vocal, say) is NOT a beat and does NOT reset it, so the clock keeps running and, after a bar, the detector returns to the intro to relearn. THE USER RULE, 28 Oct: a long beat is treated the same as a missed beat - ignore it, hold the BPM, continue.
         // 4. A BEAT: its Beat Length is not much less than the four already in the window. The interval
         //    test against the bell curve, the window and the period are fitBeatStep's job, and it now
         //    reports whether it accepted the beat.
@@ -5147,10 +5147,8 @@ if (onsNew) {
           // beat and not before. The Beat Lengths alternate: 1 and 3 are longer than 2 and 4, strictly,
           // every bar, so ONE comparison against the previous beat tells which is which. Beat 1 against
           // beat 3 is deliberately not attempted.
-          if (g_lenN >= 1) {
-            uint32_t prevLen = g_lenMs[(uint8_t)((g_lenI + 4 - 1) % 4)];
-            g_longBeat = (len > prevLen) ? 1 : 0;
-          }
+          /* IS THIS THE LONGEST OF THE BAR? (28 Oct 2026, the users idea). The user: there is a chance that the longest beat is beat 1, and you can count the beats in order from that. Comparing with the PREVIOUS beat alone was firing on a 20 ms wobble between two beats of the SAME group - measured 150 against 127, an 18 per cent difference inside one group. Comparing against all four in the window asks the question the user actually posed: is this beat the LONG one? */
+          g_longBeat = (g_lenN >= 4 && len > g_lenMs[0] && len > g_lenMs[1] && len > g_lenMs[2] && len > g_lenMs[3]) ? 1 : 0; if (g_longBeat) g_longSet++;   // HOW OFTEN THE LONG BEAT IS SEEN: if this stays at 0, the bar comparison never fires and LED 10 cannot light
           g_lenMs[g_lenI] = len;
           g_lenI = (uint8_t)((g_lenI + 1) % 4);
           if (g_lenN < 4) g_lenN++;
@@ -5181,7 +5179,7 @@ if (onsNew) {
     // from the last measured midpoint plus the period, and the beat that comes back is still on time.
     // Only a whole bar without a beat clears the window, which drops the beat back to "not found" and
     // hands the flash back to the leading-edge hunt.
-    if (g_fitN > 0 && g_fitLastMs != 0 && (unsigned long)(millis() - g_fitLastMs) > LVL_LOST_MS) {
+    if (g_fitN > 0 && g_fitLastMs != 0 && (unsigned long)(millis() - g_fitLastMs) > ((g_fitPer >= 444 && g_fitPer <= 632) ? ((4UL * g_fitPer > (unsigned long)LVL_LOST_MS) ? (4UL * g_fitPer) : (unsigned long)LVL_LOST_MS) : (unsigned long)LVL_LOST_MS)) {   // A BAR AT THE TEMPO IN FORCE: four beats, so 1776 ms at 135 BPM and 2528 at 95. A fixed 2500 ms is a bar only at the slow end and waits too long at the fast end.
       g_fitN = 0; g_fitI = 0; g_fitPer = 0;
       g_beatFound = 0; g_predMid = 0;
     }
@@ -5231,13 +5229,13 @@ static void odfEvaluate() {
       // BEFORE its midpoint arrives, and the leading edge always precedes the midpoint - so the leading
       // edge is published the instant it happens, and the render core uses it both to flash during an
       // intro (before the beat is found) and to permit the predicted flash.
-      g_lvlLead    = nowMs;
+      odfChain[0].leadMs  = nowMs; odfChain[0].edgeSeq = odfChain[0].edgeSeq + 1; g_lvlLead = nowMs;   // the edge, the sequence the listeners trigger on, and the flash gate
       g_lvlLeadSeq = g_lvlLeadSeq + 1;
     } else if (!above && lvlAbove) {
       lvlAbove = false;                          // 2. THE TRAILING EDGE: the fall back through the line
       uint32_t len = nowMs - lvlLeadMs;          // 3. THE BEAT LENGTH between the two crossings
       if (len >= 10 && len <= 1000) {
-        g_lvlLen = len;
+        odfChain[0].beatLen = len; odfChain[0].midMs = lvlLeadMs + (len / 2); g_lvlLen = len;   // Beat Length, Midpoint, published length
         g_lvlMid = lvlLeadMs + (len / 2);        // 3. THE MIDPOINT of that length
         // The width statistics the readouts and the confidence use are now this same length, from the
         // crossings, instead of the confined-to-the-peak measure that used to be taken separately.
@@ -5254,7 +5252,7 @@ static void odfEvaluate() {
   // clean timer needs no phase measurement at all.)
   // Coefficients refreshed once per frame: audioFs only changes once per FFT window,
   // so this is the same value the per-sample form would have produced.
-  odfChain[0].hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
+  odfChain[0].hpHz = 40.0f;   // THE BASS BAND BOTTOM IS A CODE CONSTANT (28 Oct 2026): a kick fundamental is 40-60 Hz. It was read from the pattern slider, so every flash reverted it to the stored 61 Hz and the bottom of the beat was being cut out.
   odfChain[0].aLo  = odfBandCoeff(odfChain[0].hpHz);
   // EVERY used chain gets its own pair, refreshed once per frame (audioFs changes once per FFT
   // window, so this is the same value a per-sample form would produce).
@@ -5421,7 +5419,7 @@ static inline void audioProcessSample(float s, int &onsetSub, int stride) {
     // This replaced the old frame-peak line, which took the PEAK of the rectified
     // waveform within the frame and therefore pulsed every 4 to 12 ms.
     float bpRect = fabsf(ch.lp4);
-    ch.env = (bpRect > ch.env) ? bpRect : (ch.env * ENV_RELEASE);
+    ch.env = (bpRect > ch.env) ? bpRect : (ch.env * g_envDecay);   // PER SAMPLE decay - see the note at ENV_RELEASE
 
     // Chain 0 ALSO feeds the shared level readings, so the heartbeat's numbers stay
     // directly comparable with the baseline's.
@@ -5530,7 +5528,7 @@ static void audioAnalyse() {
   vTaskDelay(1);                          // one yield per window, either path
 
   float elapsedUs = (float)(esp_timer_get_time() - t0);
-  audioFs = (float)FFT_SAMPLES * 1000000.0f / elapsedUs;
+  audioFs = (float)FFT_SAMPLES * 1000000.0f / elapsedUs; g_envDecay = expf(-1.0f / ((audioFs > 1.0f ? audioFs : 1.0f) * 0.150f));   // THE ENVELOPE RELEASE, PER SAMPLE, computed from the REAL sample rate. A fixed value is only right for one rate: 0.9996 gives 156 ms at 17 kHz but only 57 ms at 44 kHz, which under-smooths the envelope so it ripples and produces short figures the transient test then refuses.
   if (audioFs < 1000.0f) audioFs = 1000.0f;
 
   // Remove the DC bias so the FFT sees only the audio.
@@ -6001,7 +5999,7 @@ void executePatternStep(bool beatHeard) {
   // the verdict holds steady between beats instead of flickering.
   for (int i = 0; i < N - 1; i++) on[i] = false;
   on[N - 1] = (g_beatFound && g_longBeat) ? true : false;
-  for (int i = 0; i < N; i++) digitalWrite(channelPins[i], on[i] ? HIGH : LOW);
+  for (int i = 0; i < N - 1; i++) digitalWrite(channelPins[i], on[i] ? HIGH : LOW);   // CHANNELS 1-9 ONLY. Channel 10 is driven by the BEAT, further down, because this engine steps at the Speed slider rate - up to one second per step - while a long-beat window lasts about 450 ms, so the engine almost never looked while the window was open. That is why LED 10 never lit.
 }
 
 void run240VDisplayPattern(bool beat) {
@@ -6009,7 +6007,7 @@ void run240VDisplayPattern(bool beat) {
 
   // NOTE: IO48 is driven separately in loop() as the RAW DETECTOR INDICATOR, so
   // there is deliberately no beat flash here.
-  if (powerLedOffAt != 0 && (long)(currentMillis - powerLedOffAt) >= 0) {
+  if (ch10OffAt != 0 && (long)(currentMillis - ch10OffAt) >= 0) { digitalWrite(channelPins[9], LOW); ch10OffAt = 0; }   if (powerLedOffAt != 0 && (long)(currentMillis - powerLedOffAt) >= 0) {   // CHANNEL 10 and IO48 OFF after their pulses
     digitalWrite(POWER_LED_PIN, LOW);
     powerLedOffAt = 0;
   }
@@ -8063,10 +8061,10 @@ void loop() {
       unsigned long p = (g_fitPer >= 444 && g_fitPer <= 632) ? g_fitPer : 500;
       // NO QUIET FLAG HERE EITHER (27 Oct 2026). The gate is simply "was this beat's leading edge seen",
       // and in a quiet section there is no leading edge to see.
-      fireNow = ((g_lvlLead != 0) && ((unsigned long)(millis() - g_lvlLead) <= (p / 2)));
+      fireNow = ((g_lvlLead != 0) && ((unsigned long)(millis() - g_lvlLead) <= (p / 2))); if (!fireNow) g_flashMissed++;   // THE BEAT WAS PREDICTED AND THE ENVELOPE NEVER CROSSED: no figure was ever made, so this is a miss of the FIRST kind, not a fit rejection.
       g_predMid = 0;
     }
-    if (fireNow) {
+    if (fireNow) { if (g_beatFound && g_longBeat) { digitalWrite(channelPins[9], HIGH); ch10OffAt = millis() + 100; g_ch10Beats++; }   // CHANNEL 10 = THE LONG BEAT (beat 1, or the 1-and-3 pair). Driven at the BEAT, in the render loop, so the slow 240V engine can never sample it late. It was written inside executePatternStep, which steps at speed240V x 1000 ms - up to one second - while a long-beat window lasts about 450 ms, so the engine almost never looked while the window was open and LED 10 stayed dark whatever g_longBeat said.
       digitalWrite(POWER_LED_PIN, HIGH);
       // VISIBLE AT LAST (21 Oct). 100 ms was too short to see: user, "it still barely flashes at
       // all" - while the power-up and error blinks (500 ms, the same pin, the same diode) are
@@ -8074,9 +8072,9 @@ void loop() {
       // it is capped at 40 percent of the CURRENT beat so two fast beats can never merge into one
       // steady glow. In silence (the 1 s pace) that is the full 300 ms.
       unsigned long per = beatListen[0].ivMs;
-      unsigned long fl  = 300;
-      if (per >= 120 && (per * 40 / 100) < fl) fl = per * 40 / 100;
-      if (fl < 60) fl = 60;
+      unsigned long fl  = 100;   // THE FLASH LENGTH: one fixed value, one place to change it. It used to be 40 per cent of the CLOCK period capped at 300 ms, so it was 180-300 ms and, with the cold-start path able to fire on every leading edge, it re-armed faster than it expired and IO48 never went dark between beats.
+      // (The old rule was 40 per cent of the clock period, capped at 300 ms. Removed 28 Oct 2026: the flash marks the beat and nothing else, so it does not depend on the clock, the period or any detection state.)
+      // (The 60 ms floor is gone with the rest of it: the length is the fixed value above.)
       powerLedOffAt = millis() + fl;
       g_io48Beats++;
     }
