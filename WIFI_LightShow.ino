@@ -285,6 +285,32 @@ volatile uint32_t g_lvlLead = 0;   // 1. the LEADING EDGE itself: the instant th
 // the last second. Published so the line's position can be read directly in the log rather than guessed at.
 volatile float    odfLvlLo = 0.0f;
 volatile float    odfLvlHi = 0.0f;
+// ===================================================================================================
+// THE PREDICTED BEAT AND THE FLASH  (24 Oct 2026 - the user's design, stated in full)
+// ===================================================================================================
+// THE RULE: IO48 flashes at the CALCULATED MIDPOINT OF THE PREDICTED BEAT.
+// Every measurement here is of a beat that has ALREADY GONE - the trailing edge cannot be seen until it
+// has passed below the sensitivity line - so the flash can never be triggered by that beat's own
+// midpoint. It is computed from the past and fired at a future instant:
+//     predicted Midpoint = last measured Midpoint + P
+//     P = the period, taken from the FOUR INTERVALS BETWEEN MIDPOINTS (the last three plus the latest)
+// and P is only adopted if the interval matches a valid BPM in the bell curve.
+// X = measured Midpoint - predicted Midpoint, fed into P so the next X is smaller.
+// This is why IO48 cannot miss a beat: the flash is scheduled whether or not the beat is ever detected.
+// THE GATE: the flash still needs that beat's LEADING EDGE to have been seen - the leading edge always
+// precedes the midpoint, so the answer is always known in time. No leading edge means a quiet section,
+// and then IO48 does not flash.
+volatile unsigned long g_predMid    = 0;   // the predicted midpoint the flash is scheduled at (0 = none)
+volatile uint8_t       g_beatFound  = 0;   // 1 = four valid intervals exist: the beat has been FOUND
+volatile uint8_t       g_longBeat   = 0;   // 1 = the last beat's BEAT LENGTH was the longer of the pair
+volatile uint32_t      g_lvlLeadSeq = 0;   // bumps at every LEADING edge so the render core can see one
+volatile uint32_t      g_leadFlash  = 0;   // leading edges flashed on while the beat is not yet found
+long                   g_fitX       = 0;   // the last X: measured midpoint minus predicted midpoint
+// THE FIT'S WINDOW AND ITS PERIOD. These were static inside fitBeatStep; they are file-scope now because
+// the render core reads the period to compute the predicted midpoint and /diag publishes it, and both sit
+// above fitBeatStep in the file.
+uint8_t                g_fitN       = 0;   // how many intervals are in the window
+unsigned long          g_fitPer     = 0;   // the period P: the median of the four intervals between midpoints
 // POINT 4's WINDOW: THE FOUR LENGTHS. A candidate is a beat if its length is similar to the four lengths
 // already in the window; anything much less is a TRANSIENT and is ignored. Note this is a window of
 // LENGTHS - a beat's figure is LONG across the sensitivity line, a transient's is SHORT - and it is not
@@ -297,9 +323,14 @@ uint8_t  g_lenI = 0, g_lenN = 0;
 // point ABOVE the type declarations - every prototype then lands before the types it uses and the whole
 // sketch fails with a cascade of "does not name a type". That is exactly what happened when this was first
 // written as `static inline bool`: 30+ errors, from one correctly-placed function.
-// "MUCH LESS" IS MEASURED AS LESS THAN HALF the window's middle length. The rules say "anything much
-// less"; they name no multiplier, and this is the one number in this change that I had to choose. It is
-// kept here, alone, so it can be changed without touching anything else.
+// "MUCH LESS" IS MEASURED AS LESS THAN HALF the SHORTEST BEAT LENGTH in the window. The rules say
+// "anything much less"; they name no multiplier, and the multiplier is the one number here I had to
+// choose - it is kept alone so it can be changed without touching anything else.
+// THE REFERENCE IS THE SHORTEST, NOT THE MIDDLE (24 Oct 2026). The Beat Lengths legitimately alternate:
+// beats 1 and 3 are LONGER than beats 2 and 4. So the four Beat Lengths in the window span short to long
+// by design, and a middle reference would sit between them - letting a transient that is shorter than the
+// middle but longer than the shortest slip through as a beat. A transient is much less than ANY beat, so
+// the shortest Beat Length in the window is the reference that cannot be fooled.
 #define LENGTH_IS_A_BEAT(lv) ({                                                                    \
     bool _isBeat = true;                                                                           \
     if ((lv) == 0) { _isBeat = false; }                                                            \
@@ -309,7 +340,7 @@ uint8_t  g_lenI = 0, g_lenN = 0;
       for (uint8_t _a = 0; _a < g_lenN; _a++)                                                       \
         for (uint8_t _b = _a + 1; _b < g_lenN; _b++)                                                \
           if (_s[_b] < _s[_a]) { uint32_t _t = _s[_a]; _s[_a] = _s[_b]; _s[_b] = _t; }               \
-      uint32_t _ref = _s[g_lenN / 2];                                                              \
+      uint32_t _ref = _s[0];                                                                       \
       if (_ref != 0 && ((uint64_t)(lv) * 2u) < (uint64_t)_ref) { _isBeat = false; }                 \
     }                                                                                              \
     _isBeat; })
@@ -3907,6 +3938,21 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["lvlLo"]   = (double)odfLvlLo;
   doc["lvlHi"]   = (double)odfLvlHi;
   doc["thr"]     = (double)odfThr;
+  // ---- THE PREDICTED BEAT (24 Oct 2026). Every number the plan needs to be judged by, so the beat can be
+  // watched being found rather than argued about. X collapsing toward zero is the proof.
+  doc["beatFound"] = (uint8_t)g_beatFound;          // 1 = four valid intervals: the beat has been found
+  doc["predMid"]   = (uint32_t)g_predMid;           // the predicted midpoint IO48 is due to flash on
+  doc["longBeat"]  = (uint8_t)g_longBeat;           // 1 = the last Beat Length was the longer one (beat 1 or 3)
+  doc["lvlRej"]    = (uint32_t)g_lvlReject;         // figures refused by point 4: Beat Length much less
+  doc["leadFlash"] = (uint32_t)g_leadFlash;         // flashes on the leading edge while the beat is not found
+  doc["fitN"]      = (uint8_t)g_fitN;               // intervals in the window
+  doc["fitPer"]    = (uint32_t)g_fitPer;            // the period P
+  doc["X"]         = (long)g_fitX;                  // the last X: measured midpoint - predicted midpoint
+  doc["len0"]      = (uint32_t)g_lenMs[0];          // the four BEAT LENGTHS (leading edge to trailing edge)
+  doc["len1"]      = (uint32_t)g_lenMs[1];
+  doc["len2"]      = (uint32_t)g_lenMs[2];
+  doc["len3"]      = (uint32_t)g_lenMs[3];
+  doc["lead"]      = (uint32_t)g_lvlLead;           // the last leading edge, which is what permits a flash
                                                   // threshold is a fraction of this
   doc["p0frac"]  = (double)beatListen[0].sensFrac;
   doc["p0iv"]    = (uint32_t)beatListen[0].ivMs;      // the beat period the clock runs at
@@ -4176,8 +4222,9 @@ static inline unsigned long fixHalfBeat(unsigned long ms) {
 #define FIT_N 5
 static unsigned long g_fitMs[FIT_N] = {0, 0, 0, 0, 0};   // the window: the last accepted beat times
 static uint8_t       g_fitI = 0;                      // the write cursor
-static uint8_t       g_fitN = 0;                      // how many are in the window
-static unsigned long g_fitPer = 0;                    // the fitted period: their mean interval
+// g_fitN and g_fitPer are declared up with the other beat globals (24 Oct 2026): the render core reads
+// the period to compute the predicted midpoint, and /diag publishes it - both of which are ABOVE this
+// point in the file, so the declarations have to be above them too.
 static uint32_t      g_fitAccept = 0, g_fitReject = 0;
 // THE BEAT WIDTH (23 Oct), measured from the ENVELOPE. A real beat has width; a transient is narrow,
 // which is how a x2/x4/x8 lock on transients is told apart from a lock on the beat.
@@ -4219,7 +4266,7 @@ static inline float bpmPrior(unsigned long ms) {
   return 0.85f + 0.15f * v;
 }
 
-static void fitBeatStep(unsigned long stamp, unsigned long per) {
+static bool fitBeatStep(unsigned long stamp, unsigned long per) {
   // ---- CLOCK 2 IS INDEPENDENT FROM HERE (23 Oct 2026, USER-AUTHORISED under Rule 10) ---------------
   // WHAT WAS WRONG. This function was handed CLOCK 1's period and accepted an onset only if it landed
   // within per/4 of ITS OWN running prediction. Both made it confirm whatever it had already locked:
@@ -4253,15 +4300,16 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
   long X = 0;
   if (g_fitN >= 2 && g_fitPer > 0) {
     unsigned long lastA = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
-    if (stamp <= lastA) return;                       // out of order or duplicate: nothing to learn
+    if (stamp <= lastA) return false;                 // out of order or duplicate: nothing to learn
     unsigned long pred = lastA + g_fitPer;            // WHERE THE NEXT BEAT IS EXPECTED
     X = (long)stamp - (long)pred;                     // actual midpoint against the prediction
     long aX = (X < 0) ? -X : X;
     // A THIRD OF A BEAT: a beat is close to the prediction, a transient is not. The transients sit on
     // the half beat (~223 ms) and are refused here, so IO48 cannot be lit on one and no off-beat flash
     // can be added.
-    if (aX > (long)(g_fitPer / 3)) { g_fitReject++; return; }
+    if (aX > (long)(g_fitPer / 3)) { g_fitReject++; return false; }
   }
+  g_fitX = X;                       // PUBLISHED: this is the number that must fall toward zero
   g_fitMs[g_fitI] = stamp;
   g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
   if (g_fitN < FIT_N) g_fitN++;
@@ -4316,7 +4364,13 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
     // the half beat - the visible sudden doubling - and every real beat then falls outside the window and
     // is refused. Missing beats and invented beats, from one rewritten rule.
     // A period outside the range is NOT A BEAT. The onset is refused and the period is NOT adopted.
-    if (g_fitPer < 444 || g_fitPer > 632) { g_fitReject++; g_fitPer = 0; g_fitN = 0; g_fitI = 0; return; }
+    // THE WINDOW IS NOT WIPED (24 Oct 2026 - the user's instruction). It used to ZERO itself here
+    // (g_fitPer = 0; g_fitN = 0; g_fitI = 0). That is fatal to the design: ONE out-of-range interval - a
+    // stray detection in a quiet passage - destroyed the period, and with it the prediction and the flash,
+    // exactly when the user's instruction is to KEEP CALCULATING BEATS AND X VALUES EVEN IF NO BEAT IS
+    // HEARD, so that when the music returns at similar levels the beat is already there. An interval
+    // outside the bell curve is REFUSED and nothing else moves. The period simply holds.
+    if (g_fitPer < 444 || g_fitPer > 632) { g_fitReject++; return false; }
     // THE CONFIDENCE: the measurement first, the prior only as a nudge.
     // A HIGH REJECTION RATE IS PENALISED: a correct lock should reject about half the onsets (beats
     // against off-beats), so much more than that means it is taking only every other beat - which is the
@@ -4342,6 +4396,8 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
       g_conf = widthConfidence(g_widLast) * rejScore * spread * bpmPrior(g_fitPer);
     }
   }
+  // ACCEPTED: the interval matched the bell curve and the window now holds this beat.
+  return true;
 }
 
 // ==== BASS BEAT PROTECTED REGION - END ====
@@ -4939,18 +4995,46 @@ if (onsNew) {
       uint32_t len = g_lvlLen;
       uint32_t mid = g_lvlMid;
       if (LENGTH_IS_A_BEAT(len)) {
-        // 4. A BEAT: its length is similar to the four lengths already in the window. Record the length
-        //    in the window, time the beat on 3. the MIDPOINT of that length, and schedule the flash there.
-        g_lenMs[g_lenI] = len;
-        g_lenI = (uint8_t)((g_lenI + 1) % 4);
-        if (g_lenN < 4) g_lenN++;
-        fitBeatStep(mid, beatListen[0].ivMs);
-        if (g_flashAt == 0 || (long)(g_flashAt - millis()) <= 0) g_flashAt = mid;
+        // 4. A BEAT: its Beat Length is not much less than the four already in the window. The interval
+        //    test against the bell curve, the window and the period are fitBeatStep's job, and it now
+        //    reports whether it accepted the beat.
+        bool accepted = fitBeatStep(mid, beatListen[0].ivMs);
+        if (accepted) {
+          // THE BEAT LENGTH WINDOW, AND BEATS 1 & 3 (24 Oct 2026). These are taken ONLY on beats that
+          // conform to a valid BPM - the user's rule - so they happen here, after the fit has accepted the
+          // beat and not before. The Beat Lengths alternate: 1 and 3 are longer than 2 and 4, strictly,
+          // every bar, so ONE comparison against the previous beat tells which is which. Beat 1 against
+          // beat 3 is deliberately not attempted.
+          if (g_lenN >= 1) {
+            uint32_t prevLen = g_lenMs[(uint8_t)((g_lenI + 4 - 1) % 4)];
+            g_longBeat = (len > prevLen) ? 1 : 0;
+          }
+          g_lenMs[g_lenI] = len;
+          g_lenI = (uint8_t)((g_lenI + 1) % 4);
+          if (g_lenN < 4) g_lenN++;
+          // HAS THE BEAT BEEN FOUND? A full window of intervals and a period inside the bell curve.
+          g_beatFound = (g_fitN >= FIT_N && g_fitPer >= 444 && g_fitPer <= 632) ? 1 : 0;
+          // THE PREDICTED MIDPOINT - THE ONLY THING IO48 FLASHES ON ONCE THE BEAT IS FOUND. It is the
+          // last MEASURED midpoint plus the period, so it is always an instant in the FUTURE: the
+          // measurement completes within one Beat Length of the midpoint, and the period is 444-632 ms.
+          // Nothing else may set this, and it is never set from the beat's own midpoint.
+          g_predMid = g_beatFound ? (mid + g_fitPer) : 0;
+          g_flashAt = 0;                    // from here the prediction owns the flash
+        }
       } else {
-        // 4. A TRANSIENT: its length is much less than the four in the window. IGNORED OUTRIGHT - no
+        // 4. A TRANSIENT: its Beat Length is much less than the four in the window. IGNORED OUTRIGHT - no
         //    flash, no timing effect, nothing. It is not put in the window either, so it cannot pull it.
         g_lvlReject++;
       }
+    }
+    // COLD START AND RE-LOCK (the user's instruction). Until the beat has been FOUND there is nothing to
+    // predict from, so IO48 flashes ON THE LEADING EDGE of each beat as it passes the sensitivity line.
+    // This is the same behaviour that covers the intro and the up-to-four beats it takes to re-lock after
+    // the music returns. Once the beat is found this stops entirely - the prediction takes over.
+    static uint32_t leadSeen = 0;
+    if (g_lvlLeadSeq != leadSeen) {
+      leadSeen = g_lvlLeadSeq;
+      if (!g_beatFound) { g_flashAt = millis(); g_leadFlash++; }
     }
   }
   if (anyReal) g_onsetReal++;
@@ -4985,12 +5069,17 @@ static void odfEvaluate() {
     if (above && !lvlAbove) {
       lvlAbove  = true;                          // 1. THE LEADING EDGE: the rise through the line
       lvlLeadMs = nowMs;
+      // PUBLISHED AT THE EDGE, NOT AT THE CLOSE (24 Oct 2026). The flash needs to know a beat is there
+      // BEFORE its midpoint arrives, and the leading edge always precedes the midpoint - so the leading
+      // edge is published the instant it happens, and the render core uses it both to flash during an
+      // intro (before the beat is found) and to permit the predicted flash.
+      g_lvlLead    = nowMs;
+      g_lvlLeadSeq = g_lvlLeadSeq + 1;
     } else if (!above && lvlAbove) {
       lvlAbove = false;                          // 2. THE TRAILING EDGE: the fall back through the line
       uint32_t len = nowMs - lvlLeadMs;          // 3. THE BEAT LENGTH between the two crossings
       if (len >= 10 && len <= 1000) {
         g_lvlLen = len;
-        g_lvlLead = lvlLeadMs;
         g_lvlMid = lvlLeadMs + (len / 2);        // 3. THE MIDPOINT of that length
         // The width statistics the readouts and the confidence use are now this same length, from the
         // crossings, instead of the confined-to-the-peak measure that used to be taken separately.
@@ -7779,8 +7868,20 @@ void loop() {
     // listeningStep when the onset was accepted as a BEAT rather than a transient. No clock beat, no
     // prediction and no correction can trigger or move this, which is why a flash between the beats is
     // now impossible - there is no beat there to flash on.
-    if (g_flashAt != 0 && (long)(millis() - g_flashAt) >= 0) {
-      g_flashAt = 0;
+    // TWO WAYS TO FIRE, AND ONLY TWO (24 Oct 2026 - the user's design).
+    //   g_flashAt  the COLD-START flash: set at a LEADING EDGE while the beat is not yet found.
+    //   g_predMid  THE PREDICTED BEAT: set when a beat is accepted, fired at the predicted midpoint, and
+    //              fired ONLY IF that beat's LEADING EDGE has been seen. The leading edge always precedes
+    //              the midpoint, so the answer is always known in time. No leading edge means a quiet
+    //              section of the music, and then IO48 does not flash - the user's rule.
+    bool fireNow = false;
+    if (g_flashAt != 0 && (long)(millis() - g_flashAt) >= 0) { g_flashAt = 0; fireNow = true; }
+    if (g_predMid != 0 && (long)(millis() - g_predMid) >= 0) {
+      unsigned long p = (g_fitPer >= 444 && g_fitPer <= 632) ? g_fitPer : 500;
+      fireNow = ((g_lvlLead != 0) && ((unsigned long)(millis() - g_lvlLead) <= (p / 2)));
+      g_predMid = 0;
+    }
+    if (fireNow) {
       digitalWrite(POWER_LED_PIN, HIGH);
       // VISIBLE AT LAST (21 Oct). 100 ms was too short to see: user, "it still barely flashes at
       // all" - while the power-up and error blinks (500 ms, the same pin, the same diode) are

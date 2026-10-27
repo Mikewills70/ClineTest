@@ -575,6 +575,21 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["lvlLo"]   = (double)odfLvlLo;
   doc["lvlHi"]   = (double)odfLvlHi;
   doc["thr"]     = (double)odfThr;
+  // ---- THE PREDICTED BEAT (24 Oct 2026). Every number the plan needs to be judged by, so the beat can be
+  // watched being found rather than argued about. X collapsing toward zero is the proof.
+  doc["beatFound"] = (uint8_t)g_beatFound;          // 1 = four valid intervals: the beat has been found
+  doc["predMid"]   = (uint32_t)g_predMid;           // the predicted midpoint IO48 is due to flash on
+  doc["longBeat"]  = (uint8_t)g_longBeat;           // 1 = the last Beat Length was the longer one (beat 1 or 3)
+  doc["lvlRej"]    = (uint32_t)g_lvlReject;         // figures refused by point 4: Beat Length much less
+  doc["leadFlash"] = (uint32_t)g_leadFlash;         // flashes on the leading edge while the beat is not found
+  doc["fitN"]      = (uint8_t)g_fitN;               // intervals in the window
+  doc["fitPer"]    = (uint32_t)g_fitPer;            // the period P
+  doc["X"]         = (long)g_fitX;                  // the last X: measured midpoint - predicted midpoint
+  doc["len0"]      = (uint32_t)g_lenMs[0];          // the four BEAT LENGTHS (leading edge to trailing edge)
+  doc["len1"]      = (uint32_t)g_lenMs[1];
+  doc["len2"]      = (uint32_t)g_lenMs[2];
+  doc["len3"]      = (uint32_t)g_lenMs[3];
+  doc["lead"]      = (uint32_t)g_lvlLead;           // the last leading edge, which is what permits a flash
                                                   // threshold is a fraction of this
   doc["p0frac"]  = (double)beatListen[0].sensFrac;
   doc["p0iv"]    = (uint32_t)beatListen[0].ivMs;      // the beat period the clock runs at
@@ -844,8 +859,9 @@ static inline unsigned long fixHalfBeat(unsigned long ms) {
 #define FIT_N 5
 static unsigned long g_fitMs[FIT_N] = {0, 0, 0, 0, 0};   // the window: the last accepted beat times
 static uint8_t       g_fitI = 0;                      // the write cursor
-static uint8_t       g_fitN = 0;                      // how many are in the window
-static unsigned long g_fitPer = 0;                    // the fitted period: their mean interval
+// g_fitN and g_fitPer are declared up with the other beat globals (24 Oct 2026): the render core reads
+// the period to compute the predicted midpoint, and /diag publishes it - both of which are ABOVE this
+// point in the file, so the declarations have to be above them too.
 static uint32_t      g_fitAccept = 0, g_fitReject = 0;
 // THE BEAT WIDTH (23 Oct), measured from the ENVELOPE. A real beat has width; a transient is narrow,
 // which is how a x2/x4/x8 lock on transients is told apart from a lock on the beat.
@@ -887,7 +903,7 @@ static inline float bpmPrior(unsigned long ms) {
   return 0.85f + 0.15f * v;
 }
 
-static void fitBeatStep(unsigned long stamp, unsigned long per) {
+static bool fitBeatStep(unsigned long stamp, unsigned long per) {
   // ---- CLOCK 2 IS INDEPENDENT FROM HERE (23 Oct 2026, USER-AUTHORISED under Rule 10) ---------------
   // WHAT WAS WRONG. This function was handed CLOCK 1's period and accepted an onset only if it landed
   // within per/4 of ITS OWN running prediction. Both made it confirm whatever it had already locked:
@@ -921,15 +937,16 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
   long X = 0;
   if (g_fitN >= 2 && g_fitPer > 0) {
     unsigned long lastA = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
-    if (stamp <= lastA) return;                       // out of order or duplicate: nothing to learn
+    if (stamp <= lastA) return false;                 // out of order or duplicate: nothing to learn
     unsigned long pred = lastA + g_fitPer;            // WHERE THE NEXT BEAT IS EXPECTED
     X = (long)stamp - (long)pred;                     // actual midpoint against the prediction
     long aX = (X < 0) ? -X : X;
     // A THIRD OF A BEAT: a beat is close to the prediction, a transient is not. The transients sit on
     // the half beat (~223 ms) and are refused here, so IO48 cannot be lit on one and no off-beat flash
     // can be added.
-    if (aX > (long)(g_fitPer / 3)) { g_fitReject++; return; }
+    if (aX > (long)(g_fitPer / 3)) { g_fitReject++; return false; }
   }
+  g_fitX = X;                       // PUBLISHED: this is the number that must fall toward zero
   g_fitMs[g_fitI] = stamp;
   g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
   if (g_fitN < FIT_N) g_fitN++;
@@ -984,7 +1001,13 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
     // the half beat - the visible sudden doubling - and every real beat then falls outside the window and
     // is refused. Missing beats and invented beats, from one rewritten rule.
     // A period outside the range is NOT A BEAT. The onset is refused and the period is NOT adopted.
-    if (g_fitPer < 444 || g_fitPer > 632) { g_fitReject++; g_fitPer = 0; g_fitN = 0; g_fitI = 0; return; }
+    // THE WINDOW IS NOT WIPED (24 Oct 2026 - the user's instruction). It used to ZERO itself here
+    // (g_fitPer = 0; g_fitN = 0; g_fitI = 0). That is fatal to the design: ONE out-of-range interval - a
+    // stray detection in a quiet passage - destroyed the period, and with it the prediction and the flash,
+    // exactly when the user's instruction is to KEEP CALCULATING BEATS AND X VALUES EVEN IF NO BEAT IS
+    // HEARD, so that when the music returns at similar levels the beat is already there. An interval
+    // outside the bell curve is REFUSED and nothing else moves. The period simply holds.
+    if (g_fitPer < 444 || g_fitPer > 632) { g_fitReject++; return false; }
     // THE CONFIDENCE: the measurement first, the prior only as a nudge.
     // A HIGH REJECTION RATE IS PENALISED: a correct lock should reject about half the onsets (beats
     // against off-beats), so much more than that means it is taking only every other beat - which is the
@@ -1010,6 +1033,8 @@ static void fitBeatStep(unsigned long stamp, unsigned long per) {
       g_conf = widthConfidence(g_widLast) * rejScore * spread * bpmPrior(g_fitPer);
     }
   }
+  // ACCEPTED: the interval matched the bell curve and the window now holds this beat.
+  return true;
 }
 
 // ==== BASS BEAT PROTECTED REGION - END ====

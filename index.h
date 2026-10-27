@@ -1089,6 +1089,11 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                         <i class="def-mark" id="defMarkBeatSens"></i>
                         </span>
                         <span id="beatSensVal" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.20</span>
+                        <!-- THE BEAT, LIVE (24 Oct 2026). Whether the beat has been FOUND, the period P,
+                             X (measured midpoint minus predicted midpoint), the four BEAT LENGTHS, the
+                             sensitivity line and the envelope it is drawn in, and how many figures were
+                             rejected as transients. X falling toward zero IS the proof of a lock. -->
+                        <span id="beatLive" class="val-readout" style="font-size:0.78rem; display:block; color:var(--primary-color); margin-top:2px;">waiting for the board</span>
                         <button type="button" class="def-chip" onclick="audioRestoreDefault('sens')" title="restore the default">&#8634;</button>
                     </td>
                 </tr>
@@ -3860,6 +3865,24 @@ window.addEventListener('error', function (e) {
                 const v = document.getElementById('freqValLED');
                 if (v) v.innerText = want + 'Hz';
             }
+        }
+        // THE BEAT, LIVE (24 Oct 2026). Updated from the same /diag poll that moves the sliders, so a
+        // change to the sensitivity or the frequency - by the user or by the firmware - is visible here
+        // as well as on the sliders. X is the number to watch: it must fall toward zero when the beat is
+        // found, and rise when it is lost.
+        const bl = document.getElementById('beatLive');
+        if (bl && j.fitPer !== undefined) {
+            let s2 = (parseInt(j.beatFound, 10) === 1 ? 'BEAT FOUND' : 'searching') +
+                     ' | P ' + j.fitPer + 'ms' +
+                     ' | X ' + j.X + 'ms' +
+                     ' | BeatLengths ' + j.len0 + '/' + j.len1 + '/' + j.len2 + '/' + j.len3 +
+                     ' | line ' + Math.round(j.thr) +
+                     ' in ' + Math.round(j.lvlLo) + '-' + Math.round(j.lvlHi);
+            if (parseInt(j.beatFound, 10) === 1) {
+                s2 += (parseInt(j.longBeat, 10) === 1) ? ' | 1 or 3' : ' | 2 or 4';
+            }
+            s2 += ' | transients ' + j.lvlRej + ' | leadFlashes ' + j.leadFlash;
+            bl.innerText = s2;
         }
     }
     function fetchDiag() {
