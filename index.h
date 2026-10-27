@@ -1062,10 +1062,10 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                              (upper edge fixed at 250 Hz): raise it to reject
                              rumble and tighten onto the kick. -->
                         <span class="def-wrap">
-                        <input type="range" id="paramFrequencyLED" min="20" max="100" step="1" value="60" oninput="audioSnapAndSend('LED')" onpointerdown="audioDragging=true" onpointerup="audioDragging=false">
+                        <input type="range" id="paramFrequencyLED" min="20" max="100" step="1" value="40" oninput="audioSnapAndSend('LED')" onpointerdown="audioDragging=true" onpointerup="audioDragging=false">
                         <i class="def-mark" id="defMarkFreqLED"></i>
                         </span>
-                        <span id="freqValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">60Hz</span>
+                        <span id="freqValLED" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">40Hz</span>
                         <button type="button" class="def-chip" onclick="audioRestoreDefault('freq')" title="restore the default">&#8634;</button>
                     </td>
                 </tr>
@@ -1085,10 +1085,10 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
                              catches quieter/denser music. GLOBAL: one detector
                              drives both the strips and the 240V display. -->
                         <span class="def-wrap">
-                        <input type="range" id="paramBeatSens" min="0.01" max="1.00" step="0.01" value="0.20" oninput="audioSnapAndSend('LED')" onpointerdown="audioDragging=true" onpointerup="audioDragging=false">
+                        <input type="range" id="paramBeatSens" min="0.01" max="1.00" step="0.01" value="0.30" oninput="audioSnapAndSend('LED')" onpointerdown="audioDragging=true" onpointerup="audioDragging=false">
                         <i class="def-mark" id="defMarkBeatSens"></i>
                         </span>
-                        <span id="beatSensVal" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.20</span>
+                        <span id="beatSensVal" class="val-readout" style="font-size:0.85rem; display:block; color:var(--primary-color);">0.30</span>
 
                         <button type="button" class="def-chip" onclick="audioRestoreDefault('sens')" title="restore the default">&#8634;</button>
                     </td>

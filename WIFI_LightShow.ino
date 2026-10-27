@@ -95,10 +95,13 @@ uint32_t colourLED[4] = { 0xFFFFFF, 0xFFD000, 0xFF7000, 0xFF0000 };
 // across sections, and the band low edge the microphone actually hears - and they are
 // exposed in /settings so the page has ONE source of truth for its slider marks, its snap
 // targets and its restore chips. Defined HERE, above every use.
-#define DEF_BEAT_SENS  0.08f    // -> fraction 0.5616 of the music novelty peak
+// THE DEFAULT THE PAGE'S RESTORE BUTTON PUTS BACK, and the mark it draws on the slider. It is now the
+// same 0.30 the firmware starts at, so a restore returns to the tuned value rather than to an old one.
+// (It used to read 0.08 and describe a fraction of the novelty peak - a meaning the line no longer has.)
+#define DEF_BEAT_SENS  0.30f
 #define DEF_FREQ       61       // -> the 61-250 Hz band
 // thr = (1 - beatSens) * 60, so 0.2 is the equivalent of the old 0.8.
-float beatSens = 0.2f;
+float beatSens = 0.30f;
 
 // ---- Playlist ----
 PlaylistItem playlist[MAX_PLAYLIST_ITEMS];
@@ -106,7 +109,7 @@ int playlistCount = 0;
 bool playlistPlaying = false;
 
 // ---- Active audio detector parameters (shared) ----
-int freqThreshold = 50;
+int freqThreshold = 40;
 int multiplier = 1;   // Beat Multiplier: 1 = one reversal per beat, 2 = two
 // musicFullMode is the 240V VU METER's level source (BASS / FULL RANGE). It is
 // set ONLY from the 240V section: the LED meter is bass-only by design and its
@@ -565,8 +568,8 @@ LedPatParams ledPatDefaultFor(int i) {
   LedPatParams d = {};
   d.ver = LED_PAT_VER;
   d.colour[0] = 0xFFFFFF; d.colour[1] = 0xFFD000; d.colour[2] = 0xFF7000; d.colour[3] = 0xFF0000;
-  d.speed = 0.02f; d.qty = 1; d.size = 1; d.mult = 1; d.freqHz = 50;
-  d.wrap = 0; d.invert = 0; d.beatSens = 0.2f; d.attack = 0.15f; d.decay = 0.01f;
+  d.speed = 0.02f; d.qty = 1; d.size = 1; d.mult = 1; d.freqHz = 40;
+  d.wrap = 0; d.invert = 0; d.beatSens = 0.30f; d.attack = 0.15f; d.decay = 0.01f;
   d.peakDelay = 0.5f; d.peakSpeed = 1.0f; d.peakDir = 0; d.vuDir = 0;
   d.effect = 0; d.momentum = 0.0f; d.distance = 20;
   if (i == 1) d.speed = 20.0f;              // the Chase: LEDs per second
@@ -674,7 +677,7 @@ struct PortCfg {
   // same formula as the pattern page, so a pattern left alone behaves exactly as the
   // 15/10 baseline did. A timeline cell overrides them for its port, which is what
   // lets two ports listen to different bands and different thresholds at once.
-  float beatSens = 0.2f;     // its own sensitivity: thr = (1 - beatSens) * 60
+  float beatSens = 0.30f;    // its own sensitivity: thr = (1 - beatSens) * 60
   int   freqHz   = 50;       // its own band lower edge (20-100 Hz)
   int   mult     = 1;        // 1 = real beats only, 2 = real + half-way beats
   // Per-port colour, 0xRRGGBB.
@@ -1959,7 +1962,7 @@ void saveSettings() {
   preferences.putFloat("speedLED", speedLED);
   preferences.putInt("qtyLED", quantityLED);
   preferences.putInt("sizeLED", sizeLED);
-  preferences.putInt("freqLED", freqLED);
+  preferences.putInt("freqLED2", freqLED);   // key bumped with the default
   preferences.putInt("multLED2", multLED);   // NEW KEY - see loadSettings()
   // (musicLED is gone: the LED VU meter is BASS LEVEL only, the EQ is FULL.)
   preferences.putFloat("atkLED", attackLED);
@@ -1970,7 +1973,7 @@ void saveSettings() {
   preferences.putBool("inv240", invert240V);
   preferences.putBool("wrapLED", wrapLED);
   preferences.putBool("invLED", invertLED);
-  preferences.putFloat("beatSens2", beatSens);
+  preferences.putFloat("beatSens3", beatSens);   // key bumped: the meaning and the default both changed
   for (int i = 0; i < 4; i++)
     preferences.putUInt((String("colLED") + i).c_str(), colourLED[i]);
   preferences.putString("themeName", themeName);
@@ -2007,7 +2010,7 @@ void loadSettings() {
   speedLED = preferences.getFloat("speedLED", 1.0);
   quantityLED = preferences.getInt("qtyLED", 1);
   sizeLED = preferences.getInt("sizeLED", 1);
-  freqLED = preferences.getInt("freqLED", 50);
+  freqLED = preferences.getInt("freqLED2", 40);
   // NEW KEY, and the default is 1, deliberately.
   //
   // The old key held 2 on every board (it was the initialiser's value) because the
@@ -2045,7 +2048,7 @@ void loadSettings() {
   // NEW KEY: the old value was on the un-reversed scale (0.8 = strict), so loading
   // it here would make the detector almost maximally sensitive. 0.2 is the
   // equivalent of that old 0.8 on the reversed scale.
-  beatSens  = preferences.getFloat("beatSens2", 0.2f);
+  beatSens  = preferences.getFloat("beatSens3", 0.30f);
   if (beatSens < 0.01f) beatSens = 0.01f;
   if (beatSens > 1.00f) beatSens = 1.00f;
   for (int i = 0; i < 4; i++)
