@@ -90,26 +90,25 @@
 //     beatSens 1.00 (most sensitive) -> K 0.30
 #define LVL_LINE_K(bs) (0.52f - 0.22f * constrain((bs), 0.0f, 1.0f))
 // ===================================================================================================
-// THE QUIET-SECTION TEST  (24 Oct 2026 - the user's MAX9814/AGC observation)
+// THE MINIMUM RISE - "the beat coming out of the noise"  (27 Oct 2026, the user's design)
 // ===================================================================================================
-// THE FAULT. The microphone is a MAX9814 with automatic gain control. In a quiet passage it winds its
-// gain UP, so the envelope stays high and the bass figure keeps crossing the sensitivity line on nothing
-// but room noise. Because the not-yet-found state flashes on every LEADING EDGE, IO48 ended up lit
-// almost permanently through quiet sections.
-// WHY A LEVEL TEST CANNOT FIND THIS. The AGC is precisely what hides the level: a quiet passage looks as
-// loud as a loud one, so any test on how loud the bass is will say "music" when the AGC has wound up.
-// WHAT CAN: THE RATE. The user's own rule bounds the beat rate at 95-135 BPM, which is 1.6 to 2.25 beats
-// a second. Even allowing a strong off-beat, music cannot produce leading edges faster than about four a
-// second. AGC noise produces many times that, so the count of leading edges per second separates them.
-// THE THRESHOLDS ARE DELIBERATELY WELL ABOVE THE MUSICAL RATE, so an off-beat-heavy track cannot be
-// mistaken for a quiet one: entering needs more than five a second, leaving needs fewer than three and a
-// half. Hysteresis, because a count sitting on one threshold would otherwise flap.
-// WHAT THIS SUPPRESSES: THE FLASH ONLY. The measurement, the fit, the period and the prediction all keep
-// running exactly as before, which is what the user requires - the timing must not be disturbed. So when
-// the music returns the prediction never lost the beat, and IO48 flashes on the very next predicted one.
-#define LVL_RATE_MS       2000    // the window the leading edges are counted over
-#define LVL_QUIET_ENTER     10    // > this many in the window = not music (5 per second)
-#define LVL_QUIET_LEAVE      7    // < this many = the music is back (3.5 per second)
+// WHAT WAS WRONG, MEASURED ON THE BOARD. The line was placed purely as a fraction of the envelope's
+// range: thr = lvlLo + K x (lvlHi - lvlLo). In silence that range is about ONE COUNT - the board read
+// lvlLo 1, lvlHi 2, thr 2 - so the line was drawn ON the noise floor and the noise crossed it sixteen
+// times a second. IO48 stayed lit, and the first attempt at a cure, a quiet-section rate gate, was
+// treating the symptom instead of the cause.
+// THE USER'S OWN DESCRIPTION IS THE FIX: "look for the rising beat coming out of the noise". So the
+// figure must RISE CLEAR OF THE NOISE FLOOR, not merely cross a line that has been drawn on it. The line
+// is the HIGHER of the range line and the trough plus MIN_RISE:
+//     silence      - the whole envelope is 1-2 counts, so the line sits above it and nothing crosses
+//     music        - the range is large, so the range line wins and the beat crosses while the noise
+//                    near the trough does not
+//     quiet intro  - a small but real range, still above MIN_RISE, so the beat is caught immediately
+//     a second track's intro - identical, because there is no state to carry over
+// MIN_RISE IS IN ADC COUNTS AND IS PROVISIONAL. Only the SILENCE figure has been measured on this
+// hardware (1-2 counts); a real beat's level has not. It is set low enough to be safe, and the plan is to
+// read lvlLo/lvlHi/thr from /diag during music and set it from that measurement rather than a guess.
+#define MIN_RISE   12.0f
 
 // BEAT SENSITIVITY - the absolute part of the threshold, and the control that
 // actually matters.
@@ -634,10 +633,7 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["len2"]      = (uint32_t)g_lenMs[2];
   doc["len3"]      = (uint32_t)g_lenMs[3];
   doc["lead"]      = (uint32_t)g_lvlLead;           // the last leading edge, which is what permits a flash
-  // THE QUIET TEST ITSELF, so it can be watched working rather than argued about: the count of leading
-  // edges in the last window, and whether that count has been read as "not music".
-  doc["quiet"]     = (uint8_t)g_quiet;
-  doc["leadRate"]  = (uint32_t)g_leadRate;
+
                                                   // threshold is a fraction of this
   doc["p0frac"]  = (double)beatListen[0].sensFrac;
   doc["p0iv"]    = (uint32_t)beatListen[0].ivMs;      // the beat period the clock runs at
@@ -993,6 +989,19 @@ static bool fitBeatStep(unsigned long stamp, unsigned long per) {
     // can be added.
     if (aX > (long)(g_fitPer / 3)) { g_fitReject++; return false; }
   }
+  // ---- A SANITY BOUND ON THE INTERVAL, BEFORE IT GOES IN THE WINDOW (27 Oct 2026) -----------------
+  // THE BUG THIS FIXES, MEASURED ON THE BOARD. The interval was computed as an UNSIGNED subtraction, so
+  // one pair of midpoints arriving out of order underflowed it and produced a period of 4294967262 -
+  // which is 2^32 minus 34, i.e. NEGATIVE. The out-of-range test then refused that value but did not
+  // clear it, so the garbage stayed in g_fitPer for good: the beat was never "found" again, the predicted
+  // flash never fired at all, and the 1-and-3 verdict was never produced so channel 10 never lit.
+  // THE BOUND IS GENEROUS ON PURPOSE (100 ms to 4 s). It is NOT the BPM range: the history in this file
+  // records that a hard 444-632 gate threw away real beats at 425-474 ms, which is why the range test
+  // lives at the END, on the fitted period, and not here on every interval.
+  if (g_fitN >= 1) {
+    long dPrev = (long)stamp - (long)g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
+    if (dPrev <= 100 || dPrev >= 4000) { g_fitReject++; return false; }
+  }
   g_fitX = X;                       // PUBLISHED: this is the number that must fall toward zero
   g_fitMs[g_fitI] = stamp;
   g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
@@ -1001,15 +1010,25 @@ static bool fitBeatStep(unsigned long stamp, unsigned long per) {
   if (g_fitN >= 2) {
     // THE MEDIAN, not the mean: a mean is dragged by one bad beat, a median is not.
     unsigned long iv[FIT_N];
+    // SIGNED, so a pair arriving out of order cannot wrap round to four thousand million (27 Oct 2026).
+    // An interval that still cannot be used is marked 0, and the median guard below refuses a period
+    // derived from one.
     for (uint8_t k = 1; k < g_fitN; k++) {
-      iv[k - 1] = g_fitMs[(uint8_t)((g_fitI + FIT_N - 1 - k) % FIT_N)] -
-                  g_fitMs[(uint8_t)((g_fitI + FIT_N - k) % FIT_N)];
+      long d = (long)g_fitMs[(uint8_t)((g_fitI + FIT_N - 1 - k) % FIT_N)] -
+               (long)g_fitMs[(uint8_t)((g_fitI + FIT_N - k) % FIT_N)];
+      iv[k - 1] = (d > 0 && d < 4000) ? (unsigned long)d : 0;
     }
     uint8_t m = (uint8_t)(g_fitN - 1);
     for (uint8_t a = 0; a + 1 < m; a++)
       for (uint8_t b = 0; b + 1 < m - a; b++)
         if (iv[b] > iv[b + 1]) { unsigned long s2 = iv[b]; iv[b] = iv[b + 1]; iv[b + 1] = s2; }
-    g_fitPer = iv[m / 2];
+    // THE PERIOD IS ONLY EVER SET TO A LEGAL VALUE (27 Oct 2026). If the median comes out of range -
+    // which it will if any interval in the window is a 0 from the guard above - the LAST GOOD PERIOD IS
+    // KEPT. It is never set to garbage and never set to zero: zero disables the prediction and garbage
+    // poisons it, and either one leaves the beat unfindable for the rest of the track. That is precisely
+    // what the board was doing when its period read 4294967262.
+    unsigned long med = iv[m / 2];
+    if (med >= 444 && med <= 632) g_fitPer = med;
     // ---- CLOCK 2's OWN PREDICTIVE MONITORING AND BPM CORRECTION (23 Oct 2026, user-authorised) ------
     // The user's design, and it is the SAME loop Clock 1 runs: predict where the next beat should be
     // from the period it currently believes, measure the error against where the beat ACTUALLY landed,
