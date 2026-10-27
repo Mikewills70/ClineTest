@@ -304,6 +304,7 @@ volatile unsigned long g_predMid    = 0;   // the predicted midpoint the flash i
 volatile uint8_t       g_beatFound  = 0;   // 1 = four valid intervals exist: the beat has been FOUND
 volatile uint8_t       g_longBeat   = 0;   // 1 = the last beat's BEAT LENGTH was the longer of the pair
 volatile uint32_t      g_lvlLeadSeq = 0;   // bumps at every LEADING edge so the render core can see one
+volatile unsigned long g_fitLastMs  = 0;   // millis() of the last beat the fit ACCEPTED (the one-bar timeout)
 volatile uint32_t      g_leadFlash  = 0;   // leading edges flashed on while the beat is not yet found
 long                   g_fitX       = 0;   // the last X: measured midpoint minus predicted midpoint
 
@@ -3473,6 +3474,26 @@ static void fastBeatCheck() {
 // hardware (1-2 counts); a real beat's level has not. It is set low enough to be safe, and the plan is to
 // read lvlLo/lvlHi/thr from /diag during music and set it from that measurement rather than a guess.
 #define MIN_RISE   12.0f
+// ===================================================================================================
+// THE MISSED BEAT AND THE LOST BEAT  (27 Oct 2026 - the user's policy, stated in full)
+// ===================================================================================================
+// "If we keep on time for a few beats (predict 1 bar) and the beat does not return, consider that a
+// quiet patch and start hunting; otherwise just consider it a missed beat and insert an average time for
+// the missed beat and continue as before."
+// SO THERE ARE TWO CASES AND THEY MUST NOT BE CONFUSED.
+//   ONE MISSED BEAT is not a failure. The prediction continues from the last measured midpoint plus the
+//   period, and the beat that returns is still on time. The window is NOT touched, nothing is cleared,
+//   and the beat is not re-found from scratch.
+//   NO BEAT FOR ABOUT A BAR is a quiet patch. The window is cleared, the beat drops back to "not found",
+//   and the flash hands back to the leading-edge hunt until the beat is found again.
+// A BAR AT THE ACCEPTED TEMPO IS 4 BEATS OF 444-632 ms, i.e. 1.8 to 2.5 s. The shorter end is used, so
+// the hunt starts promptly rather than waiting out the slowest possible bar.
+// THE DEADLOCK THIS REPLACES. The interval sanity bound below used to REFUSE a beat whose gap from the
+// last stored stamp was over 4 s - and refusing it meant it was never stored, so the stale stamp was
+// never replaced and EVERY beat after it was refused too. Measured on the board: fitN stuck at 1, fitPer
+// 0, found 0, and every flash a cold-start leading-edge flash. The window could never advance. A long gap
+// is now a RESET, not a refusal.
+#define LVL_LOST_MS  1800
 
 // BEAT SENSITIVITY - the absolute part of the threshold, and the control that
 // actually matters.
@@ -4364,10 +4385,17 @@ static bool fitBeatStep(unsigned long stamp, unsigned long per) {
   // lives at the END, on the fitted period, and not here on every interval.
   if (g_fitN >= 1) {
     long dPrev = (long)stamp - (long)g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
-    if (dPrev <= 100 || dPrev >= 4000) { g_fitReject++; return false; }
+    // A FLICKER: not a beat, refused as before.
+    if (dPrev <= 100) { g_fitReject++; return false; }
+    // THE BEAT WAS LOST, NOT THIS BEAT BAD (27 Oct 2026). This used to refuse the beat - which meant it
+    // was never stored, so the stale stamp stayed and refused every beat after it for ever. The window
+    // could never advance: measured on the board as fitN 1, fitPer 0, found 0. A gap this long is a quiet
+    // patch, so the window is CLEARED and this beat becomes the first of a new one.
+    if (dPrev >= LVL_LOST_MS) { g_fitN = 0; g_fitI = 0; g_fitPer = 0; }
   }
   g_fitX = X;                       // PUBLISHED: this is the number that must fall toward zero
   g_fitMs[g_fitI] = stamp;
+  g_fitLastMs = millis();            // the one-bar timeout in the render core reads this
   g_fitI = (uint8_t)((g_fitI + 1) % FIT_N);
   if (g_fitN < FIT_N) g_fitN++;
   g_fitAccept++;
@@ -5103,6 +5131,18 @@ if (onsNew) {
     // predict from, so IO48 flashes ON THE LEADING EDGE of each beat as it passes the sensitivity line.
     // This is the same behaviour that covers the intro and the up-to-four beats it takes to re-lock after
     // the music returns. Once the beat is found this stops entirely - the prediction takes over.
+    // ---- THE ONE-BAR TIMEOUT (27 Oct 2026 - the user's policy) ------------------------------------
+    // "If we keep on time for a few beats and the beat does not return, consider that a quiet patch and
+    // start hunting." This is the deliberate half of that policy, and it is checked every pass rather
+    // than only when a beat arrives - because the case it exists for is the one where no beat arrives.
+    // ONE MISSED BEAT IS NOT THIS. A single missed beat leaves the window alone: the prediction continues
+    // from the last measured midpoint plus the period, and the beat that comes back is still on time.
+    // Only a whole bar without a beat clears the window, which drops the beat back to "not found" and
+    // hands the flash back to the leading-edge hunt.
+    if (g_fitN > 0 && g_fitLastMs != 0 && (unsigned long)(millis() - g_fitLastMs) > LVL_LOST_MS) {
+      g_fitN = 0; g_fitI = 0; g_fitPer = 0;
+      g_beatFound = 0; g_predMid = 0;
+    }
     static uint32_t leadSeen = 0;
     if (g_lvlLeadSeq != leadSeen) {
       leadSeen = g_lvlLeadSeq;
