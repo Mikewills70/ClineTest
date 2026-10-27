@@ -65,7 +65,7 @@ function Get-Text([string]$path) {
   } catch { $script:lastNetErr = $_.Exception.Message; return $null }
 }
 
-[System.IO.File]::WriteAllText($outPath, "t,io48,p0clk,p0lst,p0iv,bOns,bActs,led48,displayActive,odfHz,fLedUs,fLoopUs,wid,conf,fitBpm,fitAcc,fitRej,locked,freeHeap`r`n", $enc)
+[System.IO.File]::WriteAllText($outPath, "t,io48,p0clk,p0lst,p0iv,bOns,bActs,led48,displayActive,odfHz,fLedUs,fLoopUs,wid,conf,fitBpm,fitAcc,fitRej,locked,freeHeap,found,long,fitN,fitPer,X,quiet,leadRate,len0,len1,len2,len3`r`n", $enc)
 [System.IO.File]::WriteAllText($onsPath, "# raw /onsets lines, as fetched. Each fetch is preceded by a cursor marker.`r`n", $enc)
 
 $rows = 0; $onsCursor = 0; $lastOns = 0; $lastFlash = -1; $lastClk = -1; $fails = 0; $script:lastNetErr = ''
@@ -110,7 +110,10 @@ while ($true) {
     $(if ($v) { [string]$v.fitAcc } else { '' }),
     $(if ($v) { [string]$v.fitRej } else { '' }),
     $(if ($v) { [string]$v.locked } else { '' }),
-    [string]$d.freeHeap
+    [string]$d.freeHeap,
+    [string]$d.beatFound, [string]$d.longBeat, [string]$d.fitN, [string]$d.fitPer,
+    [string]$d.X, [string]$d.quiet, [string]$d.leadRate,
+    [string]$d.len0, [string]$d.len1, [string]$d.len2, [string]$d.len3
   ) -join ','
   [System.IO.File]::AppendAllText($outPath, ($row + "`r`n"), $enc)
   $rows++
@@ -145,6 +148,18 @@ while ($true) {
   if ($iv -gt 0) { $bpm = [int](60000 / $iv) }
   $line = '  {0}  io48={1,-6} p0clk={2,-6} p0lst={3,-6} p0iv={4,-5} bpm~{5,-4}{6}' -f $t, $fl, $ck, $lst, $iv, $bpm, $note
   if ($note -ne '') { Write-Host $line -ForegroundColor Yellow } else { Write-Host $line -ForegroundColor Gray }
+  # THE BEAT LINE (24 Oct 2026). found = four valid intervals, so a verdict exists. long = the last beat's
+  # Beat Length was the longer of the pair, which is what channel 10 shows as 1-or-3. X is the number that
+  # must fall toward zero. quiet = the leading-edge rate says this is NOT music (the MAX9814/AGC case), and
+  # while it is 1 the flash is withheld by design.
+  if ($null -ne $d.fitPer) {
+    $bFound = [int]$d.beatFound; $bLong = [int]$d.longBeat; $bQ = [int]$d.quiet
+    $bline = '        beat: found={0} long={1}  fitN={2} P={3}ms  X={4}ms  len={5}/{6}/{7}/{8}  quiet={9} rate={10}' -f `
+             $bFound, $bLong, $d.fitN, $d.fitPer, $d.X, $d.len0, $d.len1, $d.len2, $d.len3, $bQ, $d.leadRate
+    if ($bQ -eq 1) { Write-Host $bline -ForegroundColor DarkCyan }
+    elseif ($bFound -eq 0) { Write-Host $bline -ForegroundColor DarkYellow }
+    else { Write-Host $bline -ForegroundColor DarkGray }
+  }
 
   # the onset ring, with a cursor so nothing is ever lost
   if (((Get-Date) - $started).TotalMilliseconds - $lastOns -ge $OnsEveryMs) {

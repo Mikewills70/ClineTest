@@ -306,6 +306,8 @@ volatile uint8_t       g_longBeat   = 0;   // 1 = the last beat's BEAT LENGTH wa
 volatile uint32_t      g_lvlLeadSeq = 0;   // bumps at every LEADING edge so the render core can see one
 volatile uint32_t      g_leadFlash  = 0;   // leading edges flashed on while the beat is not yet found
 long                   g_fitX       = 0;   // the last X: measured midpoint minus predicted midpoint
+volatile uint8_t       g_quiet      = 0;   // 1 = the leading-edge rate says this is NOT music (see above)
+volatile uint32_t      g_leadRate   = 0;   // leading edges in the last window: the number the test uses
 // THE FIT'S WINDOW AND ITS PERIOD. These were static inside fitBeatStep; they are file-scope now because
 // the render core reads the period to compute the predicted midpoint and /diag publishes it, and both sit
 // above fitBeatStep in the file.
@@ -3452,6 +3454,27 @@ static void fastBeatCheck() {
 //     beatSens 0.50                  -> K 0.41
 //     beatSens 1.00 (most sensitive) -> K 0.30
 #define LVL_LINE_K(bs) (0.52f - 0.22f * constrain((bs), 0.0f, 1.0f))
+// ===================================================================================================
+// THE QUIET-SECTION TEST  (24 Oct 2026 - the user's MAX9814/AGC observation)
+// ===================================================================================================
+// THE FAULT. The microphone is a MAX9814 with automatic gain control. In a quiet passage it winds its
+// gain UP, so the envelope stays high and the bass figure keeps crossing the sensitivity line on nothing
+// but room noise. Because the not-yet-found state flashes on every LEADING EDGE, IO48 ended up lit
+// almost permanently through quiet sections.
+// WHY A LEVEL TEST CANNOT FIND THIS. The AGC is precisely what hides the level: a quiet passage looks as
+// loud as a loud one, so any test on how loud the bass is will say "music" when the AGC has wound up.
+// WHAT CAN: THE RATE. The user's own rule bounds the beat rate at 95-135 BPM, which is 1.6 to 2.25 beats
+// a second. Even allowing a strong off-beat, music cannot produce leading edges faster than about four a
+// second. AGC noise produces many times that, so the count of leading edges per second separates them.
+// THE THRESHOLDS ARE DELIBERATELY WELL ABOVE THE MUSICAL RATE, so an off-beat-heavy track cannot be
+// mistaken for a quiet one: entering needs more than five a second, leaving needs fewer than three and a
+// half. Hysteresis, because a count sitting on one threshold would otherwise flap.
+// WHAT THIS SUPPRESSES: THE FLASH ONLY. The measurement, the fit, the period and the prediction all keep
+// running exactly as before, which is what the user requires - the timing must not be disturbed. So when
+// the music returns the prediction never lost the beat, and IO48 flashes on the very next predicted one.
+#define LVL_RATE_MS       2000    // the window the leading edges are counted over
+#define LVL_QUIET_ENTER     10    // > this many in the window = not music (5 per second)
+#define LVL_QUIET_LEAVE      7    // < this many = the music is back (3.5 per second)
 
 // BEAT SENSITIVITY - the absolute part of the threshold, and the control that
 // actually matters.
@@ -3976,6 +3999,10 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["len2"]      = (uint32_t)g_lenMs[2];
   doc["len3"]      = (uint32_t)g_lenMs[3];
   doc["lead"]      = (uint32_t)g_lvlLead;           // the last leading edge, which is what permits a flash
+  // THE QUIET TEST ITSELF, so it can be watched working rather than argued about: the count of leading
+  // edges in the last window, and whether that count has been read as "not music".
+  doc["quiet"]     = (uint8_t)g_quiet;
+  doc["leadRate"]  = (uint32_t)g_leadRate;
                                                   // threshold is a fraction of this
   doc["p0frac"]  = (double)beatListen[0].sensFrac;
   doc["p0iv"]    = (uint32_t)beatListen[0].ivMs;      // the beat period the clock runs at
@@ -5061,7 +5088,12 @@ if (onsNew) {
     static uint32_t leadSeen = 0;
     if (g_lvlLeadSeq != leadSeen) {
       leadSeen = g_lvlLeadSeq;
-      if (!g_beatFound) { g_flashAt = millis(); g_leadFlash++; }
+      // THE QUIET GATE (24 Oct 2026). The instruction was to flash on the leading edge during quiet
+      // sections - but that is exactly what made IO48 sit on almost permanently once the MAX9814's AGC
+      // wound up and every scrap of room noise crossed the line. A quiet section is now recognised by the
+      // leading-edge rate and the flash is withheld; the music coming back clears it and the flash
+      // resumes. NOTHING ELSE IS AFFECTED - the measurement and the prediction never stop.
+      if (!g_beatFound && !g_quiet) { g_flashAt = millis(); g_leadFlash++; }
     }
   }
   if (anyReal) g_onsetReal++;
@@ -5091,7 +5123,17 @@ static void odfEvaluate() {
   {
     static bool     lvlAbove  = false;
     static uint32_t lvlLeadMs = 0;
+    static uint32_t lvlCnt = 0, lvlBucketMs = 0;
     uint32_t nowMs = (uint32_t)millis();
+    // THE QUIET-SECTION RATE, checked EVERY FRAME and not only on a leading edge - so the count falls to
+    // zero when the crossings stop, which is what lets the music come back. See the constants above.
+    if (nowMs - lvlBucketMs >= LVL_RATE_MS) {
+      lvlBucketMs = nowMs;
+      g_leadRate = lvlCnt;
+      lvlCnt = 0;
+      if (g_leadRate > LVL_QUIET_ENTER)      g_quiet = 1;
+      else if (g_leadRate < LVL_QUIET_LEAVE) g_quiet = 0;
+    }
     bool above = (odfThr > 0.0f) && (odfPeak0 >= odfThr);
     if (above && !lvlAbove) {
       lvlAbove  = true;                          // 1. THE LEADING EDGE: the rise through the line
@@ -5102,6 +5144,7 @@ static void odfEvaluate() {
       // intro (before the beat is found) and to permit the predicted flash.
       g_lvlLead    = nowMs;
       g_lvlLeadSeq = g_lvlLeadSeq + 1;
+      lvlCnt++;                                  // one more crossing for the quiet-section rate
     } else if (!above && lvlAbove) {
       lvlAbove = false;                          // 2. THE TRAILING EDGE: the fall back through the line
       uint32_t len = nowMs - lvlLeadMs;          // 3. THE BEAT LENGTH between the two crossings
@@ -7912,7 +7955,12 @@ void loop() {
     if (g_flashAt != 0 && (long)(millis() - g_flashAt) >= 0) { g_flashAt = 0; fireNow = true; }
     if (g_predMid != 0 && (long)(millis() - g_predMid) >= 0) {
       unsigned long p = (g_fitPer >= 444 && g_fitPer <= 632) ? g_fitPer : 500;
-      fireNow = ((g_lvlLead != 0) && ((unsigned long)(millis() - g_lvlLead) <= (p / 2)));
+      // THE QUIET GATE APPLIES HERE TOO (24 Oct 2026). The leading-edge test above is what permits the
+      // flash, and during AGC noise there is ALWAYS a leading edge, so that test is permanently open -
+      // which is the other half of why IO48 stayed lit. The quiet flag closes it. The prediction itself
+      // is untouched: g_predMid was computed as usual, it is simply not fired while the rate says this is
+      // not music, so the beat is still known the moment the music returns.
+      fireNow = ((g_lvlLead != 0) && ((unsigned long)(millis() - g_lvlLead) <= (p / 2)) && !g_quiet);
       g_predMid = 0;
     }
     if (fireNow) {
