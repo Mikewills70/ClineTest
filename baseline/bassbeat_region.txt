@@ -74,6 +74,24 @@
 //     beatSens 0.50                  -> K 0.48
 //     beatSens 0.01 (strictest)      -> K 0.74
 #define LVL_RING_N   100          // frames in the window; 100 frames at the 10 ms frame = 1 second
+// ===================================================================================================
+// THE FIGURE: A SMOOTHED ENVELOPE OF THE BASS BEAT  (27 Oct 2026 - the discovery of the day)
+// ===================================================================================================
+// THE FAULT. The figure was winMax - the PEAK of the rectified band signal within each 10 ms frame. That
+// is not an envelope: it pulses at TWICE the band frequency, once every 4 to 12 ms across a 40-120 Hz
+// band. So the leading and trailing edges were being found on the waveform's pulses, and the measured
+// Beat Lengths of 10, 19 and 48 ms were pulses rather than beats. That is why the beat looked unsteady.
+// WHAT A BEAT ACTUALLY IS. A bass beat is a rise and a decay lasting of the order of a tenth of a second.
+// So the figure has to be a peak follower with a FAST ATTACK and a SLOW RELEASE:
+//   fast attack  - the leading edge is not delayed by the smoothing;
+//   slow release - one beat is ONE hump, so it crosses the line exactly twice, which is what gives a
+//                  leading edge, a trailing edge, a Beat Length and a Midpoint.
+// THE RELEASE TIME IS BOUNDED BY THE HARDWARE, NOT CHOSEN FREELY:
+//   faster than ~50 ms  -> the waveform pulses show through again (the fault above);
+//   slower than ~300 ms -> adjacent beats bleed together (at 135 BPM beats are 444 ms apart);
+//   150 ms              -> one hump per beat, finished before the next beat.
+// exp(-10 ms / 150 ms) = 0.9355, applied once per 10 ms frame.
+#define ENV_RELEASE  0.9355f
 // NARROWED AND LOWERED (24 Oct 2026). The old mapping ran K from 0.20 to 0.75, and at the DEFAULT
 // sensitivity of 0.20 it gave K 0.64 - a line near the top of the envelope's range. Any beat quieter than
 // 64 per cent of the loudest thing in the last second fell below it, never crossed, produced no leading
@@ -194,20 +212,25 @@ struct OdfChain {
   // Filter state: the same six one-poles as the baseline, per chain.
   float hp1 = 0, hp1Prev = 0, hp2 = 0, hp2Prev = 0;
   float lp1 = 0, lp2 = 0, lp3 = 0, lp4 = 0;
-  // 10 ms frame accumulation
-  float winMax = 0, prevWin = 0;
-  // Published once per frame.
-  volatile float    novelty = 0.0f;
-  volatile uint32_t seq     = 0;
-  // THE ADAPTIVE THRESHOLD STATE: a slow peak of this chain novelty (see odfEvaluate).
-  float             novPeak = 0.0f;
+  // ---- THE FIGURE: THE SMOOTHED ENVELOPE (27 Oct 2026) ------------------------------------------
+  // The ONLY thing a beat is measured from. Fast attack, slow release - see ENV_RELEASE above for why
+  // this replaces winMax, which was a peak of the waveform and pulsed every 4-12 ms.
+  float env = 0.0f;
+  // ---- THE TWO EDGES, MEASURED ON THE ENVELOPE, PER CHAIN (27 Oct 2026) -------------------------
+  // THE RULE, and it is the whole detection: the LEADING EDGE is where the envelope RISES through the
+  // sensitivity line, the TRAILING EDGE is where it FALLS BACK through it, and the BEAT LENGTH is the
+  // distance between them. The MIDPOINT of that length is what the beat is timed from. One mechanism,
+  // one line, for every chain. No peak and no novelty is consulted anywhere.
+  bool     above = false;        // was the envelope above the line on the previous frame
+  uint32_t leadMs = 0;           // the last leading edge
+  uint32_t beatLen = 0;          // the last completed Beat Length
+  uint32_t midMs = 0;            // its Midpoint: leading edge plus half the Beat Length
+  volatile uint32_t edgeSeq = 0; // bumped at every leading edge, so the listeners can see one
   // THE LINE'S LOCAL ENVELOPE (24 Oct 2026). The last second of this chain's LEVEL - winMax - so its
   // TROUGH and PEAK can be found and the sensitivity line placed between them. See LVL_LINE_K above for
   // why a slow peak could not do this job.
   float   lvlRing[LVL_RING_N];
   uint8_t lvlRingI = 0;
-  float             lastNov = 0.0f;   // previous frame novelty, to spot the rise START
-  uint32_t          riseAtMs = 0;     // when the current rise began, for the timestamp
 };
 OdfChain odfChain[ODF_CHAINS];
 uint16_t odfChainUse = 0;                 // bitmask of chains currently in use
@@ -217,8 +240,10 @@ float    odfAHi = 0.0f;                   // shared low-pass coefficient (250 Hz
 // line must go on meaning exactly what it always meant.
 // (odfDisplayBeat is gone: a beat is per PATTERN now, so the pending state lives in
 // each BeatListener - see listeningStep().)
-float odfThr = 0.0f;            // logged, so the threshold can be read directly
-float odfNovelty = 0.0f;        // chain 0's last novelty (the logged value)
+// THE SENSITIVITY LINE, and chain 0's envelope for the frame just published. The line is logged so it can
+// be read directly; the envelope is the figure the beat is measured from.
+float odfThr  = 0.0f;
+float odfEnv0 = 0.0f;
 
 // The high-pass coefficient for a band edge. THE SAME FORMULA as the baseline used
 // per sample; it is simply hoisted to the 10 ms frame, because audioFs (and therefore
@@ -245,7 +270,7 @@ struct BeatListener {
   bool          active   = false;
   int           chain    = 0;
   float         thr      = 48.0f;   // the EFFECTIVE threshold, recomputed each frame
-  float         sensFrac = 0.35f;   // the fraction of the chain novelty peak (the slider)
+  // (sensFrac is gone: a fraction of a novelty peak is not a threshold for anything any more.)
   int           mult     = 1;
   uint32_t      lastSeq  = 0;
   unsigned long lastReal = 0, prevReal = 0;
@@ -335,7 +360,7 @@ struct TrcRec {
 };
 TrcRec   trcRing[TRC_RING];
 volatile uint32_t trcHead = 0;    // the sampler cursor for /trace
-float    odfPeak0     = 0.0f;     // chain 0 peak for the frame just published
+
 volatile uint32_t g_odfFrames = 0;         // 10 ms frames published since boot
 volatile float    g_odfHz     = 0.0f;      // measured frames/s - MUST be ~100
 volatile uint32_t g_chaseSwallow = 0;      // Chase triggers the debounce threw away
@@ -444,7 +469,7 @@ void handleTrace() {
     const TrcRec &t = trcRing[s % TRC_RING];
     snprintf(buf, sizeof(buf),
              "ms=%lu env=%.1f nov=%.1f npk=%.1f peak=%.3f floor=%.1f lvl=%.3f band=%.0f-250\n",
-             (unsigned long)t.ms, (double)t.env, (double)t.nov, (double)odfChain[0].novPeak, (double)t.slow,
+             (unsigned long)t.ms, (double)t.env, 0.0, 0.0, (double)t.slow,
              (double)t.floorDb, (double)t.lvl, (double)t.hpHz);
     out += buf;
   }
@@ -471,7 +496,7 @@ void odfAuxBands() {
     odfChain[c].aLp = 0.0f;                 // recomputed at the next frame boundary
     odfChain[c].hp1 = odfChain[c].hp1Prev = odfChain[c].hp2 = odfChain[c].hp2Prev = 0;
     odfChain[c].lp1 = odfChain[c].lp2 = odfChain[c].lp3 = odfChain[c].lp4 = 0;
-    odfChain[c].winMax = odfChain[c].prevWin = 0;
+    odfChain[c].env = 0.0f;
     odfChain[c].used = true;
     odfChainUse |= (1u << c);
   }
@@ -490,7 +515,7 @@ int chainForBand(float hz) {
       odfChain[c].aLo  = odfBandCoeff(hz);
       odfChain[c].hp1 = odfChain[c].hp1Prev = odfChain[c].hp2 = odfChain[c].hp2Prev = 0;
       odfChain[c].lp1 = odfChain[c].lp2 = odfChain[c].lp3 = odfChain[c].lp4 = 0;
-      odfChain[c].winMax = odfChain[c].prevWin = 0;
+      odfChain[c].env = 0.0f;
       odfChain[c].used = true;
       return c;
     }
@@ -549,10 +574,10 @@ void rebuildListening() {
     // THE THRESHOLD IS RELATIVE TO THE MUSIC NOW (see NOV_PEAK_DECAY). The slider is a real
     // sensitivity: its right-hand end (sens 1) is the most sensitive, i.e. the smallest
     // fraction of the music own novelty peak; its left-hand end is the strictest.
-    L.sensFrac = SENS_FRAC_MAX - (SENS_FRAC_MAX - SENS_FRAC_MIN) * constrain(portCfg[p].beatSens, 0.01f, 1.0f);
-    L.thr      = L.sensFrac * odfChain[L.chain].novPeak;   // recomputed each frame
+
+    L.thr      = odfThr;                                  // THE LINE - the only threshold there is
     L.mult  = (portCfg[p].mult > 1) ? 2 : 1;
-    L.lastSeq = odfChain[L.chain].seq;      // never act on a STALE frame
+    L.lastSeq = odfChain[L.chain].edgeSeq;   // never act on a stale frame
   }
 
   // The 240V controller: ALWAYS a listener, on the baseline band, with the global
@@ -561,10 +586,10 @@ void rebuildListening() {
   BeatListener &R = beatListen[NUM_PORTS];
   R.active = true;
   R.chain  = 0;
-  R.sensFrac = SENS_FRAC_MAX - (SENS_FRAC_MAX - SENS_FRAC_MIN) * constrain(beatSens, 0.01f, 1.0f);
-  R.thr      = R.sensFrac * odfChain[0].novPeak;
+
+  R.thr      = odfThr;
   R.mult   = (mult240V > 1) ? 2 : 1;
-  R.lastSeq = odfChain[0].seq;
+  R.lastSeq = odfChain[0].edgeSeq;
 
   // AND NOW PUBLISH WHAT THE LISTENERS ACTUALLY ASKED FOR.
   //
@@ -594,7 +619,7 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["bFlips"]  = (uint32_t)g_flipLED;
   doc["bKicks"]  = (uint32_t)g_kickLED;
   doc["bUse"]    = (uint32_t)odfChainUse;      // which chains are configured (1 = chain 0 only)
-  doc["bNov"]    = (double)odfNovelty;         // chain 0's last novelty, in ADC counts
+
   doc["bThr"]    = (double)odfThr;             // chain 0's threshold
   doc["p0pat"]   = portCfg[0].pat;
   doc["p0sens"]  = (double)portCfg[0].beatSens;
@@ -646,7 +671,7 @@ static void diagBeatFields(JsonDocument &doc) {
   }
   // THE INSTRUMENT OWN HEALTH, so no measurement has to be trusted blindly.
   doc["odfHz"]   = (double)g_odfHz;               // 10 ms frames/s - must be ~100
-  doc["novPk"]   = (double)odfChain[0].novPeak;   // the adaptive threshold driver: the
+
   // THE SENSITIVITY LINE AND THE ENVELOPE IT IS PLACED IN (24 Oct 2026). Without these the line's
   // position can only be guessed at while tuning. lvlLo and lvlHi are the trough and the peak of the bass
   // level over the last second; thr is the line itself, drawn K of the way up from the trough. If thr is
@@ -672,7 +697,7 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["lead"]      = (uint32_t)g_lvlLead;           // the last leading edge, which is what permits a flash
 
                                                   // threshold is a fraction of this
-  doc["p0frac"]  = (double)beatListen[0].sensFrac;
+
   doc["p0iv"]    = (uint32_t)beatListen[0].ivMs;      // the beat period the clock runs at
   doc["p0clk"]   = (uint32_t)beatListen[0].clkFires;   // beats the CLOCK delivered
   // ONE PER MUSIC BEAT, NOT ONE PER CLOCK BEAT (21 Oct). It matches p0clk only while music is
