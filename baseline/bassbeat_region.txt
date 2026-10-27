@@ -889,8 +889,6 @@ static uint8_t       g_fitI = 0;                      // the write cursor
 static uint32_t      g_fitAccept = 0, g_fitReject = 0;
 // THE BEAT WIDTH (23 Oct), measured from the ENVELOPE. A real beat has width; a transient is narrow,
 // which is how a x2/x4/x8 lock on transients is told apart from a lock on the beat.
-static float         g_widPeak = 0.0f;      // the envelope peak of the onset being measured
-static unsigned long g_widStart = 0;        // its leading edge
 static unsigned long g_widLast = 0;         // the width of the most recent complete beat, ms
 static unsigned long g_widAvg = 0;          // the running mean width, used to place the mid point
 static uint32_t      g_widN = 0;

@@ -95,13 +95,10 @@ uint32_t colourLED[4] = { 0xFFFFFF, 0xFFD000, 0xFF7000, 0xFF0000 };
 // across sections, and the band low edge the microphone actually hears - and they are
 // exposed in /settings so the page has ONE source of truth for its slider marks, its snap
 // targets and its restore chips. Defined HERE, above every use.
-// THE DEFAULT THE PAGE'S RESTORE BUTTON PUTS BACK, and the mark it draws on the slider. It is now the
-// same 0.30 the firmware starts at, so a restore returns to the tuned value rather than to an old one.
-// (It used to read 0.08 and describe a fraction of the novelty peak - a meaning the line no longer has.)
-#define DEF_BEAT_SENS  0.30f
+#define DEF_BEAT_SENS  0.08f    // the value the page's restore button puts back
 #define DEF_FREQ       61       // -> the 61-250 Hz band
 // thr = (1 - beatSens) * 60, so 0.2 is the equivalent of the old 0.8.
-float beatSens = 0.30f;
+float beatSens = 0.2f;
 
 // ---- Playlist ----
 PlaylistItem playlist[MAX_PLAYLIST_ITEMS];
@@ -109,7 +106,7 @@ int playlistCount = 0;
 bool playlistPlaying = false;
 
 // ---- Active audio detector parameters (shared) ----
-int freqThreshold = 40;
+int freqThreshold = 50;
 int multiplier = 1;   // Beat Multiplier: 1 = one reversal per beat, 2 = two
 // musicFullMode is the 240V VU METER's level source (BASS / FULL RANGE). It is
 // set ONLY from the 240V section: the LED meter is bass-only by design and its
@@ -568,8 +565,8 @@ LedPatParams ledPatDefaultFor(int i) {
   LedPatParams d = {};
   d.ver = LED_PAT_VER;
   d.colour[0] = 0xFFFFFF; d.colour[1] = 0xFFD000; d.colour[2] = 0xFF7000; d.colour[3] = 0xFF0000;
-  d.speed = 0.02f; d.qty = 1; d.size = 1; d.mult = 1; d.freqHz = 40;
-  d.wrap = 0; d.invert = 0; d.beatSens = 0.30f; d.attack = 0.15f; d.decay = 0.01f;
+  d.speed = 0.02f; d.qty = 1; d.size = 1; d.mult = 1; d.freqHz = 50;
+  d.wrap = 0; d.invert = 0; d.beatSens = 0.2f; d.attack = 0.15f; d.decay = 0.01f;
   d.peakDelay = 0.5f; d.peakSpeed = 1.0f; d.peakDir = 0; d.vuDir = 0;
   d.effect = 0; d.momentum = 0.0f; d.distance = 20;
   if (i == 1) d.speed = 20.0f;              // the Chase: LEDs per second
@@ -677,7 +674,7 @@ struct PortCfg {
   // same formula as the pattern page, so a pattern left alone behaves exactly as the
   // 15/10 baseline did. A timeline cell overrides them for its port, which is what
   // lets two ports listen to different bands and different thresholds at once.
-  float beatSens = 0.30f;    // its own sensitivity: thr = (1 - beatSens) * 60
+  float beatSens = 0.2f;     // its own sensitivity: thr = (1 - beatSens) * 60
   int   freqHz   = 50;       // its own band lower edge (20-100 Hz)
   int   mult     = 1;        // 1 = real beats only, 2 = real + half-way beats
   // Per-port colour, 0xRRGGBB.
@@ -1962,7 +1959,7 @@ void saveSettings() {
   preferences.putFloat("speedLED", speedLED);
   preferences.putInt("qtyLED", quantityLED);
   preferences.putInt("sizeLED", sizeLED);
-  preferences.putInt("freqLED2", freqLED);   // key bumped with the default
+  preferences.putInt("freqLED", freqLED);   // key bumped with the default
   preferences.putInt("multLED2", multLED);   // NEW KEY - see loadSettings()
   // (musicLED is gone: the LED VU meter is BASS LEVEL only, the EQ is FULL.)
   preferences.putFloat("atkLED", attackLED);
@@ -1973,7 +1970,7 @@ void saveSettings() {
   preferences.putBool("inv240", invert240V);
   preferences.putBool("wrapLED", wrapLED);
   preferences.putBool("invLED", invertLED);
-  preferences.putFloat("beatSens3", beatSens);   // key bumped: the meaning and the default both changed
+  preferences.putFloat("beatSens2", beatSens);   // key bumped: the meaning and the default both changed
   for (int i = 0; i < 4; i++)
     preferences.putUInt((String("colLED") + i).c_str(), colourLED[i]);
   preferences.putString("themeName", themeName);
@@ -2010,7 +2007,7 @@ void loadSettings() {
   speedLED = preferences.getFloat("speedLED", 1.0);
   quantityLED = preferences.getInt("qtyLED", 1);
   sizeLED = preferences.getInt("sizeLED", 1);
-  freqLED = preferences.getInt("freqLED2", 40);
+  freqLED = preferences.getInt("freqLED", 50);
   // NEW KEY, and the default is 1, deliberately.
   //
   // The old key held 2 on every board (it was the initialiser's value) because the
@@ -2048,7 +2045,7 @@ void loadSettings() {
   // NEW KEY: the old value was on the un-reversed scale (0.8 = strict), so loading
   // it here would make the detector almost maximally sensitive. 0.2 is the
   // equivalent of that old 0.8 on the reversed scale.
-  beatSens  = preferences.getFloat("beatSens3", 0.30f);
+  beatSens  = preferences.getFloat("beatSens2", 0.2f);
   if (beatSens < 0.01f) beatSens = 0.01f;
   if (beatSens > 1.00f) beatSens = 1.00f;
   for (int i = 0; i < 4; i++)
@@ -4255,8 +4252,6 @@ static uint8_t       g_fitI = 0;                      // the write cursor
 static uint32_t      g_fitAccept = 0, g_fitReject = 0;
 // THE BEAT WIDTH (23 Oct), measured from the ENVELOPE. A real beat has width; a transient is narrow,
 // which is how a x2/x4/x8 lock on transients is told apart from a lock on the beat.
-static float         g_widPeak = 0.0f;      // the envelope peak of the onset being measured
-static unsigned long g_widStart = 0;        // its leading edge
 static unsigned long g_widLast = 0;         // the width of the most recent complete beat, ms
 static unsigned long g_widAvg = 0;          // the running mean width, used to place the mid point
 static uint32_t      g_widN = 0;
@@ -4435,8 +4430,13 @@ static bool fitBeatStep(unsigned long stamp, unsigned long per) {
 // interleaved with this region. ALL OF IT IS NOW GONE. The user's decision: "There is no requirement for
 // any code that detects bars (beat 1). That can all be removed now." Removed: the bar-phase model and
 // its activation, the width vote, the parity phase counters, the beat-1 instrumentation ring, the
-// channel-10 beat-1 indicator, and the two bar-position readouts. Channel 10 is a plain 240V light
-// channel again. The user's one-off Rule 10 exception covers exactly these removals and no others.
+// channel-10 beat-1 indicator, and the two bar-position readouts. The user's one-off Rule 10 exception
+// covers exactly these removals and no others.
+// CHANNEL 10 IS AN INDICATOR AGAIN (24 Oct 2026, at the user's request) - but a different one, and a
+// simpler one. The old one lit on beat 1 and needed the whole bar-phase model that was removed above.
+// The new one lights on the 1-and-3 PAIR and needs nothing but the Beat Length comparison in
+// listeningStep: the longer Beat Lengths are 1 and 3, the shorter are 2 and 4. It is the user's own way
+// of seeing whether the right beats have been picked, from across the room.
 // NONE OF THAT WAS THE BEAT. The beat - what is inside these sentinels - is untouched.
 
 static inline unsigned long clampBeatPeriod(unsigned long ms) {
@@ -4782,7 +4782,6 @@ static void listeningStep() {
     // than the audio, which is exactly what the original requirement forbids: "IO48 should be related
     // to the audio signal only (not related to a pattern)". The DOT still moves in silence; only the
     // FLASH is gated on the music actually being present.
-    bool musicNow = !(L.lastReal == 0 || (now - L.lastReal) > 1500UL);
 
     // THE CLOCK TICK. Fires the beat when it is DUE, whatever the detector did - so a
     // missed onset can no longer stall the metronome and an off-beat cannot reverse it.
@@ -4951,8 +4950,9 @@ static void listeningStep() {
 // fitBeatStep exactly as before.
 // THE FIT'S MIDPOINT, FROM THE RING'S OWN MEASUREMENT (23 Oct 2026, user-authorised).
 // WHAT WAS WRONG, AND IT IS NOW MEASURED, NOT ARGUED. The fit used to be handed
-// onsStamp + (g_widAvg / 2). g_widAvg is a mean of widths timed as millis() - g_widStart, where
-// g_widStart is set to the RECORD moment - NOT the onset's leading edge, which is what onsStamp is. So
+// onsStamp + (a running mean of widths / 2). That mean was timed from the RECORD moment - NOT from the
+// onset's leading edge, which is what onsStamp is - and both the mean and its start-time variable have
+// since been removed, which is why the line above is now history rather than code. So
 // two different time bases were being added, and the running mean had also soaked up the silence values
 // (w <= 2000 let in readings of 1835 and 1949 ms against real beat widths of 15-89 ms).
 // THE PROOF, from fitIn and d= in /onsets on the user's own track (411 onsets):
@@ -5845,6 +5845,13 @@ void executePatternStep(bool beatHeard) {
   if (invert240V) {
     for (int i = 0; i < N; i++) on[i] = !on[i];
   }
+  // ---- CHANNEL 10 = BEATS 1 AND 3 (24 Oct 2026, the user's request) --------------------------------
+  // The pair the Beat Lengths identify: 1 and 3 are the LONGER ones, 2 and 4 the shorter. Channel 10 is
+  // lit for the long pair and dark for the short pair, so it alternates once per beat. If that
+  // alternation does not line up with the music, the 1-and-3 verdict is wrong, and it is obvious.
+  // g_longBeat is only written when the fit ACCEPTS a beat as BPM-valid, so the verdict it holds between
+  // beats is the last valid one - which is what makes the indicator hold steady rather than flicker.
+  on[N - 1] = (g_beatFound && g_longBeat) ? true : false;
   for (int i = 0; i < N; i++) digitalWrite(channelPins[i], on[i] ? HIGH : LOW);
 }
 
