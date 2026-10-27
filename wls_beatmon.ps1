@@ -62,20 +62,37 @@ function Get-Text([string]$path) {
     $i = $txt.IndexOf("`r`n`r`n")
     if ($i -ge 0) { return $txt.Substring($i + 4) }
     return $txt
-  } catch { return $null }
+  } catch { $script:lastNetErr = $_.Exception.Message; return $null }
 }
 
 [System.IO.File]::WriteAllText($outPath, "t,io48,p0clk,p0lst,p0iv,bOns,bActs,led48,displayActive,odfHz,fLedUs,fLoopUs,wid,conf,fitBpm,fitAcc,fitRej,locked,freeHeap`r`n", $enc)
 [System.IO.File]::WriteAllText($onsPath, "# raw /onsets lines, as fetched. Each fetch is preceded by a cursor marker.`r`n", $enc)
 
-$rows = 0; $onsCursor = 0; $lastOns = 0; $lastFlash = -1; $lastClk = -1
+$rows = 0; $onsCursor = 0; $lastOns = 0; $lastFlash = -1; $lastClk = -1; $fails = 0; $script:lastNetErr = ''
 $started = Get-Date
 
 while ($true) {
   if ([Console]::KeyAvailable) { $k = [Console]::ReadKey($true); if ($k.Key -eq 'Q') { break } }
 
   $dTxt = Get-Text '/diag'
-  if ($null -eq $dTxt) { Start-Sleep -Milliseconds $EveryMs; continue }
+  if ($null -eq $dTxt) {
+    # SILENT FAILURE WAS THE BUG (24 Oct 2026). This used to continue with no output at all, so a run
+    # where the board was never reached looked exactly like a run where nothing happened: a blank window
+    # and a CSV with only its header. Now it says so, and says what to check.
+    $fails++
+    if ($fails -eq 1 -or ($fails % 5) -eq 0) {
+      Write-Host ('  *** CANNOT REACH THE BOARD at ' + $Board + ':80 - ' + $fails + ' attempts') -ForegroundColor Red
+      if ($script:lastNetErr) { Write-Host ('      ' + $script:lastNetErr) -ForegroundColor Red }
+      Write-Host '      is the board powered, and on the same network as this PC?' -ForegroundColor Red
+      Write-Host '      THE BOARD SERVES ONE CLIENT AT A TIME - close its web page, then start this again.' -ForegroundColor Red
+      Write-Host '      if the board is on your home network, pass its address: -Board 192.168.1.50' -ForegroundColor Red
+    }
+    Start-Sleep -Milliseconds $EveryMs; continue
+  }
+  if ($fails -gt 0) {
+    Write-Host ('  board reached again (after ' + $fails + ' failed attempts).') -ForegroundColor Green
+    $fails = 0
+  }
   $tTxt = Get-Text '/trav'
   try { $d = $dTxt | ConvertFrom-Json } catch { Start-Sleep -Milliseconds $EveryMs; continue }
   $v = $null
