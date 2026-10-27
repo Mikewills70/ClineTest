@@ -3453,7 +3453,18 @@ static void fastBeatCheck() {
 //     beatSens 0.20 (the default)    -> K 0.48
 //     beatSens 0.50                  -> K 0.41
 //     beatSens 1.00 (most sensitive) -> K 0.30
-#define LVL_LINE_K(bs) (0.52f - 0.22f * constrain((bs), 0.0f, 1.0f))
+// LOWERED, FROM THE MEASUREMENT (27 Oct 2026). The old mapping ran K from 0.30 to 0.52, which on a
+// 5-to-28 envelope put the line at 12 to 17 - the upper half. A beat that reached 25 crossed, one that
+// reached 15 did not, and the ones that did cross produced only a sliver. MEASURED: real beats give Beat
+// Lengths of 107 and 118 ms, the slivers gave 10 and 12 ms.
+// THE NEW RANGE PUTS THE LINE LOW IN THE ENVELOPE, so a whole beat crosses and each beat yields ONE
+// figure:
+//     beatSens 0.01 (strictest)      -> K 0.248  -> line ~10.7 on a 5-28 envelope
+//     beatSens 0.20 (the default)    -> K 0.210  -> line ~9.9
+//     beatSens 1.00 (most sensitive) -> K 0.050  -> line ~6.2
+// The sensitivity control keeps its meaning - higher is more sensitive, which is a LOWER line - it is
+// simply operating in the part of the range where the line is useful.
+#define LVL_LINE_K(bs) (0.25f - 0.20f * constrain((bs), 0.0f, 1.0f))
 // ===================================================================================================
 // THE MINIMUM RISE - "the beat coming out of the noise"  (27 Oct 2026, the user's design)
 // ===================================================================================================
@@ -3473,7 +3484,13 @@ static void fastBeatCheck() {
 // MIN_RISE IS IN ADC COUNTS AND IS PROVISIONAL. Only the SILENCE figure has been measured on this
 // hardware (1-2 counts); a real beat's level has not. It is set low enough to be safe, and the plan is to
 // read lvlLo/lvlHi/thr from /diag during music and set it from that measurement rather than a guess.
-#define MIN_RISE   12.0f
+// MIN_RISE SET FROM THE MEASUREMENT (27 Oct 2026). It was 12, which was a guess, and the board has now
+// falsified it: in silence the envelope peaks at 2.97 counts, but in MUSIC the trough is 5.02 and the
+// peak only 28.17 - so a floor of 12 put the line at 17, near the TOP of a 23-count range. Only the top
+// sliver of each beat crossed, producing 10-12 ms figures instead of whole beats, and those slivers are
+// what showed up as missed beats. 3 clears the measured noise (2.97) with a little margin and leaves the
+// music alone.
+#define MIN_RISE    3.0f
 // ===================================================================================================
 // THE MISSED BEAT AND THE LOST BEAT  (27 Oct 2026 - the user's policy, stated in full)
 // ===================================================================================================
