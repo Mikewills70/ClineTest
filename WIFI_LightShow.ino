@@ -3385,7 +3385,16 @@ static void fastBeatCheck() {
 // Replaces: low-pass -> peak-to-peak -> compare to half a running average.
 // ---------------------------------------------------------------------------
 #define ODF_HP_HZ    40.0f      // band bottom: removes rumble and DC
-#define ODF_LP_HZ   250.0f      // band top: keeps the kick, rejects snare/hat/vocal
+#define ODF_LP_HZ   250.0f      // band top for the LISTENER chains - see BASS_LP_HZ for chain 0
+// THE BEAT CHAIN'S TOP EDGE, LOWERED TO 120 Hz (24 Oct 2026 - the frequency question).
+// It was 250 Hz. That does keep the kick, but it ALSO admits the male vocal fundamental (100-200 Hz) and
+// the body of the snare - and the sensitivity line is drawn between the envelope's trough and its peak
+// over the last second, so whenever the loudest thing in that second was a vocal or a snare rather than a
+// bass beat, the line rode UP onto it and the bass beats fell below it. A figure that never crosses the
+// line has no leading edge, and the flash is gated on the leading edge, so those beats produced NO FLASH.
+// That is the missed beats. A kick's punch lives at 50-110 Hz, so 120 Hz keeps all of the beat and
+// rejects the vocal and the snare.
+#define BASS_LP_HZ  120.0f      // chain 0 only: the beat chain. The listeners keep ODF_LP_HZ.
 #define ODF_HIST      32        // 320 ms of novelty history for the local mean
 #define ODF_K        0.85f      // trigger at local_mean * ODF_K + beatSens
 #define ODF_MIN_GAP    90UL     // minimum ms between onsets
@@ -3428,7 +3437,21 @@ static void fastBeatCheck() {
 //     beatSens 0.50                  -> K 0.48
 //     beatSens 0.01 (strictest)      -> K 0.74
 #define LVL_RING_N   100          // frames in the window; 100 frames at the 10 ms frame = 1 second
-#define LVL_LINE_K(bs) (0.75f - 0.55f * constrain((bs), 0.0f, 1.0f))
+// NARROWED AND LOWERED (24 Oct 2026). The old mapping ran K from 0.20 to 0.75, and at the DEFAULT
+// sensitivity of 0.20 it gave K 0.64 - a line near the top of the envelope's range. Any beat quieter than
+// 64 per cent of the loudest thing in the last second fell below it, never crossed, produced no leading
+// edge and so produced no flash. That is the missing quarter of the beats.
+// A line has to be crossed TWICE by every beat: up at the leading edge and back down at the trailing
+// edge. Too high and the quiet beats never rise through it. Too low and the figure never falls back
+// through it between beats, so no Beat Length is ever closed and there is no beat at all. The safe place
+// is the MIDDLE of the envelope's range, and the user's own warning applies here as much as anywhere:
+// adjustments should be small. So the range is now narrow and central, and the DEFAULT of 0.20 sits at
+// 0.48 - the middle:
+//     beatSens 0.01 (strictest)      -> K 0.52
+//     beatSens 0.20 (the default)    -> K 0.48
+//     beatSens 0.50                  -> K 0.41
+//     beatSens 1.00 (most sensitive) -> K 0.30
+#define LVL_LINE_K(bs) (0.52f - 0.22f * constrain((bs), 0.0f, 1.0f))
 
 // BEAT SENSITIVITY - the absolute part of the threshold, and the control that
 // actually matters.
@@ -3789,7 +3812,7 @@ void odfConfigureChains() {
   odfChain[0].used = true;
   odfChain[0].hpHz = constrain((float)freqThreshold, 20.0f, 100.0f);
   odfChain[0].aLo  = odfBandCoeff(odfChain[0].hpHz);
-  odfChain[0].lpHz = ODF_LP_HZ;
+  odfChain[0].lpHz = BASS_LP_HZ;   // 120 Hz: bass only, so the line cannot ride up onto a vocal
   odfAuxBands();                           // the two parity bands are always live (22 Oct)
   for (int c = 1; c < ODF_CHAINS; c++) {
     if (odfChain[c].used) continue;        // an in-use extra chain keeps its band
@@ -3967,7 +3990,8 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["led48"]   = (uint32_t)(digitalRead(POWER_LED_PIN) ? 1 : 0);
   doc["odfFr"]   = (uint32_t)g_odfFrames;
   doc["odfLo"]   = (double)odfChain[0].hpHz;      // the ODF band in use ...
-  doc["odfHi"]   = (double)ODF_LP_HZ;             // ... its top edge is a code constant
+  doc["odfHi"]   = (double)BASS_LP_HZ;            // ... its top edge is BASS_LP_HZ (120 Hz)
+  doc["odfLo"]   = (double)odfChain[0].hpHz;       // the beat chain's ACTUAL lower edge, as set
   doc["odfUse"]  = (uint32_t)odfChainUse;
   doc["onsHead"] = (uint32_t)onsHead;             // the /onsets cursor
   doc["trcHead"] = (uint32_t)trcHead;             // the /trace cursor

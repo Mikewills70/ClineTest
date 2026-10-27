@@ -3876,6 +3876,7 @@ window.addEventListener('error', function (e) {
                      ' | P ' + j.fitPer + 'ms' +
                      ' | X ' + j.X + 'ms' +
                      ' | BeatLengths ' + j.len0 + '/' + j.len1 + '/' + j.len2 + '/' + j.len3 +
+                     ' | band ' + Math.round(j.odfLo) + '-' + Math.round(j.odfHi) + 'Hz' +
                      ' | line ' + Math.round(j.thr) +
                      ' in ' + Math.round(j.lvlLo) + '-' + Math.round(j.lvlHi);
             if (parseInt(j.beatFound, 10) === 1) {
