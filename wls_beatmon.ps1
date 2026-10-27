@@ -26,6 +26,11 @@
 # ===================================================================================================
 param(
   [string]$Board   = '192.168.4.1',
+  # SELF-HEAL (27 Oct 2026). CODE_NOTES.md already had this: the board's access point has NO INTERNET,
+  # so Windows silently drops it, and "each fetch needs a fresh join". The monitor now joins it again
+  # whenever a fetch fails, which is what lets a long run survive Windows dropping the connection. Before
+  # this it simply sat here timing out, which is exactly what the note warns against.
+  [string]$SSID    = 'ESP32-LightShow',
   [string]$Out     = 'beatmon.csv',
   [string]$OnsOut  = 'beatmon_onsets.txt',
   [int]$EveryMs    = 1000,
@@ -80,12 +85,22 @@ while ($true) {
     # where the board was never reached looked exactly like a run where nothing happened: a blank window
     # and a CSV with only its header. Now it says so, and says what to check.
     $fails++
+    # JOIN IT AGAIN. Every third failure, so the script is not fighting Windows for the interface, but
+    # promptly enough that a dropped connection costs a couple of seconds and not the whole run.
+    if (($fails % 3) -eq 1) {
+      $jr = netsh wlan connect name="$SSID" 2>&1
+      if ($jr -match 'completed successfully') {
+        Write-Host ('  re-joined ' + $SSID + ' (fetch failure ' + $fails + ')') -ForegroundColor DarkGray
+        Start-Sleep -Milliseconds 400
+      }
+    }
     if ($fails -eq 1 -or ($fails % 5) -eq 0) {
       Write-Host ('  *** CANNOT REACH THE BOARD at ' + $Board + ':80 - ' + $fails + ' attempts') -ForegroundColor Red
       if ($script:lastNetErr) { Write-Host ('      ' + $script:lastNetErr) -ForegroundColor Red }
-      Write-Host '      is the board powered, and on the same network as this PC?' -ForegroundColor Red
-      Write-Host '      THE BOARD SERVES ONE CLIENT AT A TIME - close its web page, then start this again.' -ForegroundColor Red
-      Write-Host '      if the board is on your home network, pass its address: -Board 192.168.1.50' -ForegroundColor Red
+      Write-Host '      the script is re-joining the board access point by itself; give it a few seconds.' -ForegroundColor Red
+      Write-Host '      if it never recovers: check the Wi-Fi list. If ESP32-LightShow is ABSENT, the AP is' -ForegroundColor Red
+      Write-Host '      dead - POWER-CYCLE THE BOARD (a panic leaves the AP dead until it is replugged).' -ForegroundColor Red
+      Write-Host '      and close the board web page: the server takes one client at a time.' -ForegroundColor Red
     }
     Start-Sleep -Milliseconds $EveryMs; continue
   }
