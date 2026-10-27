@@ -281,6 +281,10 @@ volatile uint32_t g_lvlMid = 0;
 volatile uint32_t g_lvlSeq = 0;
 volatile uint32_t g_lvlReject = 0;   // candidates refused by point 4: length much less than the window
 volatile uint32_t g_lvlLead = 0;   // 1. the LEADING EDGE itself: the instant the figure rose through the line
+// THE LOCAL ENVELOPE THE LINE IS PLACED IN (24 Oct 2026): the trough and the peak of the bass level over
+// the last second. Published so the line's position can be read directly in the log rather than guessed at.
+volatile float    odfLvlLo = 0.0f;
+volatile float    odfLvlHi = 0.0f;
 // POINT 4's WINDOW: THE FOUR LENGTHS. A candidate is a beat if its length is similar to the four lengths
 // already in the window; anything much less is a TRANSIENT and is ignored. Note this is a window of
 // LENGTHS - a beat's figure is LONG across the sensitivity line, a transient's is SHORT - and it is not
@@ -3372,6 +3376,28 @@ static void fastBeatCheck() {
 #define CLK_MAX_MS     750UL    // 80 BPM
 #define SENS_FRAC_MAX  0.60f    // sens 0.01 (strictest): 60% of the music novelty peak
 #define SENS_FRAC_MIN  0.12f    // sens 1.00 (most sensitive): 12%
+// ===================================================================================================
+// WHERE THE SENSITIVITY LINE SITS IN THE BASS ENVELOPE  (24 Oct 2026, Rule 10 released by the user)
+// ===================================================================================================
+// THE FAULT THIS REPLACES. The line was a fraction of a SLOW PEAK of the level. A slow peak rises
+// instantly and falls over about six seconds, so in any steady passage the line ends up BELOW the level
+// and stays there: the figure rises through it and never comes back down, no length is ever completed and
+// IO48 never flashes. That is exactly what was seen - it only worked with the base sensitivity at 1.0,
+// where the line drops to 12% and just happens to dip under between beats. A line that is crossed once is
+// not a line a beat can be measured from.
+// WHAT A LINE HAS TO DO. It has to sit BETWEEN the figure's peaks and its troughs. Then every beat's rise
+// crosses it going up and every decay crosses it coming down, so every beat yields a length and the
+// midpoint of that length - which is the flash point.
+// SO: the level's own TROUGH and PEAK over the last second are kept, and the line is placed a fraction K
+// of the way up from the trough. K is the BASS SENSITIVITY control, and it is the TIMING control too:
+//   LOW K  - the line is low, the figure stays above it longer, so the length is longer and its midpoint
+//            (the flash) comes LATER. Every beat crosses, so nothing is missed.
+//   HIGH K - the line is high, only strong beats cross, the length is short and the flash comes EARLIER.
+//     beatSens 1.00 (most sensitive) -> K 0.20
+//     beatSens 0.50                  -> K 0.48
+//     beatSens 0.01 (strictest)      -> K 0.74
+#define LVL_RING_N   100          // frames in the window; 100 frames at the 10 ms frame = 1 second
+#define LVL_LINE_K(bs) (0.75f - 0.55f * constrain((bs), 0.0f, 1.0f))
 
 // BEAT SENSITIVITY - the absolute part of the threshold, and the control that
 // actually matters.
@@ -3427,13 +3453,11 @@ struct OdfChain {
   volatile uint32_t seq     = 0;
   // THE ADAPTIVE THRESHOLD STATE: a slow peak of this chain novelty (see odfEvaluate).
   float             novPeak = 0.0f;
-  // THE SENSITIVITY LINE'S REFERENCE (24 Oct 2026). A slow peak of this chain's LEVEL - winMax - kept by
-  // the same rise-at-once/fall-slowly rule as novPeak above. The sensitivity line is drawn against THIS,
-  // so that the line and the figure measured against it are the same quantity. It was drawn against
-  // novPeak, a peak of the frame-to-frame CHANGE, while the figure is winMax, a LEVEL: different
-  // quantities of very different size, which is why the level sat permanently above the line, the figure
-  // never fell back through it, no length was ever completed and IO48 never flashed at all.
-  float             lvlPeak = 0.0f;
+  // THE LINE'S LOCAL ENVELOPE (24 Oct 2026). The last second of this chain's LEVEL - winMax - so its
+  // TROUGH and PEAK can be found and the sensitivity line placed between them. See LVL_LINE_K above for
+  // why a slow peak could not do this job.
+  float   lvlRing[LVL_RING_N];
+  uint8_t lvlRingI = 0;
   float             lastNov = 0.0f;   // previous frame novelty, to spot the rise START
   uint32_t          riseAtMs = 0;     // when the current rise began, for the timestamp
 };
@@ -3875,6 +3899,14 @@ static void diagBeatFields(JsonDocument &doc) {
   // THE INSTRUMENT OWN HEALTH, so no measurement has to be trusted blindly.
   doc["odfHz"]   = (double)g_odfHz;               // 10 ms frames/s - must be ~100
   doc["novPk"]   = (double)odfChain[0].novPeak;   // the adaptive threshold driver: the
+  // THE SENSITIVITY LINE AND THE ENVELOPE IT IS PLACED IN (24 Oct 2026). Without these the line's
+  // position can only be guessed at while tuning. lvlLo and lvlHi are the trough and the peak of the bass
+  // level over the last second; thr is the line itself, drawn K of the way up from the trough. If thr is
+  // seen sitting at or near lvlHi, the line is too high and beats will be missed; the fix is a lower
+  // beatSens, not a code change.
+  doc["lvlLo"]   = (double)odfLvlLo;
+  doc["lvlHi"]   = (double)odfLvlHi;
+  doc["thr"]     = (double)odfThr;
                                                   // threshold is a fraction of this
   doc["p0frac"]  = (double)beatListen[0].sensFrac;
   doc["p0iv"]    = (uint32_t)beatListen[0].ivMs;      // the beat period the clock runs at
@@ -4997,11 +5029,21 @@ static void odfEvaluate() {
     float flux = ch.winMax - ch.prevWin;
     ch.prevWin = ch.winMax;
     if (c == 0) odfPeak0 = ch.winMax;   // INSTRUMENT: the frame band peak, BEFORE the reset
-    // THE LEVEL'S SLOW PEAK (24 Oct 2026), the same rule the novelty peak uses. This is the reference the
-    // sensitivity line is drawn against, so line and figure end up in the same units.
-    if (ch.winMax > ch.lvlPeak) ch.lvlPeak = ch.winMax;
-    else ch.lvlPeak += (ch.winMax - ch.lvlPeak) * NOV_PEAK_DECAY;
-    if (!(ch.lvlPeak >= 0.0f && ch.lvlPeak <= 1e9f)) ch.lvlPeak = 0.0f;   // NaN guard
+    // THE LINE'S LOCAL ENVELOPE (24 Oct 2026). Put this frame's level in the window, then take the
+    // window's TROUGH and PEAK. The line is placed between those two, so it is always a line the figure
+    // can cross twice - which is what makes a length, and therefore a flash, possible on every beat.
+    ch.lvlRing[ch.lvlRingI] = ch.winMax;
+    ch.lvlRingI = (uint8_t)((ch.lvlRingI + 1) % LVL_RING_N);
+    {
+      float lo = 1e9f, hi = 0.0f;
+      for (uint8_t k = 0; k < LVL_RING_N; k++) {
+        float v = ch.lvlRing[k];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      if (lo > hi) { lo = 0.0f; hi = 0.0f; }
+      if (c == 0) { odfLvlLo = lo; odfLvlHi = hi; }
+    }
     ch.winMax  = 0.0f;
     ch.novelty = (flux > 0.0f) ? flux : 0.0f;
     // ADAPTIVE THRESHOLD STATE: a slow peak of the novelty - rises at once, falls over
@@ -5048,8 +5090,14 @@ static void odfEvaluate() {
   // completed and IO48 never flashed at all. The control itself is UNCHANGED - still a fraction, still
   // higher = more sensitive - it is now a fraction of the LEVEL's peak, so the line and the figure are the
   // same quantity and the figure genuinely falls back through the line between beats.
-  odfThr = (SENS_FRAC_MAX - (SENS_FRAC_MAX - SENS_FRAC_MIN) * constrain(beatSens, 0.01f, 1.0f))
-           * odfChain[0].lvlPeak;
+  // THE LINE, PLACED BETWEEN THE ENVELOPE'S TROUGH AND PEAK (24 Oct 2026). This was a fraction of a slow
+  // peak of the level. A slow peak rises instantly, so in a steady passage the line sat BELOW the level
+  // permanently - the figure rose through it once and never came back down, no length was ever completed
+  // and IO48 never flashed. Placed between the trough and the peak instead, the line is one the figure
+  // crosses going up at every beat and coming down after it, so every beat yields a length and a midpoint.
+  // In silence lo and hi are both 0, the line is 0, and the crossing test below (odfThr > 0) is false, so
+  // nothing flashes - which is correct.
+  odfThr = odfLvlLo + LVL_LINE_K(beatSens) * (odfLvlHi - odfLvlLo);
 
 
   // NOTHING IS DECIDED HERE ANY MORE. This function MEASURES and PUBLISHES; the
