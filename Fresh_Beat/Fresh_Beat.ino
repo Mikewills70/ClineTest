@@ -93,6 +93,15 @@ static const float PHASE_K     = 0.40f;   // grid phase correction per detection
 static const float PERIOD_K    = 0.05f;   // grid period correction per detection
 static const float LOCK_SPREAD = 1.15f;   // intervals within this spread = consistent
 
+// THE FLASH OFFSET must not wander.  The flash sits at the beat's MIDDLE, i.e.
+// the measured beat length / 2 - but that length is noisy in ABSOLUTE ms.
+// MEASURED in the steady passages: the length spread was 50-78% against a 2-4%
+// tempo spread, so the flash moved up to 51 ms from one beat to the next while
+// the tempo was nailed.  It is now the MEDIAN of the last few lengths, capped to
+// a fraction of the period so a fast track cannot drag it toward the half beat.
+static const uint8_t LEN_N               = 5;
+static const float   LEN_OFFSET_MAX_FRAC = 0.25f;
+
 // ---------------------------------------------------------------------------
 //  DETECTOR TUNABLES
 // ---------------------------------------------------------------------------
@@ -141,7 +150,6 @@ static const float BEAT_HALF_DECAY = 0.50f;   // beat ends at half its envelope 
 static const float SILENCE_RAW_MIN   = 120.0f;
 static const float RAW_TAU_S         = 1.0f;    // raw peak hold decay, ~1 s
 
-static const float AVG_LEN_ALPHA = 0.35f;       // beat-length average smoothing
 static const uint8_t N_INTERVALS = 7;           // period histogram depth
 
 // ---------------------------------------------------------------------------
@@ -232,6 +240,14 @@ static uint32_t nextOnsetUs = 0;   // predicted leading edge of the next beat
 static uint32_t lastDetUs   = 0;   // last detection (drives the silence rule)
 static volatile uint32_t detections = 0;
 
+// --- STABLE FLASH OFFSET: history of measured beat lengths -------------------
+static uint32_t lenRing[LEN_N];
+static uint8_t  lenCount = 0, lenHead = 0;
+
+// --- per-beat instrument ----------------------------------------------------
+static volatile int32_t lastPhaseErrUs = 0;   // signed, detection - grid
+static volatile uint8_t lastPhaseState = 0;   // 0 none, 1 accepted, 2 rejected
+
 // ---------------------------------------------------------------------------
 //  PENDING CENTRE FLASH AND BEAT WINDOW
 // ---------------------------------------------------------------------------
@@ -280,6 +296,8 @@ static void     enterSilence();
 static void     pushInterval(uint32_t iv);
 static uint32_t medianPeriod();
 static float    periodSpread();
+static uint32_t medianLen();
+static uint32_t flashOffsetUs();
 static float    measureSampleRate();
 
 // ---------------------------------------------------------------------------
@@ -341,6 +359,33 @@ static float periodSpread() {
   return (float)mx / (float)mn;
 }
 
+// The MEDIAN of the recent measured beat lengths - resists the odd long beat, so
+// the flash offset stops jumping beat to beat.
+static uint32_t medianLen() {
+  if (lenCount == 0) return 0;
+  uint32_t tmp[LEN_N];
+  for (uint8_t i = 0; i < lenCount; i++) tmp[i] = lenRing[i];
+  for (uint8_t i = 1; i < lenCount; i++) {
+    const uint32_t v = tmp[i];
+    int8_t j = (int8_t)i - 1;
+    while (j >= 0 && tmp[j] > v) { tmp[j + 1] = tmp[j]; j--; }
+    tmp[j + 1] = v;
+  }
+  return tmp[lenCount / 2];
+}
+
+// The flash offset: half the (median) beat length, so the flash is at the MIDDLE
+// of the beat - CAPPED to LEN_OFFSET_MAX_FRAC of the period so a noisy length on
+// a fast track can never drag the flash toward the half beat.
+static uint32_t flashOffsetUs() {
+  uint32_t off = avgLenUs ? (avgLenUs / 2) : CENTRE_DEFAULT_US;
+  if (periodUs) {
+    const uint32_t cap = (uint32_t)((float)periodUs * LEN_OFFSET_MAX_FRAC);
+    if (off > cap) off = cap;
+  }
+  return off;
+}
+
 // ---------------------------------------------------------------------------
 //  SCHEDULE A FLASH AT A BEAT'S MIDDLE, and open its BEAT / BEAT_STEP window
 // ---------------------------------------------------------------------------
@@ -366,6 +411,8 @@ static void enterSilence() {
   periodUs      = 0;
   bpmX10        = 0;
   avgLenUs      = 0;
+  lenCount      = 0;
+  lenHead       = 0;
   intervalCount = 0;
   intervalHead  = 0;
   beatOpen      = false;
@@ -398,9 +445,6 @@ static void onLeadingEdge(uint32_t t) {
 
   detections++;
   lastDetUs    = t;
-  lastLeadUs   = t;        // reference for the beat-length measurement
-  beatOpen     = true;
-  peakSince    = env;
   silence      = false;
   missCount    = 0;
   awaitingBeat = false;
@@ -424,7 +468,11 @@ static void onLeadingEdge(uint32_t t) {
     toneIndex = (uint8_t)((toneIndex % 4) + 1);
     beatCount = toneIndex;
     beatsDetected++;
-    const uint32_t offset = avgLenUs ? (avgLenUs / 2) : CENTRE_DEFAULT_US;
+    // the beat-length measurement starts here (during acquisition, every detection)
+    lastLeadUs = t;
+    beatOpen   = true;
+    peakSince  = env;
+    const uint32_t offset = flashOffsetUs();
     scheduleCentre(t + offset);
     if (periodUs) { expectedLeadUs = t + periodUs; awaitingBeat = true; }
     return;
@@ -439,6 +487,15 @@ static void onLeadingEdge(uint32_t t) {
   const int32_t tol = (int32_t)(gridPeriod / 3);
   if (e > -tol && e < tol) {
     // a plausible detection: nudge the phase and the period a little
+    lastPhaseErrUs = e;
+    lastPhaseState = 1;                       // accepted
+    // ONLY an accepted detection may start the beat-length measurement.  A
+    // rejected (spurious) onset used to start it as well, which inflated the
+    // measured length and swung the flash offset - MEASURED: the offset reached
+    // the 25% cap and moved 53 ms between beats while the tempo was steady.
+    lastLeadUs = t;
+    beatOpen   = true;
+    peakSince  = env;
     nextOnsetUs = (uint32_t)((int32_t)nextOnsetUs + (int32_t)((float)e * PHASE_K));
     int32_t np = (int32_t)gridPeriod + (int32_t)((float)e * PERIOD_K);
     if (np < (int32_t)PERIOD_MIN_US) np = (int32_t)PERIOD_MIN_US;
@@ -447,6 +504,8 @@ static void onLeadingEdge(uint32_t t) {
     periodUs   = gridPeriod;
     bpmX10     = periodUs ? (600000000UL / periodUs) : 0;
   } else {
+    lastPhaseErrUs = e;
+    lastPhaseState = 2;                       // rejected: an outlier
     beatsRefused++;   // an outlier: ignored entirely
   }
 }
@@ -459,9 +518,12 @@ static void onTrailingEdge(uint32_t t) {
   if (lastLeadUs == 0 || silence) return;
   const uint32_t len = t - lastLeadUs;
   if (len < LEN_MIN_US || len > LEN_MAX_US) return;
-  avgLenUs = avgLenUs
-                 ? (uint32_t)((float)avgLenUs + ((float)len - (float)avgLenUs) * AVG_LEN_ALPHA)
-                 : len;
+  // push into the history and take the MEDIAN, so one odd beat cannot move the
+  // flash offset (the raw length is far noisier than the tempo)
+  lenRing[lenHead] = len;
+  lenHead = (uint8_t)((lenHead + 1) % LEN_N);
+  if (lenCount < LEN_N) lenCount++;
+  avgLenUs = medianLen();
 }
 
 // ---------------------------------------------------------------------------
@@ -536,9 +598,16 @@ static void serviceOutputs(uint32_t now) {
     toneIndex = (uint8_t)((toneIndex % 4) + 1);
     beatCount = toneIndex;
     beatsDetected++;
-    const uint32_t offset = avgLenUs ? (avgLenUs / 2) : CENTRE_DEFAULT_US;
+    const uint32_t offset = flashOffsetUs();
     scheduleCentre(nextOnsetUs + offset);
     nextOnsetUs += gridPeriod;
+    // PER-BEAT INSTRUMENT: the grid onset, the flash offset, the last detection's
+    // phase error and whether it was accepted or rejected.  This is what makes a
+    // 1-2 beat flash drift visible (the 1 Hz summary cannot see it).
+    if (Serial) Serial.printf("PERF c=%u t=%lu off=%lu pe=%ld st=%u\n",
+                              (unsigned)toneIndex, (unsigned long)millis(),
+                              (unsigned long)offset, (long)lastPhaseErrUs,
+                              (unsigned)lastPhaseState);
   }
 
   if (centrePending && timeReached(now, centreFireUs)) {
