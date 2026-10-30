@@ -6,10 +6,10 @@
 //  code reintroducing variables that then have to be found and removed.
 //
 //  REQUIREMENT (Audio.docx):
-//    * Flash IO48 for 100 ms on the beat of the disco music, 80-180 BPM.
+//    * Flash IO48 for 50 ms on the beat of the disco music, 80-180 BPM.
 //    * Silence must leave IO48 off.
 //    * Number the IO48 flashes internally 1..4 and repeat.
-//    * On counts 1 and 3, flash Channel 10 for 100 ms.
+//    * On counts 1 and 3, flash Channel 10 for 50 ms.
 //    * BEAT      : true only when the beat hits, timed to the MIDDLE of the
 //                  beat (not the leading edge), 25 ms window about that centre.
 //    * BEAT_STEP : as BEAT but only on counts 1 and 3.
@@ -70,8 +70,8 @@ static const uint8_t PIN_CH10  = 42;
 // ---------------------------------------------------------------------------
 //  OUTPUT TIMING
 // ---------------------------------------------------------------------------
-static const uint16_t IO48_MS     = 100;   // IO48 pulse length, per beat
-static const uint16_t CH10_MS     = 100;   // Channel 10 pulse length
+static const uint16_t IO48_MS     = 50;    // IO48 pulse length, per beat
+static const uint16_t CH10_MS     = 50;    // Channel 10 pulse length
 static const uint16_t BEAT_WIN_MS = 25;    // window about the beat centre
 static const int32_t  BEAT_WIN_HALF_US = (BEAT_WIN_MS * 1000L) / 2;
 
@@ -650,7 +650,7 @@ void setup() {
 
   Serial.println();
   Serial.println("Fresh_Beat - standalone beat follower");
-  Serial.println("Audio.docx: IO48 100ms per beat, Channel 10 on counts 1 and 3.");
+  Serial.println("Audio.docx: IO48 50ms per beat, Channel 10 on counts 1 and 3.");
 
   // the sample rate is MEASURED, then the filters and time constants follow it
   fsMeasured  = measureSampleRate();
