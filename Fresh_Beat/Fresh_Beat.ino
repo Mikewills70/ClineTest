@@ -32,14 +32,14 @@
 //
 //  HOW A BEAT IS TIMED (the one design point that matters here):
 //    A beat is the rise and fall of the low-band envelope through a sensitivity
-//    line.  The LEADING EDGE is where it rises through; the TRAILING EDGE is
-//    where it falls back.  The BEAT LENGTH is the distance between them, and the
-//    beat's MIDDLE is the leading edge plus half that length.  The flash, and
-//    the BEAT / BEAT_STEP windows, are timed to that MIDDLE - never to the
-//    leading edge.  The MIDDLE is predicted from the RUNNING AVERAGE beat length,
-//    so it is known as soon as the leading edge is seen; it is never a fixed
-//    clock.  The separately measured beat-to-beat PERIOD drives the missed-beat
-//    rule, and is published as BPM.
+//    line.  The LEADING EDGE is where it rises through; the beat's MIDDLE is a
+//    fixed point just AFTER that leading edge.  The flash, and the BEAT /
+//    BEAT_STEP windows, are timed to that MIDDLE - never to the leading edge.
+//    The offset is taken from the beat-to-beat PERIOD (Audio.docx: predictive
+//    timing "based on previous beat to beat timing"), so it is IDENTICAL every
+//    beat while the tempo is steady and re-places itself within one beat on a
+//    track change.  The grid is never a free clock: it is re-derived from the
+//    music, and the beat-to-beat PERIOD also drives the missed-beat rule.
 //
 //  HARDWARE (HARDWARE_CONNECTION.md):
 //    AUDIO = GPIO 2   MAX9814 microphone, ANALOGUE, ADC1 channel 1
@@ -83,24 +83,50 @@ static const uint32_t BPM_MAX = 180;
 static const uint32_t PERIOD_MIN_US = 60000000UL / BPM_MAX;  // ~333333 us
 static const uint32_t PERIOD_MAX_US = 60000000UL / BPM_MIN;  // ~750000 us
 
-// THE GRID (PLL).  Once the tempo is locked the beats come from a predicted
-// grid, and detections only STEER it.  A stray detection nudges the phase by a
-// fraction; a missed detection changes nothing; an outlier is ignored.  So the
-// 1..4 count and every flash stay on the grid however noisy the onsets are.
-// (MEASURED: detection-driven beats let a stray onset move a flash and shift
-// which beat was "1 or 3", and let five stray intervals re-lock at half speed.)
-static const float PHASE_K     = 0.40f;   // grid phase correction per detection
-static const float PERIOD_K    = 0.05f;   // grid period correction per detection
-static const float LOCK_SPREAD = 1.15f;   // intervals within this spread = consistent
+// THE GRID, AND HOW A TRACK CHANGE IS HANDLED (the user's three steps):
+//   1. MAINTAIN the existing beat.
+//   2. LOOK for the transition beat, but keep maintaining the existing beat.
+//   3. New beat found -> transition to it AS FAST AS POSSIBLE.
+// NORMAL (locked): the grid fires the beats and a detection only steers it, and
+// only from INSIDE a tight window.  MEASURED: the old +/-1/3 window (~135-150 ms)
+// let off-beat onsets ~100-150 ms away steer the grid, and the phase sat 10-46 ms
+// off the beat - the "a little slow" and "never on time" sections.
+// CAPTURE (transition): entered when the music stops matching the grid; the grid
+// KEEPS FIRING on the established beat (steps 1 and 2) while a fresh interval
+// histogram is collected from the detections.  The moment it is consistent the
+// grid jumps to the new tempo, one beat ahead (step 3).  This is automatic - no
+// gain is set by hand - and it also removes the old 13-second tempo walk.
+static const float   PHASE_K            = 0.35f;  // NORMAL phase correction per detection
+static const float   PERIOD_K           = 0.05f;  // NORMAL period correction per detection
+static const int32_t PHASE_TOL_DIV      = 6;      // NORMAL window = period / 6 (~85 ms)
+static const uint8_t CAPTURE_ENTER_REJ  = 6;      // consecutive SAME-SIGN rejects -> CAPTURE
+static const uint8_t CAPTURE_LOCK_N     = 4;      // intervals needed to adopt a new beat
+static const uint32_t CAPTURE_TIMEOUT_MS = 6000;  // give up looking, adopt what we have
+// A DROPOUT (an audio glitch - a momentary pause) is a PHASE DISCONTINUITY, not
+// silence.  It must be treated like a new track: follow the beat as it now is.
+// MEASURED fault: a Wi-Fi glitch paused the music for a split second; the grid kept
+// firing on the old phase and never re-locked, because a phase jump near half a
+// beat is AMBIGUOUS and so the same-sign reject test never tripped.  A missed beat
+// is therefore its own trigger, and it is well inside the silence timeout.
+static const float GLITCH_MISS_FACTOR = 1.5f;     // no detection for 1.5 periods = dropout
+static const float SILENCE_FACTOR     = 2.6f;     // no detection for 2.6 periods = silence
+static const float   LOCK_SPREAD        = 1.15f;  // intervals within this spread = consistent
 
-// THE FLASH OFFSET must not wander.  The flash sits at the beat's MIDDLE, i.e.
-// the measured beat length / 2 - but that length is noisy in ABSOLUTE ms.
-// MEASURED in the steady passages: the length spread was 50-78% against a 2-4%
-// tempo spread, so the flash moved up to 51 ms from one beat to the next while
-// the tempo was nailed.  It is now the MEDIAN of the last few lengths, capped to
-// a fraction of the period so a fast track cannot drag it toward the half beat.
-static const uint8_t LEN_N               = 5;
-static const float   LEN_OFFSET_MAX_FRAC = 0.25f;
+// THE FLASH OFFSET.  Audio.docx says the timing comes from "previous beat to beat
+// timing", so the offset is taken from the PERIOD - not from a measured beat
+// length.  MEASURED: the envelope half-decay is CONTENT DEPENDENT (115-272 ms
+// within one track), which made the flash wander 56-130 ms and jump up to 61 ms
+// between beats while the tempo was rock steady.  That was the drift.  A period
+// based offset is IDENTICAL every beat while the tempo is steady, and re-places
+// itself within one beat when the track changes - which the document requires.
+//   MODE B (try first): a FIXED absolute time - the middle of the kick
+//   MODE A            : a fixed FRACTION of the period - scales with the tempo
+static const uint8_t  OFFSET_MODE_B     = 0;
+static const uint8_t  OFFSET_MODE_A     = 1;
+static const uint8_t  FLASH_OFFSET_MODE = OFFSET_MODE_B;
+static const uint32_t FLASH_OFFSET_US   = 70000;   // mode B: 70 ms
+static const float    FLASH_OFFSET_K    = 0.14f;   // mode A: 14 % of the period
+static const uint8_t  LEN_N             = 5;       // beat-length history, TELEMETRY ONLY
 
 // ---------------------------------------------------------------------------
 //  DETECTOR TUNABLES
@@ -118,7 +144,6 @@ static const uint32_t SAMPLE_BATCH = 16;   // samples per loop pass
 static const uint32_t REFRACTORY_US = 300000;
 static const uint32_t LEN_MIN_US    = 15000;   // plausible beat length
 static const uint32_t LEN_MAX_US    = 500000;
-static const uint32_t CENTRE_DEFAULT_US = 60000;  // first beat: no length yet
 static const uint8_t  MISS_COUNT_FOR_SILENCE = 2;
 // The MAX9814 produces a power-on surge: measured rp = 329 -> 177 -> 65 over the
 // first ~2 s before settling near 30.  Beats are ignored during this window so
@@ -239,6 +264,13 @@ static uint32_t gridPeriod  = 0;   // us
 static uint32_t nextOnsetUs = 0;   // predicted leading edge of the next beat
 static uint32_t lastDetUs   = 0;   // last detection (drives the silence rule)
 static volatile uint32_t detections = 0;
+
+// transition handling - the user's three steps (maintain, look, jump)
+static bool     gridCapturing  = false;
+static uint8_t  rejRun         = 0;   // consecutive rejected detections
+static int8_t   rejSign        = 0;   // sign of that run (+1 / -1)
+static uint32_t captureStartMs = 0;
+static bool     captureFirstDet = false;   // first detection after entering CAPTURE
 
 // --- STABLE FLASH OFFSET: history of measured beat lengths -------------------
 static uint32_t lenRing[LEN_N];
@@ -374,16 +406,13 @@ static uint32_t medianLen() {
   return tmp[lenCount / 2];
 }
 
-// The flash offset: half the (median) beat length, so the flash is at the MIDDLE
-// of the beat - CAPPED to LEN_OFFSET_MAX_FRAC of the period so a noisy length on
-// a fast track can never drag the flash toward the half beat.
+// The flash offset - the point inside the beat at which the flash is timed - taken
+// from the PERIOD so it cannot drift (see the note at the constants).
 static uint32_t flashOffsetUs() {
-  uint32_t off = avgLenUs ? (avgLenUs / 2) : CENTRE_DEFAULT_US;
-  if (periodUs) {
-    const uint32_t cap = (uint32_t)((float)periodUs * LEN_OFFSET_MAX_FRAC);
-    if (off > cap) off = cap;
+  if (FLASH_OFFSET_MODE == OFFSET_MODE_A && periodUs) {
+    return (uint32_t)((float)periodUs * FLASH_OFFSET_K);
   }
-  return off;
+  return FLASH_OFFSET_US;   // mode B, or mode A before the period is known
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +449,10 @@ static void enterSilence() {
   gridPeriod    = 0;
   nextOnsetUs   = 0;
   lastDetUs     = 0;
+  gridCapturing = false;
+  captureFirstDet = false;
+  rejRun        = 0;
+  rejSign       = 0;
   centrePending = false;
   beatWinEndUs  = 0;
   BEAT          = false;
@@ -480,12 +513,55 @@ static void onLeadingEdge(uint32_t t) {
 
   // ---- LOCKED: STEER the grid.  The GRID fires the beats, so a stray or a
   //      missing detection can neither move a flash nor shift the 1..4 count. --
+  if (gridCapturing) {
+    // STEPS 1 and 2: the grid KEEPS FIRING on the established beat while we look
+    // for the new one - and it FOLLOWS the beat as it now is, by re-anchoring the
+    // phase on each plausible detection.  MEASURED: steering alone left the grid
+    // parked ~180 ms off for six seconds and then a single-detection re-anchor threw
+    // it the other way; and after an audio glitch the phase can land near HALF a
+    // beat, where steering is ambiguous.  Following the beat removes both faults.
+    lastPhaseState = 3;                                   // 3 = in transition
+    lastPhaseErrUs = 0;                                   // (not meaningful in CAPTURE)
+    if (prevDet != 0) {
+      const uint32_t iv = t - prevDet;
+      // "plausible" = this detection follows the previous by about one beat
+      const bool plausible = (iv * 10u >= gridPeriod * 8u) && (iv * 10u <= gridPeriod * 13u);
+      if (plausible || captureFirstDet) {
+        nextOnsetUs     = t + gridPeriod;                 // follow the beat
+        captureFirstDet = false;
+      }
+      if (iv >= PERIOD_MIN_US && iv <= PERIOD_MAX_US) pushInterval(iv);
+    }
+    lastLeadUs = t; beatOpen = true; peakSince = env;     // length = telemetry only
+    const bool consistent = (intervalCount >= CAPTURE_LOCK_N) && (periodSpread() <= LOCK_SPREAD);
+    const bool timedOut   = (uint32_t)(millis() - captureStartMs) > CAPTURE_TIMEOUT_MS;
+    if (consistent || (timedOut && intervalCount >= 2)) {
+      // STEP 3: adopt the new tempo AS FAST AS POSSIBLE, still following the beat.
+      const uint32_t np = medianPeriod();
+      if (np >= PERIOD_MIN_US && np <= PERIOD_MAX_US) {
+        gridPeriod  = np;
+        periodUs    = np;
+        bpmX10      = 600000000UL / np;
+        nextOnsetUs = t + np;                             // one beat ahead, new tempo
+      }
+      gridCapturing   = false;
+      captureFirstDet = false;
+      rejRun          = 0;
+      rejSign         = 0;
+      intervalCount   = 0;
+      intervalHead    = 0;
+      lastPhaseState  = 4;          // 4 = new tempo adopted
+    }
+    return;
+  }
+
   int32_t e = (int32_t)(t - nextOnsetUs);          // signed phase error, us
   const int32_t halfP = (int32_t)(gridPeriod / 2);
   if (e >  halfP) e -= (int32_t)gridPeriod;
   else if (e < -halfP) e += (int32_t)gridPeriod;
-  const int32_t tol = (int32_t)(gridPeriod / 3);
+  const int32_t tol = (int32_t)(gridPeriod / PHASE_TOL_DIV);
   if (e > -tol && e < tol) {
+    rejRun = 0;
     // a plausible detection: nudge the phase and the period a little
     lastPhaseErrUs = e;
     lastPhaseState = 1;                       // accepted
@@ -505,8 +581,25 @@ static void onLeadingEdge(uint32_t t) {
     bpmX10     = periodUs ? (600000000UL / periodUs) : 0;
   } else {
     lastPhaseErrUs = e;
-    lastPhaseState = 2;                       // rejected: an outlier
-    beatsRefused++;   // an outlier: ignored entirely
+    lastPhaseState = 2;                       // rejected: outside the tight window
+    beatsRefused++;
+    // A GENUINE change shows as a RUN of rejects with the SAME SIGN; random stray
+    // onsets flip sign.  MEASURED: entering on 4 rejects with no sign check let the
+    // controller trip on stray onsets and oscillate - the drift heard at the end of
+    // a track.  Six SAME-SIGN rejects in a row are now required.
+    const int8_t sgn = (e >= 0) ? 1 : -1;
+    if (sgn == rejSign) { if (rejRun < 255) rejRun++; } else { rejSign = sgn; rejRun = 1; }
+    if (rejRun >= CAPTURE_ENTER_REJ) {
+      // STEP 1 and 2: the music no longer matches the grid.  MAINTAIN the
+      // existing beat - the grid keeps firing - and start looking for the new one.
+      gridCapturing   = true;
+      captureFirstDet = true;
+      captureStartMs  = millis();
+      intervalCount   = 0;
+      intervalHead    = 0;
+      rejRun          = 0;
+      rejSign         = 0;
+    }
   }
 }
 
@@ -604,10 +697,11 @@ static void serviceOutputs(uint32_t now) {
     // PER-BEAT INSTRUMENT: the grid onset, the flash offset, the last detection's
     // phase error and whether it was accepted or rejected.  This is what makes a
     // 1-2 beat flash drift visible (the 1 Hz summary cannot see it).
-    if (Serial) Serial.printf("PERF c=%u t=%lu off=%lu pe=%ld st=%u\n",
+    if (Serial) Serial.printf("PERF c=%u t=%lu off=%lu pe=%ld st=%u md=%u tol=%ld\n",
                               (unsigned)toneIndex, (unsigned long)millis(),
                               (unsigned long)offset, (long)lastPhaseErrUs,
-                              (unsigned)lastPhaseState);
+                              (unsigned)lastPhaseState, (unsigned)gridCapturing,
+                              (long)(gridPeriod / PHASE_TOL_DIV));
   }
 
   if (centrePending && timeReached(now, centreFireUs)) {
@@ -644,14 +738,29 @@ static void serviceOutputs(uint32_t now) {
 //  the counter reset.
 // ---------------------------------------------------------------------------
 static void serviceDetector(uint32_t now) {
-  // GRID LOCKED: the grid runs on its own; it goes dark only when the
-  // DETECTIONS stop, which is what silence means.
-  if (gridLocked) {
-    if ((uint32_t)(now - lastDetUs) > (2u * gridPeriod)) enterSilence();
+  if (lastDetUs == 0) return;
+  const uint32_t ref = periodUs ? periodUs : (gridPeriod ? gridPeriod : 500000u);
+  const uint32_t sinceDet = (uint32_t)(now - lastDetUs);
+
+  // SILENCE - the music has stopped: IO48 off and the counter reset.
+  if (sinceDet > (uint32_t)((float)ref * SILENCE_FACTOR)) { enterSilence(); return; }
+
+  // DROPOUT - a glitch, NOT silence.  Treat it as a new track: follow the beat as
+  // it comes back, while the show keeps running on the established beat.  This is
+  // the fault where a Wi-Fi glitch paused the audio for a split second and the
+  // grid never re-locked.
+  if (gridLocked && sinceDet > (uint32_t)((float)ref * GLITCH_MISS_FACTOR)) {
+    gridCapturing   = true;
+    captureFirstDet = true;
+    captureStartMs  = millis();
+    intervalCount   = 0;
+    intervalHead    = 0;
+    rejRun          = 0;
+    rejSign         = 0;
     return;
   }
 
-  if (awaitingBeat && periodUs != 0) {
+  if (!gridLocked && awaitingBeat && periodUs != 0) {
     const uint32_t tol = periodUs / 3;
     if (timeReached(now, expectedLeadUs + tol)) {
       awaitingBeat = false;
