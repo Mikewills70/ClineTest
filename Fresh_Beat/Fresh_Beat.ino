@@ -608,6 +608,10 @@ static void serviceDetector(uint32_t now) {
 //  per  measured period (us)            len  average beat length (us)
 // ---------------------------------------------------------------------------
 static void publishIfDue() {
+  // Nothing is printed unless a host is actually connected.  Without this the
+  // CDC write can block when the cable is attached but no terminal is open,
+  // which stalls the loop and stops the LEDs.
+  if (!Serial) return;
   const uint32_t ms = millis();
   if (ms - lastPublishMs < 1000) return;
   lastPublishMs = ms;
@@ -645,6 +649,13 @@ void setup() {
   const uint32_t t0 = millis();
   while (!Serial && (millis() - t0) < 2000) { delay(10); }  // USB CDC enumerate
   delay(100);
+
+  // CRITICAL: never block on the USB serial.  With no host connected the CDC
+  // write can block, which stalls the main loop and stops ALL flashing - the
+  // board looks dead while the code is fine.  MEASURED this session: the board
+  // worked while a serial capture held the port open and went dark the moment
+  // the port was closed.  A zero TX timeout makes writes non-blocking.
+  Serial.setTxTimeoutMs(0);
 
   analogReadResolution(12);
 
