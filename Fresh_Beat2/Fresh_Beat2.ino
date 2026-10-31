@@ -117,6 +117,28 @@ static const uint8_t  DECISIVE_SEARCHES = 8;
 // track 3 and the "went too fast again" after the quiet section.
 static const uint8_t  SMALL_DRIFT_FRAMES = 2;    // 10 ms at 355 ms: refuse it
 static const uint8_t  REAL_CHANGE_FRAMES = 6;    // 30 ms: worth calling a new track
+// A MOVE LARGER THAN A QUARTER OF A PERIOD IS NEVER MADE - NOT FOR ANY REASON.
+// A correction that big is not a correction, it is a different answer, and half a period
+// away is the OFF-BEAT.  MEASURED over two four-track runs: the grid was dragged half a
+// beat by that path 6 times in one take of track 3 and 0-7 times on the others; and 14 of
+// track 3's 20 on/off-beat transitions happened with the grid NOT MOVING AT ALL, i.e. the
+// grid already ignores most of the comb's flips and only this path moved it.  Off-beat time
+// per track: track 1 = 0-1 per cent, tracks 2 and 4 = 2 per cent, track 3 = 36-47 per cent.
+// The user's rule: track 3 always starts on the correct beat, so the phase the LOCK chose
+// is kept for the whole track.
+static const uint8_t  REFUSE_FRACTION_DIV   = 4;  // the quarter-period limit
+// THE PHASE IS DECIDED ONCE, FROM THE CLEAREST EARLY MEASUREMENT, AND THEN KEPT.
+// MEASURED (fb2m.log): when the phase margin `pm` is high, the measurement and the grid
+// agree to within about 600 us - i.e. a CLEAR moment confirms where the beat is rather than
+// moving it - and clear moments (pm 40-78) are common and early, the first one about a
+// second after a lock.  So the anchor is taken from the clearest measurement seen in the
+// first seconds of a track, and after that the grid may never END UP more than a QUARTER
+// PERIOD from it.  In TOTAL, not per step: MEASURED, a per-step limit did not stop a WALK -
+// the grid walked 0 -> 130 -> 250 ms (half a period, the off-beat) in steps under the limit,
+// and on track 2 it walked to 185 ms on a 445 ms period and sat there for a minute.
+static const uint16_t ANCHOR_PM_PCT    = 40;     // "clear" = the phase margin at least this
+static const uint32_t ANCHOR_MIN_MS    = 1500;   // look for the clearest moment this long ...
+static const uint32_t ANCHOR_WINDOW_MS = 6000;   // ... then fix it with whatever we have
 // THE CONFIDENCE GATE AND THE HOLD (user's rule, 31 Oct 2026).
 // The grid is only MOVED when the measurement is trustworthy.  While it is not, the grid
 // free-runs on the last good tempo and keeps firing; after 2 bars of that the lights go
@@ -137,19 +159,6 @@ static const uint8_t  HOLD_DARK_BEATS      = 8;      // 2 bars of 4/4, in beats
 // correction: a noisy measurement can no longer drag the grid, and the grid is never left
 // where it was either, so a stale offset cannot persist.
 static const uint8_t  HOLD_SNAP_DIV        = 3;
-// A BIG CORRECTION IS NOT A CORRECTION, IT IS A DIFFERENT ANSWER.  MEASURED on Take on Me
-// (fb2j.log, the first build with `dmax`): 47 of 241 locked seconds had the grid sitting
-// 150-176 ms away from the measured beat - HALF a period (177.5 ms at 355 ms) - i.e. ON
-// THE OFF-BEAT, and that is exactly what the user hears as "the lights drift into the
-// off-beat and then lock on again", both ahead and behind.  In 43 of those 47 seconds the
-// comb's own PHASE margin was below 20 %: it was telling us it was unsure, and the full
-// snap overruled it.  The cause is the music: Take on Me's bass runs in eighths, so the
-// onset train has a strong peak every HALF beat and the comb cannot always tell the beat
-// from the off-beat.  A move larger than a quarter period is therefore only made when the
-// phase is clear AND the same answer persists - a real phase jump is sure and steady, a
-// mis-identified off-beat is neither.
-static const uint16_t BIG_MOVE_PM_PCT   = 25;   // the phase must be this clear ...
-static const uint8_t  BIG_MOVE_SEARCHES = 8;    // ... and persist this long (0.8 s)
 // The silence gate: measured on this board, silence is rp 27-42 and music 375-631.
 static const float SILENCE_RAW_MIN = 120.0f;
 // If there is NO SIGNAL AT ALL for this long, the lights go dark.  This is a SIGNAL
@@ -262,8 +271,14 @@ static uint16_t phaseMarginPct = 0;          // confidence of the PHASE at the l
 static volatile uint32_t holdCount = 0;      // hold searches since the last publish
 static volatile uint32_t dmaxUs    = 0;      // largest grid correction this second, BEFORE
                                              // damping = the true error of the held grid
-static uint8_t  bigCount = 0;                // consecutive searches reporting a BIG move
-static volatile uint8_t bigSeen = 0;         // highest bigCount seen this second
+static volatile uint16_t bigRefused = 0;     // moves REFUSED this second - never applied
+static int32_t  anchorPhaseUs  = 0;          // WHERE THE BEAT IS: taken from the clearest
+                                             // early measurement, then kept for the track
+static uint32_t anchorPeriodUs = 0;          // the period that anchor belongs to
+static bool     phaseFixed     = false;      // has the anchor been decided?
+static uint16_t bestPmSeen     = 0;          // the clearest phase margin since the lock
+static uint32_t lockAtMs       = 0;          // when this lock was placed
+static volatile int32_t gridDriftUs = 0;     // how far the grid has MOVED from that anchor
 // FRESH EARS.  The ratio guard and the incumbent preference both rest on one physical
 // fact - a record's tempo never jumps to a ratio of itself WHILE IT IS PLAYING.  That
 // fact does not survive an interruption.  Retaining the tempo through a silence (above)
@@ -592,8 +607,7 @@ static void runSearch(uint32_t now) {
     toneIndex  = 0;                                       // count restarts at 1
     nextBeatUs = ideal;
   } else {
-    // Move the beat timeline onto the measured grid, by at most half a period.  The grid
-    // is ABSOLUTE - re-measured ten times a second - so nothing accumulates.
+    // Where does the measurement say the beat is, relative to where the grid has it?
     int32_t d = (int32_t)(ideal - nextBeatUs);
     const int32_t half = (int32_t)(periodUs / 2);
     if (d > half) d -= (int32_t)periodUs;
@@ -601,26 +615,55 @@ static void runSearch(uint32_t now) {
     const int32_t ad = (d < 0) ? -d : d;
     if ((uint32_t)ad > dmaxUs) dmaxUs = (uint32_t)ad;     // the grid's true error, pre-damp
 
-    bool apply = true;
-    if (ad > (int32_t)(periodUs / 4)) {
-      // A move bigger than a QUARTER PERIOD would put the beat somewhere quite different
-      // - a half-period version of it is the OFF-BEAT.  Only do it when the phase is
-      // clear and the same answer keeps coming back.
-      if (phaseMarginPct >= BIG_MOVE_PM_PCT) {
-        if (bigCount < 255) bigCount++;
-        if (bigCount > bigSeen) bigSeen = bigCount;
-      } else {
-        bigCount = 0;
-      }
-      if (bigCount < BIG_MOVE_SEARCHES) apply = false;    // not corroborated: stay put
-    } else {
-      bigCount = 0;
-      if (phaseHold) d /= HOLD_SNAP_DIV;                  // damped, NEVER frozen
+    // A NEW PERIOD IS A NEW TRACK: decide the phase afresh.
+    if (periodUs != anchorPeriodUs) {
+      anchorPeriodUs = periodUs;
+      anchorPhaseUs  = (int32_t)(ideal % periodUs);
+      phaseFixed     = false;
+      bestPmSeen     = 0;
+      lockAtMs       = millis();
     }
-    if (apply) {
-      bigCount = 0;
+
+    // DECIDE THE PHASE FROM THE CLEAREST MEASUREMENT OF THE FIRST SECONDS.  Until it is
+    // fixed the grid follows the measurement freely, so a poor first sample is CORRECTED
+    // rather than frozen; and the anchor follows the CLEAREST moment, which is the one that
+    // confirms the beat (measured: at high `pm` the measurement and the grid agree to 600 us).
+    if (!phaseFixed) {
+      if (phaseMarginPct >= ANCHOR_PM_PCT && phaseMarginPct >= bestPmSeen) {
+        bestPmSeen    = phaseMarginPct;
+        anchorPhaseUs = (int32_t)(ideal % periodUs);      // where the CLEAR measurement says
+      }
+      const uint32_t waited = millis() - lockAtMs;
+      if ((bestPmSeen >= ANCHOR_PM_PCT && waited >= ANCHOR_MIN_MS) || waited >= ANCHOR_WINDOW_MS) {
+        phaseFixed = true;
+      }
+    }
+
+    // MOVE THE GRID - BOUNDED IN TOTAL once the phase is decided.  Half a period away is the
+    // OFF-BEAT, and a per-step limit does not stop the grid WALKING there, so the bound is on
+    // where the grid ENDS UP, not on how far it moves in one search.
+    if (phaseFixed) {
+      int32_t rel = (int32_t)(nextBeatUs % periodUs) - anchorPhaseUs;
+      if (rel > half) rel -= (int32_t)periodUs;
+      else if (rel < -half) rel += (int32_t)periodUs;
+      const int32_t after = rel + d;
+      const int32_t lim   = (int32_t)(periodUs / REFUSE_FRACTION_DIV);
+      if (after > lim || after < -lim) {
+        if (bigRefused < 65535) bigRefused++;             // refused: the grid stays put
+        d = 0;
+      }
+    }
+    if (d != 0) {
+      if (phaseHold) d /= HOLD_SNAP_DIV;                  // damped, NEVER frozen
       nextBeatUs = (uint32_t)((int32_t)nextBeatUs + d);
     }
+
+    // THE PROOF: how far the grid has MOVED from where the beat is.  Must stay inside a
+    // quarter period for the whole track; before this rule it reached half a period.
+    int32_t gdr = (int32_t)(nextBeatUs % periodUs) - anchorPhaseUs;
+    if (gdr > (int32_t)half) gdr -= (int32_t)periodUs;
+    else if (gdr < -(int32_t)half) gdr += (int32_t)periodUs;
+    gridDriftUs = gdr;
   }
 }
 
@@ -705,7 +748,7 @@ static void publishIfDue() {
   if (ms - lastPublishMs < 1000) return;
   lastPublishMs = ms;
   Serial.printf(
-      "FT bpm=%.1f per=%lu lock=%u ph=%u fit=%ld sec=%ld mar=%u we=%lu rp=%.0f ons=%lu cnt=%u beat=%lu io48=%lu ch10=%lu sil=%lu sch=%lu rej=%lu chg=%lu pch=%u lk=%u pm=%u hold=%lu dark=%u dmax=%lu big=%u\n",
+      "FT bpm=%.1f per=%lu lock=%u ph=%u fit=%ld sec=%ld mar=%u we=%lu rp=%.0f ons=%lu cnt=%u beat=%lu io48=%lu ch10=%lu sil=%lu sch=%lu rej=%lu chg=%lu pch=%u lk=%u pm=%u hold=%lu dark=%u dmax=%lu big=%u gdr=%ld pf=%u pmx=%u\n",
       periodUs ? (60000000.0 / (double)periodUs) : 0.0,
       (unsigned long)(periodUs / 1000u),
       (unsigned)lockedP, (unsigned)phaseUsed,
@@ -717,11 +760,12 @@ static void publishIfDue() {
       (unsigned long)periodChanges, (unsigned)pchCount,
       gridLocked ? 1u : 0u,
       (unsigned)phaseMarginPct, (unsigned long)holdCount, (unsigned)darkReason,
-      (unsigned long)dmaxUs, (unsigned)bigSeen);
+      (unsigned long)dmaxUs, (unsigned)bigRefused, (long)gridDriftUs,
+      phaseFixed ? 1u : 0u, (unsigned)bestPmSeen);
   pchCount = 0;
   holdCount = 0;
   dmaxUs = 0;
-  bigSeen = 0;
+  bigRefused = 0;
   onsetFrames = 0;
 }
 
