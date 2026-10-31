@@ -303,7 +303,7 @@ volatile float    odfLvlHi = 0.0f;
 volatile unsigned long g_predMid    = 0;   // the predicted midpoint the flash is scheduled at (0 = none)
 volatile uint8_t       g_beatFound  = 0;   // 1 = four valid intervals exist: the beat has been FOUND
 volatile uint8_t       g_longBeat   = 0;   // 1 = the last beat's BEAT LENGTH was the longer of the pair
-unsigned long ch10OffAt = 0; volatile uint32_t g_ch10Beats = 0; volatile uint32_t g_longSet = 0; volatile uint32_t g_flashMissed = 0; volatile uint32_t g_lvlLeadSeq = 0;   // g_flashMissed: PREDICTED BEATS WITH NO LEADING EDGE, the first kind of miss. g_lvlLeadSeq: bumps at every LEADING edge so the render core can see one
+unsigned long ch10OffAt = 0; volatile uint32_t g_fitWinRej = 0; volatile uint32_t g_fitGapRej = 0; volatile uint32_t g_fitRngRej = 0; volatile uint32_t g_ch10Beats = 0; volatile uint32_t g_longSet = 0; volatile uint32_t g_flashMissed = 0; volatile uint32_t g_lvlLeadSeq = 0;   // g_flashMissed: PREDICTED BEATS WITH NO LEADING EDGE, the first kind of miss. g_lvlLeadSeq: bumps at every LEADING edge so the render core can see one
 volatile unsigned long g_fitLastMs  = 0;   // millis() of the last beat the fit ACCEPTED (the one-bar timeout)
 volatile uint32_t      g_leadFlash  = 0;   // leading edges flashed on while the beat is not yet found
 long                   g_fitX       = 0;   // the last X: measured midpoint minus predicted midpoint
@@ -4059,7 +4059,7 @@ static void diagBeatFields(JsonDocument &doc) {
   doc["len1"]      = (uint32_t)g_lenMs[1];
   doc["len2"]      = (uint32_t)g_lenMs[2];
   doc["len3"]      = (uint32_t)g_lenMs[3];
-  doc["lead"]      = (uint32_t)g_lvlLead; doc["noCross"] = (uint32_t)g_flashMissed; doc["ch10"] = (uint32_t)g_ch10Beats; doc["longSet"] = (uint32_t)g_longSet; doc["env0"] = (double)odfEnv0; doc["audioFs"] = (double)audioFs; doc["envDecay"] = (double)g_envDecay; doc["envMin"] = (double)odfLvlLo; doc["envMax"] = (double)odfLvlHi; doc["lenT0"] = (uint32_t)g_lenMs[(g_lenI + 0) % 4]; doc["lenT1"] = (uint32_t)g_lenMs[(g_lenI + 1) % 4]; doc["lenT2"] = (uint32_t)g_lenMs[(g_lenI + 2) % 4]; doc["lenT3"] = (uint32_t)g_lenMs[(g_lenI + 3) % 4]; doc["lenI"] = (uint8_t)g_lenI; doc["lenN"] = (uint8_t)g_lenN;   // THE FOUR BEAT LENGTHS IN BEAT ORDER, oldest first, so the sequence can be read instead of guessed. The ring wraps, which is why len0..len3 alone could not show whether the long beats alternate.           // the last leading edge, which is what permits a flash
+  doc["lead"]      = (uint32_t)g_lvlLead; doc["noCross"] = (uint32_t)g_flashMissed; doc["rejWin"] = (uint32_t)g_fitWinRej; doc["rejGap"] = (uint32_t)g_fitGapRej; doc["rejRng"] = (uint32_t)g_fitRngRej; doc["ch10"] = (uint32_t)g_ch10Beats; doc["longSet"] = (uint32_t)g_longSet; doc["env0"] = (double)odfEnv0; doc["audioFs"] = (double)audioFs; doc["envDecay"] = (double)g_envDecay; doc["envMin"] = (double)odfLvlLo; doc["envMax"] = (double)odfLvlHi; doc["lenT0"] = (uint32_t)g_lenMs[(g_lenI + 0) % 4]; doc["lenT1"] = (uint32_t)g_lenMs[(g_lenI + 1) % 4]; doc["lenT2"] = (uint32_t)g_lenMs[(g_lenI + 2) % 4]; doc["lenT3"] = (uint32_t)g_lenMs[(g_lenI + 3) % 4]; doc["lenI"] = (uint8_t)g_lenI; doc["lenN"] = (uint8_t)g_lenN;   // THE FOUR BEAT LENGTHS IN BEAT ORDER, oldest first, so the sequence can be read instead of guessed. The ring wraps, which is why len0..len3 alone could not show whether the long beats alternate.           // the last leading edge, which is what permits a flash
 
                                                   // threshold is a fraction of this
 
@@ -4414,7 +4414,7 @@ static bool fitBeatStep(unsigned long stamp, unsigned long per) {
     // A THIRD OF A BEAT: a beat is close to the prediction, a transient is not. The transients sit on
     // the half beat (~223 ms) and are refused here, so IO48 cannot be lit on one and no off-beat flash
     // can be added.
-    if (aX > (long)(g_fitPer / 3)) { g_fitReject++; return false; }
+    if (aX > (long)(g_fitPer / 3)) { g_fitReject++; g_fitWinRej++; return false; }   // REFUSED BY THE WINDOW: the beat landed more than a third of a period from the prediction
   }
   // ---- A SANITY BOUND ON THE INTERVAL, BEFORE IT GOES IN THE WINDOW (27 Oct 2026) -----------------
   // THE BUG THIS FIXES, MEASURED ON THE BOARD. The interval was computed as an UNSIGNED subtraction, so
@@ -4428,7 +4428,7 @@ static bool fitBeatStep(unsigned long stamp, unsigned long per) {
   if (g_fitN >= 1) {
     long dPrev = (long)stamp - (long)g_fitMs[(uint8_t)((g_fitI + FIT_N - 1) % FIT_N)];
     // A FLICKER: not a beat, refused as before.
-    if (dPrev <= 100) { g_fitReject++; return false; }
+    if (dPrev <= 100) { g_fitReject++; g_fitGapRej++; return false; }   // REFUSED BY THE GAP: too close to the previous midpoint
     // THE BEAT WAS LOST, NOT THIS BEAT BAD (27 Oct 2026). This used to refuse the beat - which meant it
     // was never stored, so the stale stamp stayed and refused every beat after it for ever. The window
     // could never advance: measured on the board as fitN 1, fitPer 0, found 0. A gap this long is a quiet
@@ -4507,7 +4507,7 @@ static bool fitBeatStep(unsigned long stamp, unsigned long per) {
     // exactly when the user's instruction is to KEEP CALCULATING BEATS AND X VALUES EVEN IF NO BEAT IS
     // HEARD, so that when the music returns at similar levels the beat is already there. An interval
     // outside the bell curve is REFUSED and nothing else moves. The period simply holds.
-    if (g_fitPer < 444 || g_fitPer > 632) { g_fitReject++; return false; }
+    if (g_fitPer < 444 || g_fitPer > 632) { g_fitReject++; g_fitRngRej++; return false; }   // REFUSED BY THE RANGE: the fitted period is not a legal BPM
     // THE CONFIDENCE: the measurement first, the prior only as a nudge.
     // A HIGH REJECTION RATE IS PENALISED: a correct lock should reject about half the onsets (beats
     // against off-beats), so much more than that means it is taking only every other beat - which is the
@@ -8061,7 +8061,7 @@ void loop() {
       unsigned long p = (g_fitPer >= 444 && g_fitPer <= 632) ? g_fitPer : 500;
       // NO QUIET FLAG HERE EITHER (27 Oct 2026). The gate is simply "was this beat's leading edge seen",
       // and in a quiet section there is no leading edge to see.
-      fireNow = ((g_lvlLead != 0) && ((unsigned long)(millis() - g_lvlLead) <= (p / 2))); if (!fireNow) g_flashMissed++;   // THE BEAT WAS PREDICTED AND THE ENVELOPE NEVER CROSSED: no figure was ever made, so this is a miss of the FIRST kind, not a fit rejection.
+      fireNow = true; if (!((g_lvlLead != 0) && ((unsigned long)(millis() - g_lvlLead) <= (p / 2)))) g_flashMissed++;   // THE FLASH IS ON THE PREDICTED BEAT, ALWAYS - the users original rule: IO48 flashes at the calculated midpoint of the predicted beat. The leading-edge gate is removed, so a single missed beat now FILLS with a flash at the predicted midpoint instead of leaving a gap. The quiet case is still handled, by the one-bar timeout: no beat for a bar clears the window, so there is no period and no predicted flash, and IO48 stays dark in silence as required.   // THE BEAT WAS PREDICTED AND THE ENVELOPE NEVER CROSSED: no figure was ever made, so this is a miss of the FIRST kind, not a fit rejection.
       g_predMid = 0;
     }
     if (fireNow) { if (g_beatFound && g_longBeat) { digitalWrite(channelPins[9], HIGH); ch10OffAt = millis() + 100; g_ch10Beats++; }   // CHANNEL 10 = THE LONG BEAT (beat 1, or the 1-and-3 pair). Driven at the BEAT, in the render loop, so the slow 240V engine can never sample it late. It was written inside executePatternStep, which steps at speed240V x 1000 ms - up to one second - while a long-beat window lasts about 450 ms, so the engine almost never looked while the window was open and LED 10 stayed dark whatever g_longBeat said.
