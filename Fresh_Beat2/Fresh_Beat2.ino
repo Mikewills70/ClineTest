@@ -100,10 +100,61 @@ static const uint32_t ONSET_ENERGY_MIN = 200;
 // two seconds, which is impossible for real music and produced double flashing.
 static const uint8_t  LOCK_NEEDED_SEARCHES   = 3;    // 300 ms to lock a tempo
 static const uint8_t  CHANGE_NEEDED_SEARCHES = 15;   // 1.5 s to accept a new tempo
+// A DECISIVE challenger is a new track, not a guess, and the user's rule is to lock onto
+// it as soon as possible: 8 searches (0.8 s) instead of 15.
+// MEASURED (Take on Me): `mar` runs 15-46 % on a real track and 0-7 % when the comb is
+// guessing, so 20 % separates "clearly reliable" from "coin toss" with room to spare.
+static const uint16_t DECISIVE_MAR_PCT  = 20;
+static const uint8_t  DECISIVE_SEARCHES = 8;
+// A RECORD'S TEMPO DOES NOT DRIFT, so a period within SMALL_DRIFT_FRAMES of the lock is the
+// comb wobbling and is REFUSED outright (unless the music was just interrupted and a new
+// track may legitimately start at a similar speed).  And the decisive fast path needs a REAL
+// difference - not two frames of wobble - before it may call something a new track.
+// MEASURED (fb2l.log): 2 frames is 10 ms = 2.8 per cent at 355 ms, far looser than the
+// user's own rule ("a record's BPM holds to about +/-1 BPM"), and the silent follow it
+// allowed walked the lock 355 -> 350 -> 345 -> 335 ms (169.0 -> 179.1 BPM, six per cent
+// fast) with no counted change at all.  That is the "snapped to a faster tempo" heard on
+// track 3 and the "went too fast again" after the quiet section.
+static const uint8_t  SMALL_DRIFT_FRAMES = 2;    // 10 ms at 355 ms: refuse it
+static const uint8_t  REAL_CHANGE_FRAMES = 6;    // 30 ms: worth calling a new track
+// THE CONFIDENCE GATE AND THE HOLD (user's rule, 31 Oct 2026).
+// The grid is only MOVED when the measurement is trustworthy.  While it is not, the grid
+// free-runs on the last good tempo and keeps firing; after 2 bars of that the lights go
+// dark but the TIMING KEEPS RUNNING, because that is what an instrumental or vocal passage
+// looks like and the beat does come back.
+// MEASURED on track 3: with the music LOUD (we 5300-6500, rp 375-653, i.e. 200-400x the
+// silence gate) the comb's margin collapsed to 0-7 per cent for 22 of 207 seconds - a
+// dead tie, fit=333 sec=332 - while everything else ran at 15-46 per cent.  The lights
+// were being dragged off the beat by a measurement that had no idea where the beat was.
+// Hysteresis: 10 % to hold, 15 % to resume following, so it cannot chatter on the edge.
+static const uint16_t TRUST_PCT_HOLD       = 10;
+static const uint16_t TRUST_PCT_FOLLOW     = 15;
+static const uint8_t  HOLD_DARK_BEATS      = 8;      // 2 bars of 4/4, in beats
+// A HOLD MUST BE A DAMPER, NOT A FREEZE.  MEASURED on Take on Me (fb2i.log): freezing the
+// grid during a hold produced 181 dark beats out of 347 and a flash that sat at whatever
+// offset the last untrustworthy measurement had produced until the margin recovered -
+// heard as "drifting out of time again".  A hold therefore applies ONE THIRD of the
+// correction: a noisy measurement can no longer drag the grid, and the grid is never left
+// where it was either, so a stale offset cannot persist.
+static const uint8_t  HOLD_SNAP_DIV        = 3;
+// A BIG CORRECTION IS NOT A CORRECTION, IT IS A DIFFERENT ANSWER.  MEASURED on Take on Me
+// (fb2j.log, the first build with `dmax`): 47 of 241 locked seconds had the grid sitting
+// 150-176 ms away from the measured beat - HALF a period (177.5 ms at 355 ms) - i.e. ON
+// THE OFF-BEAT, and that is exactly what the user hears as "the lights drift into the
+// off-beat and then lock on again", both ahead and behind.  In 43 of those 47 seconds the
+// comb's own PHASE margin was below 20 %: it was telling us it was unsure, and the full
+// snap overruled it.  The cause is the music: Take on Me's bass runs in eighths, so the
+// onset train has a strong peak every HALF beat and the comb cannot always tell the beat
+// from the off-beat.  A move larger than a quarter period is therefore only made when the
+// phase is clear AND the same answer persists - a real phase jump is sure and steady, a
+// mis-identified off-beat is neither.
+static const uint16_t BIG_MOVE_PM_PCT   = 25;   // the phase must be this clear ...
+static const uint8_t  BIG_MOVE_SEARCHES = 8;    // ... and persist this long (0.8 s)
 // The silence gate: measured on this board, silence is rp 27-42 and music 375-631.
 static const float SILENCE_RAW_MIN = 120.0f;
-// If no confident fit for this long, stop firing (lights off).
-static const uint32_t FIT_LOST_MS = 1500;
+// If there is NO SIGNAL AT ALL for this long, the lights go dark.  This is a SIGNAL
+// timer, not a fit timer: an ambiguous fit must HOLD the lights, never darken them.
+static const uint32_t SIGNAL_LOST_MS = 1500;
 // Beat instants are only used once at least this much history exists.
 static const uint16_t MIN_FRAMES_FOR_SEARCH = 400;   // 2 s
 
@@ -173,7 +224,6 @@ static int32_t pScore[P_MAX_FR + 1];          // best-phase score per candidate 
 // ---------------------------------------------------------------------------
 static int32_t  fitScore = 0, fitSecond = 0;
 static uint16_t fitMarginPct = 0;
-static bool     fitConfident = false;
 
 // ---------------------------------------------------------------------------
 //  TEMPO LOCK - the period actually being followed (never a single search's answer)
@@ -188,11 +238,39 @@ static volatile uint8_t  pchCount = 0;       // changes since the last publish
 // ---------------------------------------------------------------------------
 //  OUTPUT STATE
 // ---------------------------------------------------------------------------
-static bool     gridLocked  = false;         // a confident fit is being followed
+// TWO SEPARATE THINGS, and this split is the whole point of the 31 Oct 2026 changes:
+//   gridLocked - the TIMING exists and keeps running (beats, the bar count, the phase)
+//   lightsOn   - whether those beats actually reach IO48 and CH10
+// With one flag, going dark threw the tempo away and the board had to find the beat again
+// from scratch - measured at the end of Take on Me, where it came back locked on 455
+// (131.9 BPM) instead of the 355 (169.0 BPM) it had been holding seconds earlier.
+static bool     gridLocked  = false;         // the timing exists and is running
+static bool     lightsOn    = false;         // the beats reach the outputs
 static uint32_t nextBeatUs  = 0;             // the next beat instant
 static uint32_t periodUs    = 0;             // the fitted period
-static uint32_t lastFitMs   = 0;
+static uint32_t lastSignalMs = 0;            // last search that saw real signal
 static uint8_t  toneIndex   = 0;             // 0 = not started, else 1..4
+
+// THE HOLD.  The grid is moved only when the measurement is TRUSTWORTHY (see TRUST_PCT_*).
+// While it is not, the grid free-runs on the last good tempo, keeps firing, and keeps
+// listening for a new tempo; after 2 bars (HOLD_DARK_BEATS) the lights go dark while the
+// timing runs on.
+static bool     phaseHold   = false;         // true = holding: do NOT move the grid
+static uint32_t holdStartMs = 0;             // when the current hold began
+static uint8_t  darkReason  = 0;             // 0 = lit, 1 = no signal, 2 = held 2 bars
+static uint16_t phaseMarginPct = 0;          // confidence of the PHASE at the locked period
+static volatile uint32_t holdCount = 0;      // hold searches since the last publish
+static volatile uint32_t dmaxUs    = 0;      // largest grid correction this second, BEFORE
+                                             // damping = the true error of the held grid
+static uint8_t  bigCount = 0;                // consecutive searches reporting a BIG move
+static volatile uint8_t bigSeen = 0;         // highest bigCount seen this second
+// FRESH EARS.  The ratio guard and the incumbent preference both rest on one physical
+// fact - a record's tempo never jumps to a ratio of itself WHILE IT IS PLAYING.  That
+// fact does not survive an interruption.  Retaining the tempo through a silence (above)
+// means a NEW track at half or double the old tempo would otherwise be refused for ever,
+// so while the music has just been interrupted the guards are lifted and the new music
+// is allowed to pick its own tempo.  They re-arm as soon as the locked tempo is confirmed.
+static bool     freshEars   = false;
 
 static uint32_t flashCentreUs = 0;
 static bool     flashPending  = false;
@@ -296,7 +374,13 @@ static void closeFrame(uint32_t now) {
 //   * 160 BPM track - every point of BOTH grids carries a beat, so the shorter grid
 //     collects twice the excess and wins.
 // The true tempo level therefore falls out of the arithmetic.
-static int32_t bestPhaseAt(int32_t mean, uint8_t P, uint8_t *phOut) {
+// The best phase for ONE period, AND how far clear it stands of the best DIFFERENT phase
+// (at least 3 frames away, so the neighbouring frames of the same peak do not count).
+// That second number is the confidence of the PHASE, and it is what decides whether the
+// grid may be MOVED at all.  The tempo margin answers "which tempo"; this answers "do we
+// actually know where the beat is".  MEASURED: when the tempo margin is 0 the phase
+// measured from the same landscape is a coin toss, and the flash was being dragged with it.
+static int32_t bestPhaseAt(int32_t mean, uint8_t P, uint8_t *phOut, int32_t *secondOut) {
   int32_t bestS = -2000000000; uint8_t bestPh = 0;
   for (uint8_t ph = 0; ph < P; ph++) {
     int32_t s = 0; uint16_t n = 0;
@@ -305,7 +389,44 @@ static int32_t bestPhaseAt(int32_t mean, uint8_t P, uint8_t *phOut) {
     if (sc > bestS) { bestS = sc; bestPh = ph; }
   }
   *phOut = bestPh;
+  if (secondOut) {
+    int32_t secondS = -2000000000;
+    for (uint8_t ph = 0; ph < P; ph++) {
+      int16_t d = (int16_t)ph - (int16_t)bestPh;      // circular distance from the peak
+      if (d < 0) d = (int16_t)(-d);
+      if (d > (int16_t)(P / 2)) d = (int16_t)((int16_t)P - d);
+      if (d < 3) continue;                            // the same peak, not a rival
+      int32_t s = 0; uint16_t n = 0;
+      for (uint16_t idx = ph; idx < RING_N; idx += P) { s += (int32_t)ring[idx]; n++; }
+      const int32_t sc = s - (int32_t)((uint32_t)mean * (uint32_t)n);
+      if (sc > secondS) secondS = sc;
+    }
+    *secondOut = secondS;
+  }
   return bestS;
+}
+
+// Are two periods a simple musical RATIO of each other (1.5x, 2x, 3x, 4/3, or their
+// inverses 2/3, 1/2, 1/3, 3/4)?  A record's tempo never jumps to a ratio of itself, so a
+// candidate like that is the DETECTOR's ratio error, not a tempo change.
+// Tolerance 3 frames: the period is quantised to 5 ms, so 1.5 x 355 = 532.5 lands on
+// 535 - which is exactly the value the lock walked to on track 3.
+// 4/3 and 3/4 were added on 31 Oct 2026 the hard way: MEASURED (fb2l.log, t=312 s) the lock
+// slipped 450 -> 345 ms, and 345/450 = 0.767 is a DOTTED-RHYTHM ratio the old list did not
+// cover, so it passed straight through and was counted as a real tempo change.
+static bool nearRatio(uint8_t a, uint8_t b) {
+  const uint8_t big   = (a > b) ? a : b;
+  const uint8_t small = (a > b) ? b : a;
+  const int16_t want[4] = { (int16_t)((small * 3) / 2),
+                            (int16_t)(small * 2),
+                            (int16_t)(small * 3),
+                            (int16_t)((small * 4) / 3) };
+  for (uint8_t i = 0; i < 4; i++) {
+    int16_t d = (int16_t)big - want[i];
+    if (d < 0) d = -d;
+    if (d <= 3) return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +434,11 @@ static int32_t bestPhaseAt(int32_t mean, uint8_t P, uint8_t *phOut) {
 // ---------------------------------------------------------------------------
 static void runSearch(uint32_t now) {
   if (framesMade < MIN_FRAMES_FOR_SEARCH) return;
+
+  // THE SIGNAL TIMER, driven by the LEVEL alone (not by the fit).  "Literally no noise"
+  // is the only thing that darkens the lights immediately; an ambiguous fit must hold
+  // them instead.  Measured on this board: silence rp 27-42, music 375-717.
+  if (rawPeak > SILENCE_RAW_MIN) lastSignalMs = millis();
 
   uint32_t energy = 0;
   for (uint16_t i = 0; i < RING_N; i++) energy += ring[i];
@@ -323,7 +449,7 @@ static void runSearch(uint32_t now) {
   int32_t best = -2000000000; uint8_t bp = 0;
   for (uint8_t P = P_MIN_FR; P <= P_MAX_FR; P++) {
     uint8_t ph;
-    pScore[P] = bestPhaseAt(mean, P, &ph);
+    pScore[P] = bestPhaseAt(mean, P, &ph, NULL);
     if (pScore[P] > best) { best = pScore[P]; bp = P; }
   }
   // 2. the best from a genuinely DIFFERENT tempo (+/-3 frames = +/-15 ms of period)
@@ -351,6 +477,22 @@ static void runSearch(uint32_t now) {
     }
   }
 
+  // 4. THE INCUMBENT GETS THE BENEFIT OF THE DOUBT, and a ratio of the locked period is
+  //    refused outright.  MEASURED on track 3: the lock flip-flopped between 355 frames
+  //    (169.0 BPM) and 535 frames (112.1 BPM = exactly TWO THIRDS of 169) 17 times in one
+  //    track, spending seconds at a time at the wrong tempo - heard as "periods where it
+  //    goes ontime and periods where it looses it".  At the moment of each switch `mar`
+  //    was 1 or 3 per cent: the comb genuinely cannot separate the two tempos there, so
+  //    score alone will never settle it.  A 1.5x grid lands alternately ON the beat and
+  //    halfway between beats, and this track carries energy in both places.
+  if (lockedP != 0 && chosen != lockedP && !freshEars) {
+    const int32_t inc = pScore[lockedP];
+    if ((inc > 0 && pScore[chosen] < inc + inc / 8) ||   // not decisively better: hold the lock
+        nearRatio(chosen, lockedP)) {                    // 1.5x / 2x / 3x: a ratio error, not a tempo
+      chosen = lockedP;
+    }
+  }
+
   fitScore = best; fitSecond = second;
   fitMarginPct = (best > 0) ? (uint16_t)(((best - second) * 100) / best) : 0;
   searches++;
@@ -358,7 +500,6 @@ static void runSearch(uint32_t now) {
   const bool fitReal = (best > 0) &&
                        (energy >= ONSET_ENERGY_MIN) &&
                        (rawPeak > SILENCE_RAW_MIN);
-  fitConfident = fitReal;
 
   // 4. TEMPO LOCK - a record's BPM never jumps (user's rule).  A candidate within +/-
   //    2 frames of the lock is the SAME tempo and is followed silently; anything
@@ -373,10 +514,23 @@ static void runSearch(uint32_t now) {
     candP = chosen;
     if (lockedP == 0) {
       if (candCount >= LOCK_NEEDED_SEARCHES) { lockedP = candP; periodChanges++; pchCount++; }
-    } else if (candP > lockedP + 2 || candP + 2 < lockedP) {
-      if (candCount >= CHANGE_NEEDED_SEARCHES) { lockedP = candP; periodChanges++; pchCount++; }
-    } else {
-      lockedP = candP;                 // small drift: follow it, do not count a change
+    } else if (candP != lockedP) {
+      const int16_t dP = (int16_t)candP - (int16_t)lockedP;
+      const int16_t aP = (dP < 0) ? (int16_t)(-dP) : dP;
+      if (aP <= SMALL_DRIFT_FRAMES && !freshEars) {
+        // REFUSED.  A record's tempo does not drift; "follow it silently" is what let the
+        // lock walk.  See SMALL_DRIFT_FRAMES for the measurement.
+      } else {
+        // A genuinely different tempo.  It must PERSIST - CHANGE_NEEDED_SEARCHES normally,
+        // or DECISIVE_SEARCHES when it is both clear (mar) and really different (aP).
+        const uint8_t need = ((fitMarginPct >= DECISIVE_MAR_PCT) && (aP >= REAL_CHANGE_FRAMES))
+                               ? DECISIVE_SEARCHES : CHANGE_NEEDED_SEARCHES;
+        if (candCount >= need) {
+          lockedP = candP; periodChanges++; pchCount++;
+          toneIndex   = 0;               // a new track: the bar restarts at 1
+          holdStartMs = 0;               // and the 2-bar hold timer restarts with it
+        }
+      }
     }
   } else {
     candCount = 0;
@@ -384,71 +538,137 @@ static void runSearch(uint32_t now) {
 
   if (lockedP == 0) { fitRejects++; return; }
 
-  // 4. THE PHASE, re-measured AT THE LOCKED PERIOD every search.  This is what makes
-  //    the flash follow the beat rather than a clock: the beat's position in the
-  //    newest 6 seconds is re-read ten times a second.
+  // 5. THE PHASE at the locked period, AND ITS OWN CONFIDENCE.  The phase answers "where
+  //    is the beat", and phaseMarginPct says whether that answer is worth acting on.
   uint8_t ph;
-  scoreAtLocked = bestPhaseAt(mean, lockedP, &ph);
+  int32_t secondPhase = 0;
+  scoreAtLocked = bestPhaseAt(mean, lockedP, &ph, &secondPhase);
   phaseUsed = ph;
+  const int32_t psec = (secondPhase < 0) ? 0 : secondPhase;
+  phaseMarginPct = (scoreAtLocked > 0)
+                     ? (uint16_t)(((scoreAtLocked - psec) * 100) / scoreAtLocked) : 0;
 
-  if (!fitReal || scoreAtLocked <= 0) { fitRejects++; return; }
+  // 6. TRUST IT OR HOLD IT.  A fit is only followed when the tempo margin is CLEAR.
+  //    Otherwise the grid HOLDS: it free-runs on the last good tempo, keeps firing, and
+  //    keeps listening for a new one - the user's rule, "maintain the BPM and catch it
+  //    when it returns".  After 2 bars of holding, the lights go dark while the timing
+  //    runs on, because that is what an instrumental or vocal passage looks like.
+  //    MEASURED on track 3: 22 of 207 loud seconds (we 5300-6500, rp 343-653) had the
+  //    margin at 0-7 per cent, so the grid was being moved to a coin toss ten times a
+  //    second.  Those are exactly the seconds the user hears as "it gets tripped up".
+  const bool confident = fitReal &&
+                         (fitMarginPct >= (phaseHold ? TRUST_PCT_FOLLOW : TRUST_PCT_HOLD));
+  phaseHold = !confident;
+  periodUs  = (uint32_t)lockedP * FRAME_US;         // the 2-bar timer needs it
+  if (confident && chosen == lockedP) freshEars = false;   // confirmed: guards re-arm
 
-  // 5. PLACE THE GRID
-  periodUs = (uint32_t)lockedP * FRAME_US;
+  if (!phaseHold) {
+    holdStartMs = 0;
+    if (darkReason == 2) { darkReason = 0; lightsOn = true; }   // the beat is back
+  } else {
+    holdCount++;
+    if (holdStartMs == 0) {
+      holdStartMs = millis();
+    } else if (darkReason != 1 &&
+               (uint32_t)(millis() - holdStartMs) >=
+                   (uint32_t)HOLD_DARK_BEATS * (periodUs / 1000UL)) {
+      darkReason = 2;                              // 2 bars held: dark, but keep time
+      lightsOn   = false;
+      freshEars  = true;                           // the music is not continuous any more,
+                                                   // so let it put its own tempo forward
+    }
+  }
+
+  if (!fitReal || scoreAtLocked <= 0) { fitRejects++; return; }  // no grid move: free-run
+
+  // 7. PLACE THE GRID - and only ever from a measurement we trust.
   const uint32_t beatRef = now - (uint32_t)phaseUsed * FRAME_US;
   uint32_t ideal = beatRef + periodUs;
   while (timeReached(now, ideal)) ideal += periodUs;      // first beat in the future
 
   if (!gridLocked) {
     gridLocked = true;
+    lightsOn   = true;
     toneIndex  = 0;                                       // count restarts at 1
     nextBeatUs = ideal;
   } else {
-    // Snap the beat timeline onto the measured grid, by at most half a period.  The
-    // grid is ABSOLUTE - re-measured ten times a second - so nothing accumulates.
+    // Move the beat timeline onto the measured grid, by at most half a period.  The grid
+    // is ABSOLUTE - re-measured ten times a second - so nothing accumulates.
     int32_t d = (int32_t)(ideal - nextBeatUs);
     const int32_t half = (int32_t)(periodUs / 2);
     if (d > half) d -= (int32_t)periodUs;
     else if (d < -half) d += (int32_t)periodUs;
-    nextBeatUs = (uint32_t)((int32_t)nextBeatUs + d);
+    const int32_t ad = (d < 0) ? -d : d;
+    if ((uint32_t)ad > dmaxUs) dmaxUs = (uint32_t)ad;     // the grid's true error, pre-damp
+
+    bool apply = true;
+    if (ad > (int32_t)(periodUs / 4)) {
+      // A move bigger than a QUARTER PERIOD would put the beat somewhere quite different
+      // - a half-period version of it is the OFF-BEAT.  Only do it when the phase is
+      // clear and the same answer keeps coming back.
+      if (phaseMarginPct >= BIG_MOVE_PM_PCT) {
+        if (bigCount < 255) bigCount++;
+        if (bigCount > bigSeen) bigSeen = bigCount;
+      } else {
+        bigCount = 0;
+      }
+      if (bigCount < BIG_MOVE_SEARCHES) apply = false;    // not corroborated: stay put
+    } else {
+      bigCount = 0;
+      if (phaseHold) d /= HOLD_SNAP_DIV;                  // damped, NEVER frozen
+    }
+    if (apply) {
+      bigCount = 0;
+      nextBeatUs = (uint32_t)((int32_t)nextBeatUs + d);
+    }
   }
-  lastFitMs = millis();
 }
 
 // ---------------------------------------------------------------------------
-//  OUTPUTS - fire on the FITTED grid; nothing here is a free-running clock
+//  OUTPUTS - fire on the grid: measured when it can be trusted, held when it cannot
 // ---------------------------------------------------------------------------
 static uint16_t frameTick = 0;
 
 static void serviceOutputs(uint32_t now) {
-  // A fit that has gone stale means silence as far as the lights are concerned.
-  if (gridLocked && (uint32_t)(millis() - lastFitMs) > FIT_LOST_MS) {
-    gridLocked = false;
-    silences++;
-    digitalWrite(PIN_IO48, LOW); io48Active = false;
-    digitalWrite(PIN_CH10, LOW); ch10Active = false;
-    BEAT = false; BEAT_STEP = false;
-    toneIndex = 0; beatCount = 0;
-    lockedP = 0; candP = 0; candCount = 0;    // a new track must re-lock from scratch
+  // DARK.  The LIGHTS go out, the TIMING DOES NOT: the tempo, the phase and the bar count
+  // are all kept, so the beat's return needs no re-lock at all.
+  //   reason 1 = no signal at all  (measured: silence rp 27-42, music 375-717)
+  //   reason 2 = held for 2 bars without a trustworthy measurement (set in runSearch)
+  if (gridLocked) {
+    const bool noSignal = (uint32_t)(millis() - lastSignalMs) > SIGNAL_LOST_MS;
+    if (noSignal) {
+      if (lightsOn) { lightsOn = false; darkReason = 1; silences++; }
+      flashPending = false;
+      digitalWrite(PIN_IO48, LOW); io48Active = false;
+      digitalWrite(PIN_CH10, LOW); ch10Active = false;
+      BEAT = false; BEAT_STEP = false;
+    } else if (darkReason == 1) {
+      // The signal is back: light up again on the held tempo and give the fit a fresh
+      // 2 bars to prove itself, whether it is the same track drifted or a new one.
+      darkReason = 0; holdStartMs = 0; lightsOn = true;
+      freshEars  = true;   // the music was interrupted: allow it to pick a new tempo
+    }
   }
 
-  // THE BEAT
+  // THE BEAT - the grid ALWAYS runs, whether the beats reach the lights is separate
   if (gridLocked && timeReached(now, nextBeatUs)) {
     toneIndex = (uint8_t)((toneIndex % 4) + 1);
     beatCount = toneIndex;
     stepThisBeat = (toneIndex == 1 || toneIndex == 3);
     beatsFired++;
-    flashCentreUs = nextBeatUs + FLASH_OFFSET_US;      // the MIDDLE of the beat
-    flashPending  = true;
-    winStartUs = flashCentreUs - BEAT_WIN_HALF_US;
-    winEndUs   = flashCentreUs + BEAT_WIN_HALF_US;
+    if (lightsOn) {
+      flashCentreUs = nextBeatUs + FLASH_OFFSET_US;    // the MIDDLE of the beat
+      flashPending  = true;
+      winStartUs = flashCentreUs - BEAT_WIN_HALF_US;
+      winEndUs   = flashCentreUs + BEAT_WIN_HALF_US;
+    }
     nextBeatUs += periodUs;                            // one beat ahead only
-    // PER-BEAT FIT: the tempo actually used for THIS flash.  If it ever differs from
-    // the previous beat without the music changing, it is visible here at once.
-    if (Serial) Serial.printf("BB c=%u per=%lu bpm=%.1f lock=%u ph=%u\n",
+    // PER-BEAT FIT: the tempo actually used for THIS flash, and whether the lights were
+    // on for it.  `beat` minus `io48` is exactly the beats fired while dark.
+    if (Serial) Serial.printf("BB c=%u per=%lu bpm=%.1f lock=%u ph=%u d=%u\n",
                               (unsigned)toneIndex, (unsigned long)(periodUs / 1000u),
                               periodUs ? (60000000.0 / (double)periodUs) : 0.0,
-                              (unsigned)lockedP, (unsigned)phaseUsed);
+                              (unsigned)lockedP, (unsigned)phaseUsed, (unsigned)darkReason);
   }
 
   // THE FLASH, at the beat's middle
@@ -485,7 +705,7 @@ static void publishIfDue() {
   if (ms - lastPublishMs < 1000) return;
   lastPublishMs = ms;
   Serial.printf(
-      "FT bpm=%.1f per=%lu lock=%u ph=%u fit=%ld sec=%ld mar=%u we=%lu rp=%.0f ons=%lu cnt=%u beat=%lu io48=%lu ch10=%lu sil=%lu sch=%lu rej=%lu chg=%lu pch=%u lk=%u\n",
+      "FT bpm=%.1f per=%lu lock=%u ph=%u fit=%ld sec=%ld mar=%u we=%lu rp=%.0f ons=%lu cnt=%u beat=%lu io48=%lu ch10=%lu sil=%lu sch=%lu rej=%lu chg=%lu pch=%u lk=%u pm=%u hold=%lu dark=%u dmax=%lu big=%u\n",
       periodUs ? (60000000.0 / (double)periodUs) : 0.0,
       (unsigned long)(periodUs / 1000u),
       (unsigned)lockedP, (unsigned)phaseUsed,
@@ -495,8 +715,13 @@ static void publishIfDue() {
       (unsigned long)io48Flashes, (unsigned long)ch10Flashes,
       (unsigned long)silences, (unsigned long)searches, (unsigned long)fitRejects,
       (unsigned long)periodChanges, (unsigned)pchCount,
-      gridLocked ? 1u : 0u);
+      gridLocked ? 1u : 0u,
+      (unsigned)phaseMarginPct, (unsigned long)holdCount, (unsigned)darkReason,
+      (unsigned long)dmaxUs, (unsigned)bigSeen);
   pchCount = 0;
+  holdCount = 0;
+  dmaxUs = 0;
+  bigSeen = 0;
   onsetFrames = 0;
 }
 
