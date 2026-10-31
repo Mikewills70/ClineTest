@@ -666,8 +666,9 @@ static void serviceOutputs(uint32_t now) {
     io48OffUs = flashCentreUs + (uint32_t)IO48_MS * 1000UL;
     io48Flashes++;
     if (stepThisBeat) {
-      digitalWrite(PIN_CH10, HIGH); ch10Active = true;
-      ch10OffUs = flashCentreUs + (uint32_t)CH10_MS * 1000UL;
+      // CHANNEL 10 IS NO LONGER DRIVEN (user, 31 Oct 2026): from now on only IO48 flashes.
+      // The 1&3 marker is still counted - BEAT_STEP is what the lightshow reads, and the
+      // `ch10` column in the log is how those marks are checked.  PIN_CH10 is left LOW.
       ch10Flashes++;
     }
   }
