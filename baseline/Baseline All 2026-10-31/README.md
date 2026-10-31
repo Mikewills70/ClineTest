@@ -136,6 +136,56 @@ One `BB` line per beat: `BB c per bpm lock ph d` — count, tempo, phase, and th
 phase repeats on a fixed 20-beat cycle whatever the lock is doing. It is not a measure of
 phase stability, and a constant timing offset cannot be seen in it at all.
 
+## REVERTED — 31 Oct 2026: this is the build the board was returned to
+
+The live file is again **byte-identical** to the copy in this folder (SHA-256 verified
+`D4AC669B…`, compiles 315,446 bytes).
+
+**Everything tried after this baseline was reverted**, including three changes that were
+real and verified in the data:
+
+1. **The tempo walk** — `SMALL_DRIFT_FRAMES`, `REAL_CHANGE_FRAMES`, and 4/3 joining the
+   ratio guard. Verified: `per` held 355 ms for all 155 locked seconds of track 3, where
+   the run before had 21 seconds of 335/345/350 ms excursions.
+2. **A 3/4 dotted-rhythm slip** (450 → 345 ms, ratio 0.767) that the ratio guard did not
+   cover, and was counted as a real tempo change.
+3. **The hold keeping the tempo**, which stopped the period walking to 345 ms while holding.
+
+**And one change that failed and caused a regression, which is why this revert exists.**
+An attempt to stop the lights marking the off-beat by bounding how far the grid may move
+from a phase anchored early in a track:
+
+```
+MEASURED (fb2o.log, track 1, per = 520 ms)
+t=58s  lock placed
+t=61s  phase fixed from a VERY clear measurement (pmx = 75)     gdr =      0 us
+t=67s                                                           gdr = -89748 us  (-89.7 ms)
+t=69s onward   pinned at -99526 us  (-99.5 ms, 19.1% of the period)
+```
+
+The anchor was **correct**. The grid then followed the measurement 100 ms away from it and
+sat there for the whole track, because the allowance it had been given — a quarter period,
+130 ms — was five to ten times larger than the difference the ear can hear. The user heard
+exactly that: *"drifting behind the beat again on track 1 after a few seconds"*. **The
+number was invented; there was no measurement behind it.** This build snaps the grid fully
+to the measurement every search, which is why tracks 1, 2 and 4 are on time in it.
+
+## THE LIMIT OF THIS DETECTOR — stated once, not to be re-litigated
+
+**The comb's own phase estimate wanders by about 100 ms during a track.** Whatever the grid
+follows, the marking inherits that wander. Freezing the phase instead drifts out by the
+period's quantisation. **Tracking the measurement fully — what this build does — is the best
+available behaviour**, and it is the state with the best verdicts on record: track 1 on
+time, track 2 on time, track 4 "very good".
+
+**The off-beat marking** — measured at **36–47 % of locked time on track 3, against 0–2 % on
+the other tracks** — is a property of the material: a bass line in eighths puts a strong
+onset every *half* beat, and the comb genuinely cannot tell the beat from the off-beat (its
+own phase margin is below 25 % in 55 of the 68 off-beat seconds). Resolving it requires the
+detector to hear something different — a narrower band around the kick — which would trade
+accuracy on every other track. **User's decision, 31 Oct 2026: accept it, and do not tune
+the detector to one track.**
+
 ## Related
 
 - `Fresh_Beat2\Fresh_Beat2.ino` — the live source. This baseline is a frozen copy of it.
