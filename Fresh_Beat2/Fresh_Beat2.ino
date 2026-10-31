@@ -56,6 +56,12 @@ static const uint8_t PIN_CH10  = 42;
 //  OUTPUT TIMING
 // ---------------------------------------------------------------------------
 static const uint16_t IO48_MS     = 50;
+// REM (31 Oct 2026): CH10_MS IS REDUNDANT.  From now on only IO48 flashes and the Channel
+// 10 relay is never driven.  It is kept - with ch10Active and ch10OffUs below - so the
+// channel-10 pulse can be put back at a future date if it is ever needed, by restoring two
+// lines in the `if (stepThisBeat)` block of serviceOutputs():
+//     digitalWrite(PIN_CH10, HIGH); ch10Active = true;
+//     ch10OffUs = flashCentreUs + (uint32_t)CH10_MS * 1000UL;
 static const uint16_t CH10_MS     = 50;
 static const uint16_t BEAT_WIN_MS = 25;
 static const int32_t  BEAT_WIN_HALF_US = (BEAT_WIN_MS * 1000L) / 2;
@@ -267,6 +273,9 @@ static bool     stepThisBeat  = false;
 static uint32_t winStartUs = 0, winEndUs = 0;
 static bool     io48Active = false, ch10Active = false;
 static uint32_t io48OffUs = 0, ch10OffUs = 0;
+// REM (31 Oct 2026): ch10Active and ch10OffUs are REDUNDANT too - Channel 10 is no longer
+// driven, so nothing ever sets either of them.  They are kept so the channel-10 pulse can
+// be restored at a future date; the two lines to put back are quoted beside CH10_MS above.
 
 static volatile bool BEAT = false, BEAT_STEP = false;
 static volatile uint8_t beatCount = 0;
@@ -669,6 +678,7 @@ static void serviceOutputs(uint32_t now) {
       // CHANNEL 10 IS NO LONGER DRIVEN (user, 31 Oct 2026): from now on only IO48 flashes.
       // The 1&3 marker is still counted - BEAT_STEP is what the lightshow reads, and the
       // `ch10` column in the log is how those marks are checked.  PIN_CH10 is left LOW.
+      // REM: the two lines that used to drive this pin are quoted beside CH10_MS above.
       ch10Flashes++;
     }
   }
