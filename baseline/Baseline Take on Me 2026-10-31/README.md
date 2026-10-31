@@ -36,6 +36,10 @@ margin at the moment of the switch down at **1–3 per cent**. A 1.5x grid lands
 alternately on the beat and halfway between beats, and this track carries energy in
 both places, so score alone could never settle it.
 
+**Units:** `per` is **milliseconds** throughout this project — 355 ms = 71 of the 5 ms
+frames, 535 ms = 107 frames. (An earlier version of this README called those numbers
+frames; they are not.)
+
 Two guards were added to the lock decision and nothing else was touched:
 
 ```c

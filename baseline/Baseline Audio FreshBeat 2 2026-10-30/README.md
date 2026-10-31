@@ -113,7 +113,7 @@ FT bpm per lock ph fit sec mar we rp ons cnt beat io48 ch10 sil sch rej chg pch 
 
 | field | meaning |
 |---|---|
-| `bpm` / `per` | fitted tempo and its period in 5 ms frames |
+| `bpm` / `per` | fitted tempo / period **in milliseconds** — 355 means 355 ms, i.e. 71 of the 5 ms frames |
 | `lock` / `ph` | locked period in frames / beat age in frames |
 | `fit` / `sec` / `mar` | best score, second-best, and the margin % between them |
 | `we` / `rp` | window onset energy / raw peak (the silence gate reads `rp`) |
